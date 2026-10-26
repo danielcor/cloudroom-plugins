@@ -9,7 +9,7 @@ export const MUSE_MODELS = ["muse-wonder-full-1.0", "muse-wonder-1.0", "muse-spa
 const REASONING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 // muse-acp prints Muse's live catalog (the adapter only learns it after a session
-// starts), exposes Muse's effort as the "reasoningEffort" config option, and
+// starts) with Wonder Full first, which the bridge makes the default; it exposes Muse's effort as the "reasoningEffort" config option, and
 // takes --full to turn Muse's OS sandbox off. Other permission prompts reach
 // Cloudroom as approvals; in Full mode the bridge approves them.
 export function museLaunchSpec(command: string): AcpLaunchSpec {
@@ -18,7 +18,7 @@ export function museLaunchSpec(command: string): AcpLaunchSpec {
     command: command.trim() || DEFAULT_MUSE_ACP_COMMAND,
     args: [],
     env: {},
-    modelCli: { listArgs: ["--list-models"], primaryModels: [...MUSE_MODELS] },
+    modelCli: { listArgs: ["--list-models", "--first", MUSE_MODELS[0]], primaryModels: [...MUSE_MODELS] },
     nativeReasoning: { configId: "reasoningEffort", supportedLevels: [...REASONING_LEVELS], defaultLevel: "high" },
     permissionCli: { full: ["--full"] },
   };

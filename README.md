@@ -153,7 +153,7 @@ Every session from the plugin or `muse-relay` runs with:
 
 | Off | How |
 | --- | --- |
-| Contributor mode (Meta may train on the session) | `--contributor-mode off` and `MUSE_CONTRIBUTOR_MODE=0`, and only non-`-contributor` model ids are offered or accepted. The flag alone is not enough: Muse's server default model is `muse-wonder-1.0-contributor`, so the model id is always set explicitly. |
+| Contributor mode (Meta may train on the session) | `--contributor-mode off` and `MUSE_CONTRIBUTOR_MODE=0`. The flag alone is not enough: Muse's server default model is `muse-wonder-1.0-contributor`. So only non-`-contributor` models are listed, the plugin runs the plain twin of any `-contributor` id a thread names and gives a thread without a model Wonder Full, and `muse-relay` refuses `-contributor` ids. |
 | Your Claude Code / Codex personal rules (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) and their skills | `MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=1` (`--no-foreign-personal-context` for `muse exec`). The `context.foreign_personal_*` settings did not remove the rules in a `-c` override. |
 | Reminder observers (extra `muse-spark` calls on every turn) | `-c run.reminder_roster=[]` (`--disable-reminders` for `muse exec`) |
 | Hooks from your settings and `managed_hooks_path` (for example Orca's) | `-c managed_hooks_path=null -c hooks={}` |

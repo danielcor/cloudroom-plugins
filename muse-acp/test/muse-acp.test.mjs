@@ -41,6 +41,8 @@ test("formatModels: one `id - name` line per model, contributor variants left ou
     { id: "muse-spark-1.3", name: "Spark" },
   ];
   assert.equal(formatModels(models), "muse-wonder-full-1.0 - Muse Wonder Full 1.0\nmuse-spark-1.3 - Spark\n");
+  assert.equal(formatModels(models, "muse-spark-1.3"), "muse-spark-1.3 - Spark\nmuse-wonder-full-1.0 - Muse Wonder Full 1.0\n");
+  assert.equal(formatModels(models, "muse-wonder-full-1.0-contributor"), "muse-wonder-full-1.0 - Muse Wonder Full 1.0\nmuse-spark-1.3 - Spark\n");
 });
 
 test("muse-clean: serve and exec get contributor mode off, no reminders and no hooks; the rest passes through", () => {

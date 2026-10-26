@@ -27,7 +27,7 @@ describe("provider-muse", () => {
       command: "muse-acp",
       args: [],
       env: {},
-      modelCli: { listArgs: ["--list-models"], primaryModels: primary },
+      modelCli: { listArgs: ["--list-models", "--first", "muse-wonder-full-1.0"], primaryModels: primary },
       nativeReasoning: { configId: "reasoningEffort", supportedLevels: ["low", "medium", "high", "xhigh", "max"], defaultLevel: "high" },
       permissionCli: { full: ["--full"] },
     });

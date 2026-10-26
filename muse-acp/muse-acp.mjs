@@ -3,9 +3,9 @@
 // sessions started from Cloudroom stay clean: contributor mode off, no foreign
 // personal rules or skills (Claude Code / Codex), and muse itself run through
 // muse-clean (no reminder observers, no hooks). `--full` also turns Muse's OS
-// sandbox off. `--list-models` prints Muse's live model catalog, one
-// `id - name` line per model, without contributor variants (the adapter only
-// learns the catalog after its first session starts a Muse host).
+// sandbox off. `--list-models [--first ID]` prints Muse's live model catalog, one
+// `id - name` line per model, ID first, without contributor variants (the adapter
+// only learns the catalog after its first session starts a Muse host).
 // Muse keeps its own login (or META_API_KEY); nothing here reads it.
 
 import { accessSync, constants, statSync } from "node:fs";
@@ -54,17 +54,22 @@ const isContributor = (id) => id.endsWith("-contributor");
 // Muse labels most models with their id; "muse-wonder-full-1.0" reads better as "Muse Wonder Full 1.0".
 const label = (m) => (m.name === m.id ? m.id.split("-").map((w) => w[0].toUpperCase() + w.slice(1)).join(" ") : m.name);
 
-export function formatModels(models) {
-  return models.filter((m) => !isContributor(m.id)).map((m) => `${m.id} - ${label(m)}\n`).join("");
+// The first line is the client's default (Cloudroom's bridge makes it so).
+export function formatModels(models, first) {
+  const rows = models.filter((m) => !isContributor(m.id));
+  rows.sort((a, b) => (b.id === first) - (a.id === first));
+  return rows.map((m) => `${m.id} - ${label(m)}\n`).join("");
 }
 
-async function listModels() {
+async function listModels(first) {
   const { MuseModelDiscovery } = await import("@bex-co/muse-code-acp/dist/model-discovery.js");
   const discovery = new MuseModelDiscovery({ env: process.env, logger: { log: (m) => console.error(m) }, timeoutMs: 25_000 });
   const catalog = await discovery.discover(process.cwd());
   await discovery.dispose();
-  if (catalog.status !== "available" || catalog.models.length === 0) throw new Error(catalog.reason ?? "Muse listed no models");
-  process.stdout.write(formatModels(catalog.models));
+  if (catalog.status !== "available") throw new Error(catalog.reason);
+  // A signed-out muse lists nothing; this wording makes Cloudroom show its sign-in hint.
+  if (catalog.models.length === 0) throw new Error("Authentication required: Muse listed no models; run `muse login` on this machine or set META_API_KEY");
+  process.stdout.write(formatModels(catalog.models, first));
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === (await import("node:fs")).realpathSync(process.argv[1])) {
@@ -78,7 +83,8 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === (await import("node:fs
   if (plan.env.MUSE_ACP_FULL !== "1") delete process.env.MUSE_ACP_FULL;
   Object.assign(process.env, plan.env);
   if (plan.argv.includes("--list-models")) {
-    await listModels().catch((error) => {
+    const at = plan.argv.indexOf("--first");
+    await listModels(at >= 0 ? plan.argv[at + 1] : undefined).catch((error) => {
       console.error(`muse-acp: ${error.message}`);
       process.exitCode = 1;
     });
