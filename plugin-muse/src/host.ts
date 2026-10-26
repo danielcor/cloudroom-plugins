@@ -24,13 +24,25 @@ export function resolveLaunchSpecs(value: unknown, depth = 0): void {
 
 const CONTRIBUTOR = "-contributor";
 
+// The adapter also accepts provider-qualified choices: "muse-model:" + URI-encoded JSON [provider, profile, id]
+// (it rejects one it cannot match to its catalog).
+function modelId(model: string): string {
+  if (!model.startsWith("muse-model:")) return model;
+  try {
+    const id: unknown = (JSON.parse(decodeURIComponent(model.slice("muse-model:".length))) as unknown[])[2];
+    return typeof id === "string" ? id : model;
+  } catch {
+    return model;
+  }
+}
+
 // A "-contributor" model is the same model with Meta allowed to train on the session:
 // run its plain twin. No model (or the bridge's "acp-default") would leave the choice to
 // the adapter, which takes the user's Muse settings: run Wonder Full instead.
 export function pinModel(options: Json): void {
   const model = options["model"];
   if (typeof model !== "string" || model === "" || model === "acp-default") options["model"] = MUSE_MODELS[0];
-  else if (model.endsWith(CONTRIBUTOR)) options["model"] = model.slice(0, -CONTRIBUTOR.length);
+  else if (modelId(model).endsWith(CONTRIBUTOR)) options["model"] = modelId(model).slice(0, -CONTRIBUTOR.length);
 }
 
 export function rewriteLine(line: string): string {

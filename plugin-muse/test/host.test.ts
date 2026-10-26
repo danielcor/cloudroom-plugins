@@ -39,6 +39,9 @@ describe("thread model pinning", () => {
   it("runs the plain twin of a contributor model", () => {
     expect(model("muse-wonder-full-1.0-contributor", "thread/start")).toBe("muse-wonder-full-1.0");
     expect(model("muse-spark-1.3-contributor")).toBe("muse-spark-1.3");
+    const qualified = (id: string) => `muse-model:${encodeURIComponent(JSON.stringify(["meta", null, id]))}`;
+    expect(model(qualified("muse-wonder-full-1.0-contributor"))).toBe("muse-wonder-full-1.0");
+    expect(model(qualified("muse-spark-1.2"))).toBe(qualified("muse-spark-1.2"));
   });
 
   it("gives a thread without a model Wonder Full, and keeps a chosen one", () => {
