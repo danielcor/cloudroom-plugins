@@ -129,6 +129,17 @@ function addUsage(total, u = {}) {
 }
 const ZERO_USAGE = { inputTokens: 0, outputTokens: 0, thoughtTokens: 0, cachedReadTokens: 0, totalTokens: 0 };
 
+// Resolves once the process has exited: SIGTERM, then SIGKILL after a grace period.
+function killProc(proc) {
+  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
+  const exited = new Promise((resolve) => proc.once("exit", resolve));
+  proc.stdin.end();
+  proc.kill("SIGTERM");
+  const timer = setTimeout(() => proc.kill("SIGKILL"), KILL_GRACE_MS);
+  timer.unref();
+  return exited.then(() => clearTimeout(timer));
+}
+
 export class AgyAcpAgent {
   constructor({ send, opts, spawnAgy, listModels }) {
     this.send = send;
@@ -141,6 +152,7 @@ export class AgyAcpAgent {
     });
     this.models = null;
     this.sessions = new Map();
+    this.children = new Set(); // every live agy process, so shutdown can wait for all of them
     this.stateDir = opts.stateDir || join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "agy-acp", "sessions");
   }
 
@@ -291,6 +303,8 @@ export class AgyAcpAgent {
     if (s.proc) this.stopProc(s);
     const wanted = s.conversation;
     const proc = this.spawnAgy(this.agyArgs(s), s.cwd);
+    this.children.add(proc);
+    proc.once("exit", () => this.children.delete(proc));
     s.proc = proc;
     s.procKey = key;
     s.stderr = "";
@@ -347,17 +361,10 @@ export class AgyAcpAgent {
     });
   }
 
-  // Resolves once the agy process has exited (SIGTERM, then SIGKILL after a grace period).
   stopProc(s) {
     const proc = s.proc;
     s.proc = null;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
-    const exited = new Promise((resolve) => proc.once("exit", resolve));
-    proc.stdin.end();
-    proc.kill("SIGTERM");
-    const timer = setTimeout(() => proc.kill("SIGKILL"), KILL_GRACE_MS);
-    timer.unref();
-    return exited.then(() => clearTimeout(timer));
+    return proc ? killProc(proc) : Promise.resolve();
   }
 
   // ---- turns ----
@@ -453,7 +460,8 @@ export class AgyAcpAgent {
   }
 
   shutdown() {
-    return Promise.all([...this.sessions.values()].map((s) => this.stopProc(s)));
+    for (const s of this.sessions.values()) s.proc = null;
+    return Promise.all([...this.children].map(killProc));
   }
 }
 

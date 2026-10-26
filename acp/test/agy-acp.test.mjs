@@ -130,29 +130,57 @@ test("shutdown waits for agy to exit, escalating to SIGKILL", async () => {
   assert.equal(proc.signalCode, "SIGKILL");
 });
 
-test("the CLI waits for agy on stdin close plus SIGTERM, leaving no orphan", async () => {
+// Runs the real CLI against a fake agy that ignores SIGTERM and stdin EOF; returns the agy pids.
+async function runCli({ env = {}, script }) {
   const dir = mkdtempSync(join(tmpdir(), "agy-acp-cli-"));
   const pidLog = join(dir, "pids");
   const cli = spawn(process.execPath, [join(here, "..", "agy-acp.mjs"), "--agy", join(here, "fake-agy"), "--state-dir", join(dir, "state")], {
-    env: { ...process.env, FAKE_AGY_FIXTURE: fixture("two-turn-read-file.ndjson"), FAKE_AGY_IGNORE_SIGTERM: "1", FAKE_AGY_PID_LOG: pidLog },
+    env: { ...process.env, FAKE_AGY_FIXTURE: fixture("two-turn-read-file.ndjson"), FAKE_AGY_IGNORE_SIGTERM: "1", FAKE_AGY_PID_LOG: pidLog, ...env },
     stdio: ["pipe", "pipe", "inherit"],
   });
   const lines = [];
   createInterface({ input: cli.stdout }).on("line", (l) => lines.push(JSON.parse(l)));
-  const reply = async (id) => {
-    while (!lines.some((m) => m.id === id)) await new Promise((r) => setTimeout(r, 20));
-    return lines.find((m) => m.id === id).result;
+  let id = 0;
+  const send = (method, params) => cli.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...(method === "session/cancel" ? {} : { id: ++id }), method, params })}\n`);
+  const reply = async (rid) => {
+    while (!lines.some((m) => m.id === rid)) await new Promise((r) => setTimeout(r, 20));
+    return lines.find((m) => m.id === rid).result;
   };
-  cli.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } })}\n`);
-  const { sessionId } = await reply(1);
-  cli.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId, prompt: text("read note.txt") } })}\n`);
-  await reply(2);
   const exited = new Promise((r) => cli.once("exit", r));
-  cli.stdin.end();
-  cli.kill("SIGTERM");
+  await script({ cli, send, reply, waitForPid: async () => { while (!existsSync(pidLog)) await new Promise((r) => setTimeout(r, 20)); } });
   await exited;
-  const pid = Number(readFileSync(pidLog, "utf8").trim());
-  assert.throws(() => process.kill(pid, 0), /ESRCH/, "agy was killed before agy-acp exited");
+  return readFileSync(pidLog, "utf8").trim().split("\n").map(Number);
+}
+
+const assertAllDead = (pids) => {
+  for (const pid of pids) assert.throws(() => process.kill(pid, 0), /ESRCH/, `agy ${pid} was killed before agy-acp exited`);
+};
+
+test("the CLI waits for agy on stdin close plus SIGTERM, leaving no orphan", async () => {
+  assertAllDead(await runCli({
+    script: async ({ cli, send, reply }) => {
+      send("session/new", { cwd: "/tmp", mcpServers: [] });
+      const { sessionId } = await reply(1);
+      send("session/prompt", { sessionId, prompt: text("read note.txt") });
+      await reply(2);
+      cli.stdin.end();
+      cli.kill("SIGTERM");
+    },
+  }));
+});
+
+test("the CLI waits for an agy whose start was cancelled, leaving no orphan", async () => {
+  assertAllDead(await runCli({
+    env: { FAKE_AGY_INIT_DELAY_MS: "20000" },
+    script: async ({ cli, send, reply, waitForPid }) => {
+      send("session/new", { cwd: "/tmp", mcpServers: [] });
+      const { sessionId } = await reply(1);
+      send("session/prompt", { sessionId, prompt: text("read note.txt") });
+      await waitForPid();
+      send("session/cancel", { sessionId });
+      cli.stdin.end(); // quit while the cancelled start is still being torn down
+    },
+  }));
 });
 
 test("a first prompt fails loudly when the session's conversation id cannot be saved", async () => {

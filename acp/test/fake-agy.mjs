@@ -13,6 +13,10 @@ if (args[0] === "models") {
   process.exit(0);
 }
 if (process.env.FAKE_AGY_ARGS_LOG) appendFileSync(process.env.FAKE_AGY_ARGS_LOG, `${JSON.stringify(args)}\n`);
+if (process.env.FAKE_AGY_IGNORE_SIGTERM === "1") {
+  process.on("SIGTERM", () => {});
+  setInterval(() => {}, 1000); // a hung agy: stays up after stdin closes
+}
 if (process.env.FAKE_AGY_PID_LOG) appendFileSync(process.env.FAKE_AGY_PID_LOG, `${process.pid}\n`);
 const lines = readFileSync(process.env.FAKE_AGY_FIXTURE, "utf8").split("\n").filter(Boolean);
 const init = JSON.parse(lines[0]);
@@ -21,10 +25,6 @@ const known = conv !== "missing";
 if (!known) process.stderr.write(`warning: conversation "${conv}" not found\n`);
 init.conversation_id = known ? conv : "99999999-0000-0000-0000-000000000000";
 setTimeout(() => process.stdout.write(`${JSON.stringify(init)}\n`), Number(process.env.FAKE_AGY_INIT_DELAY_MS ?? 0));
-if (process.env.FAKE_AGY_IGNORE_SIGTERM === "1") {
-  process.on("SIGTERM", () => {});
-  setInterval(() => {}, 1000); // a hung agy: stays up after stdin closes
-}
 
 const turns = [[]];
 for (const line of lines.slice(1)) {
