@@ -10,7 +10,7 @@ Argon does the work. You are a thin relay: pass the user's message to Argon, sho
 ## Setup (once per sandbox)
 
 ```bash
-ARGON=$(command -v argon || ls /repos/cloudroom-argon/cli/argon "$HOME"/cloudroom-argon/cli/argon 2>/dev/null | head -1)
+ARGON=$(command -v argon || ls /repos/cloudroom-plugins/cli/argon /repos/cloudroom-argon/cli/argon "$HOME"/cloudroom-plugins/cli/argon "$HOME"/cloudroom-argon/cli/argon 2>/dev/null | head -1)
 "$ARGON" setup
 ```
 
@@ -45,7 +45,7 @@ For each user message, run it verbatim, in the project directory:
 
 A cheap Cloud thread that only forwards messages:
 
-1. Make sure the project's Cloud environment includes the `danielcor/cloudroom-argon` repo (it appears under `/repos`)
+1. Make sure the project's Cloud environment includes the `danielcor/cloudroom-plugins` repo (it appears as `/repos/cloudroom-plugins`; older sandboxes mount it as `/repos/cloudroom-argon`)
    and that the project's `.env` has `ARGON_AGY_TOKEN_B64` (see the README: `argon export-token >> .env`).
 2. New Cloud thread, provider Claude Code, model `claude-haiku-5-5`.
-3. First message: `Read /repos/cloudroom-argon/skills/argon/SKILL.md and follow it. From now on relay everything I write to Argon.`
+3. First message: `Read /repos/cloudroom-plugins/skills/argon/SKILL.md and follow it. From now on relay everything I write to Argon.`
