@@ -189,8 +189,8 @@ Each machine that runs Muse threads needs muse (signed in), Node 22 or newer, an
    room-cli provider models acp-muse --machine aipc-ubuntu       # Muse Wonder Full 1.0 (default), ...
    ```
 
-A machine without muse-acp shows only "Agent default" under `room-cli provider models acp-muse --machine <name>`.
-Install step 1 there, then add `--restart`.
+A machine without muse-acp, or with a signed-out muse, shows "No models available" under
+`room-cli provider models acp-muse --machine <name>`. Do step 1 there (`muse login` included), then list again.
 
 ### Start a Muse thread
 
