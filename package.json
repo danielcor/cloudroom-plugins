@@ -1,5 +1,5 @@
 {
   "name": "cloudroom-argon",
   "private": true,
-  "scripts": { "test": "node --test" }
+  "scripts": { "test": "node --test test/*.test.js" }
 }

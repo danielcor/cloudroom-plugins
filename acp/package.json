@@ -1,0 +1,12 @@
+{
+  "name": "agy-acp",
+  "version": "0.1.0",
+  "description": "Agent Client Protocol (ACP) adapter for the Google Antigravity CLI (agy)",
+  "type": "module",
+  "bin": { "agy-acp": "./agy-acp.mjs" },
+  "files": ["agy-acp.mjs", "README.md"],
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "license": "MIT",
+  "private": true
+}
