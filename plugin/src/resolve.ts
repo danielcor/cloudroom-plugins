@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { accessSync, constants, existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import type { AcpLaunchSpec } from "@get-bb/plugin-sdk/provider-bridge/acp";
@@ -12,15 +12,25 @@ export function extraBinDirs(home = homedir()): string[] {
 interface Deps {
   env?: NodeJS.ProcessEnv;
   home?: string;
-  exists?: (path: string) => boolean;
+  exists?: (path: string) => boolean; // a directory to put on PATH
+  executable?: (path: string) => boolean; // a command to launch
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
 }
 
 // Finds a bare command on PATH, then in the extra dirs. Paths with a separator are left alone.
 export function resolveCommand(command: string, pathValue: string, deps: Deps = {}): string {
   if (command.includes("/") || isAbsolute(command)) return command;
-  const exists = deps.exists ?? existsSync;
+  const executable = deps.executable ?? isExecutableFile;
   for (const dir of [...pathValue.split(delimiter), ...extraBinDirs(deps.home)]) {
-    if (dir && exists(join(dir, command))) return join(dir, command);
+    if (dir && executable(join(dir, command))) return join(dir, command);
   }
   return command;
 }

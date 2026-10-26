@@ -1,10 +1,13 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { resolveCommand, resolveLaunchSpec } from "../src/resolve.js";
 import { rewriteLine } from "../src/host.js";
 import { agyLaunchSpec } from "../src/declaration.js";
 
 const home = "/home/u";
-const files = (...paths: string[]) => ({ home, exists: (p: string) => paths.includes(p) });
+const files = (...paths: string[]) => ({ home, executable: (p: string) => paths.includes(p) });
 
 describe("resolveCommand", () => {
   it("finds a bare name on PATH first", () => {
@@ -13,6 +16,10 @@ describe("resolveCommand", () => {
   it("falls back to the extra dirs in order", () => {
     expect(resolveCommand("agy-acp", "/usr/bin", files("/opt/homebrew/bin/agy-acp", "/home/u/.npm-global/bin/agy-acp"))).toBe("/home/u/.npm-global/bin/agy-acp");
     expect(resolveCommand("agy-acp", "/usr/bin", files("/opt/homebrew/bin/agy-acp"))).toBe("/opt/homebrew/bin/agy-acp");
+  });
+  it("skips directories and non-executable files on the way", () => {
+    const executable = (p: string) => p === "/home/u/.npm-global/bin/agy-acp"; // /usr/bin/agy-acp exists but is not executable
+    expect(resolveCommand("agy-acp", "/usr/bin", { home, executable })).toBe("/home/u/.npm-global/bin/agy-acp");
   });
   it("leaves a missing name and any path untouched", () => {
     expect(resolveCommand("agy-acp", "/usr/bin", files())).toBe("agy-acp");
@@ -28,7 +35,8 @@ describe("resolveLaunchSpec", () => {
     const spec = resolveLaunchSpec(agyLaunchSpec("agy-acp"), {
       home,
       env: { PATH: "/usr/bin:/bin" },
-      exists: (p) => [...existing, "/opt/homebrew/bin/agy-acp"].includes(p),
+      exists: (p) => existing.includes(p),
+      executable: (p) => p === "/opt/homebrew/bin/agy-acp",
     });
     expect(spec.command).toBe("/opt/homebrew/bin/agy-acp");
     expect(spec.env.PATH).toBe("/opt/homebrew/bin:/home/u/.local/bin:/home/u/.npm-global/bin:/usr/local/bin:/usr/bin:/bin");
@@ -40,7 +48,8 @@ describe("resolveLaunchSpec", () => {
     const spec = resolveLaunchSpec(agyLaunchSpec("agy-acp"), {
       home,
       env: { PATH: "/home/u/.local/bin:/usr/bin" },
-      exists: (p) => ["/home/u/.local/bin", "/usr/local/bin", "/home/u/.local/bin/agy-acp"].includes(p),
+      exists: (p) => ["/home/u/.local/bin", "/usr/local/bin"].includes(p),
+      executable: (p) => p === "/home/u/.local/bin/agy-acp",
     });
     expect(spec.command).toBe("/home/u/.local/bin/agy-acp");
     expect(spec.env.PATH).toBe("/usr/local/bin:/home/u/.local/bin:/usr/bin");
@@ -81,5 +90,23 @@ describe("rewriteLine", () => {
     expect(rewriteLine("not json")).toBe("not json");
     const plain = request({ cwd: "/x" });
     expect(rewriteLine(plain)).toBe(plain);
+  });
+});
+
+describe("resolveCommand on the real filesystem", () => {
+  it("does not resolve to a directory or a non-executable file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agy-resolve-"));
+    try {
+      const bad = join(dir, "bad");
+      const good = join(dir, "good");
+      mkdirSync(join(bad, "agy-acp"), { recursive: true });
+      mkdirSync(good);
+      writeFileSync(join(good, "agy-acp"), "#!/bin/sh\n", { mode: 0o755 });
+      expect(resolveCommand("agy-acp", [bad, good].join(delimiter), { home: dir })).toBe(join(good, "agy-acp"));
+      writeFileSync(join(bad, "other"), "x", { mode: 0o644 });
+      expect(resolveCommand("other", bad, { home: dir })).toBe("other");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
