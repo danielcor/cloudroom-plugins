@@ -1,0 +1,258 @@
+#!/usr/bin/env node
+'use strict';
+// argon: run Gemini Argon through Google's Antigravity CLI (agy). No dependencies, Node >= 20.
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawn, spawnSync } = require('child_process');
+
+const DEFAULT_MODEL = 'gemini-4-argon-high';
+const INSTALL_URL = 'https://antigravity.google/cli/install.sh';
+const TOKEN_ENV = 'ARGON_AGY_TOKEN_B64';
+const TOKEN_FILE = path.join(os.homedir(), '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+const CACHE_DIR = process.env.ARGON_CACHE_DIR || path.join(os.homedir(), '.cache', 'argon');
+
+const USAGE = `usage: argon <command>
+  setup                     install agy and its login if missing (idempotent)
+  export-token >> .env      print ${TOKEN_ENV}=... (refuses to print to a terminal)
+  models                    list models
+  run [--model M] [--effort low|medium|high|xhigh|max] [--new | --conversation ID] [PROMPT]
+                            one turn in the cwd (prompt may come from stdin); continues the
+                            last conversation for this cwd unless --new
+default model: ${DEFAULT_MODEL}`;
+
+// Run on the paired desktop (via room-cli mac run) to print the agy login JSON.
+const DESKTOP_SCRIPT = `
+f="$HOME/.gemini/antigravity-cli/antigravity-oauth-token"
+[ -s "$f" ] && exec cat "$f"
+command -v security >/dev/null 2>&1 && security find-generic-password -s gemini -a antigravity -w 2>/dev/null && exit 0
+command -v secret-tool >/dev/null 2>&1 && secret-tool lookup service gemini username antigravity 2>/dev/null && exit 0
+exec python3 -c '
+import sys
+from gi.repository import Gio, GLib
+c = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+def call(p, i, m, a, s):
+    return c.call_sync("org.freedesktop.secrets", p, i, m, a, GLib.VariantType(s), Gio.DBusCallFlags.NONE, -1, None).unpack()
+S = "/org/freedesktop/secrets"
+sess = call(S, "org.freedesktop.Secret.Service", "OpenSession", GLib.Variant("(sv)", ("plain", GLib.Variant("s", ""))), "(vo)")[1]
+u, l = call(S, "org.freedesktop.Secret.Service", "SearchItems", GLib.Variant("(a{ss})", ({"service": "gemini", "username": "antigravity"},)), "(aoao)")
+if not (u or l): sys.exit("no gemini/antigravity item in the keyring")
+sys.stdout.write(bytes(call((u or l)[0], "org.freedesktop.Secret.Item", "GetSecret", GLib.Variant("(o)", (sess,)), "((oayays))")[0][2]).decode())
+'
+`;
+
+function parseArgs(argv) {
+  const [cmd, ...rest] = argv;
+  const opts = { model: DEFAULT_MODEL, effort: null, fresh: false, conversation: null };
+  const words = [];
+  const need = (i, flag) => {
+    if (i + 1 >= rest.length) throw new Error(`${flag} needs a value`);
+    return rest[i + 1];
+  };
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--') { words.push(...rest.slice(i + 1)); break; }
+    else if (a === '--model') opts.model = need(i++, a);
+    else if (a === '--effort') opts.effort = need(i++, a);
+    else if (a === '--conversation') opts.conversation = need(i++, a);
+    else if (a === '--new') opts.fresh = true;
+    else if (a.startsWith('--') && cmd === 'run') throw new Error(`unknown option ${a}`);
+    else words.push(a);
+  }
+  if (opts.fresh && opts.conversation) throw new Error('--new and --conversation are mutually exclusive');
+  return { cmd, opts, prompt: words.length ? words.join(' ') : null };
+}
+
+function agyArgs(opts, conversation) {
+  const a = ['-p=', '--input-format', 'stream-json', '--output-format', 'stream-json',
+    '--model', opts.model, '--dangerously-skip-permissions'];
+  if (opts.effort) a.push('--effort', opts.effort);
+  if (conversation) a.push('--conversation', conversation);
+  return a;
+}
+
+const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const firstLine = (s) => String(s).split('\n').find((l) => l.trim()) || '';
+
+// Turns one agy stream-json event into text for stdout; tracks conversation id and errors in st.
+function render(ev, st) {
+  let out = '';
+  const bol = () => { if (!st.bol) { out += '\n'; st.bol = true; } };
+  if (ev.event === 'init') {
+    st.conversation = ev.conversation_id || st.conversation;
+  } else if (ev.event === 'step_update') {
+    const s = ev.step_update;
+    if (s.step_type === 'agent_response' && s.text_delta) {
+      out += s.text_delta;
+      st.bol = s.text_delta.endsWith('\n');
+    } else if (s.step_type === 'tool') {
+      const info = s.tool_info || {};
+      if (s.state === 'ACTIVE') {
+        bol();
+        const args = Object.values(info.parameters || {}).map((v) => (typeof v === 'string' ? v : JSON.stringify(v)));
+        out += `[tool] ${s.tool_name}${args.length ? ': ' + clip(args.join(' ').replace(/\s+/g, ' '), 120) : ''}\n`;
+      } else if (s.state === 'DONE' || s.state === 'ERROR') {
+        bol();
+        const note = info.output ? firstLine(info.output) : s.state === 'ERROR' ? 'failed' : '';
+        if (note || s.state === 'ERROR') out += `  ${s.state === 'ERROR' ? '!!' : '->'} ${clip(note, 100)}\n`;
+      }
+      st.bol = true;
+    }
+  } else if (ev.event === 'result') {
+    const r = ev.result || {};
+    if (r.conversation_id) st.conversation = r.conversation_id;
+    st.result = r;
+    if (r.status !== 'SUCCESS') st.error = r.error || `agy finished with status ${r.status}`;
+  }
+  return out;
+}
+
+const agyBin = () => {
+  const dirs = [...(process.env.PATH || '').split(path.delimiter), path.join(os.homedir(), '.local', 'bin')];
+  return dirs.map((d) => path.join(d, 'agy')).find((p) => fs.existsSync(p)) || null;
+};
+
+const readCache = () => { try { return JSON.parse(fs.readFileSync(path.join(CACHE_DIR, 'conversations.json'), 'utf8')); } catch { return {}; } };
+function saveConversation(cwd, id) {
+  const m = readCache();
+  m[cwd] = id;
+  fs.mkdirSync(CACHE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(CACHE_DIR, 'conversations.json'), JSON.stringify(m, null, 1));
+}
+
+function runTurn(prompt, opts) {
+  const agy = agyBin();
+  if (!agy) throw new Error('agy is not installed; run `argon setup`');
+  const cwd = fs.realpathSync(process.cwd());
+  const conversation = opts.fresh ? null : opts.conversation || readCache()[cwd] || null;
+  const child = spawn(agy, agyArgs(opts, conversation), { stdio: ['pipe', 'pipe', 'pipe'] });
+  const st = { bol: true, conversation: null, result: null, error: null };
+  let stderr = '';
+  child.stderr.on('data', (d) => { stderr += d; process.stderr.write(d); });
+  child.stdin.on('error', () => {});
+  child.stdin.end(JSON.stringify({ event: 'user', message: { content: [{ type: 'text', text: prompt }] } }) + '\n');
+  let buf = '';
+  const line = (l) => {
+    if (!l.trim()) return;
+    let ev;
+    try { ev = JSON.parse(l); } catch { return; }
+    process.stdout.write(render(ev, st));
+  };
+  child.stdout.on('data', (d) => {
+    buf += d;
+    const parts = buf.split('\n');
+    buf = parts.pop();
+    parts.forEach(line);
+  });
+  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => child.kill(sig));
+  child.on('close', (code) => {
+    line(buf);
+    if (!st.bol) process.stdout.write('\n');
+    if (st.conversation) {
+      saveConversation(cwd, st.conversation);
+      process.stdout.write(`conversation: ${st.conversation}\n`);
+    }
+    if (!st.error && !st.result) st.error = `agy exited (${code}) without a result${stderr ? '' : ' and no error output'}`;
+    if (st.error && !(stderr && st.error.includes(stderr.trim()))) process.stderr.write(st.error.endsWith('\n') ? st.error : st.error + '\n');
+    process.exit(st.error || code ? 1 : 0);
+  });
+}
+
+function parseDotenv(text, key) {
+  for (const l of text.split('\n')) {
+    const m = l.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+    if (m && m[1] === key) return m[2].replace(/^(['"])(.*)\1$/, '$2');
+  }
+  return null;
+}
+
+function tokenFromDotenv() {
+  for (let dir = process.cwd(); ; dir = path.dirname(dir)) {
+    try {
+      const v = parseDotenv(fs.readFileSync(path.join(dir, '.env'), 'utf8'), TOKEN_ENV);
+      if (v) return v;
+    } catch { /* no .env here */ }
+    if (fs.existsSync(path.join(dir, '.git')) || dir === path.dirname(dir)) return null;
+  }
+}
+
+// Accepts the raw JSON, or the base64 / hex encodings go-keyring stores. Returns the JSON text or null.
+function normalizeToken(raw) {
+  let t = raw.trim();
+  if (t.startsWith('go-keyring-base64:')) t = Buffer.from(t.slice(18), 'base64').toString();
+  else if (t.startsWith('go-keyring-encoded:')) t = Buffer.from(t.slice(19), 'hex').toString();
+  else if (!t.startsWith('{') && /^[A-Za-z0-9+/=\r\n]+$/.test(t)) t = Buffer.from(t, 'base64').toString();
+  try {
+    const j = JSON.parse(t);
+    return j && j.token && j.token.refresh_token ? t : null;
+  } catch { return null; }
+}
+
+function tokenFromDesktop() {
+  const r = spawnSync('room-cli', ['mac', 'run', '--stdin', 'sh -s'], { input: DESKTOP_SCRIPT, encoding: 'utf8', maxBuffer: 1 << 20 });
+  if (r.error) return { err: `room-cli not available (${r.error.code || r.error.message})` };
+  if (r.status !== 0) return { err: `room-cli mac run failed (exit ${r.status}): ${firstLine(r.stderr || '')}` };
+  const t = normalizeToken(r.stdout);
+  return t ? { token: t } : { err: 'the desktop returned something that is not an agy login' };
+}
+
+function setup() {
+  if (!agyBin()) {
+    console.error(`installing agy from ${INSTALL_URL}`);
+    const r = spawnSync('bash', ['-c', `curl -fsSL ${INSTALL_URL} | bash`], { stdio: ['ignore', 2, 2] });
+    if (r.status !== 0 || !agyBin()) throw new Error('agy install failed');
+  }
+  if (!fs.existsSync(TOKEN_FILE)) {
+    let token = null;
+    const fromEnv = process.env[TOKEN_ENV] || tokenFromDotenv();
+    if (fromEnv) {
+      token = normalizeToken(fromEnv);
+      if (!token) throw new Error(`${TOKEN_ENV} is set but is not base64 of an agy login JSON`);
+      console.error(`login: from ${TOKEN_ENV}`);
+    } else {
+      const d = tokenFromDesktop();
+      if (!d.token) throw new Error(`no agy login: ${TOKEN_ENV} not set, and ${d.err}`);
+      token = d.token;
+      console.error('login: from the paired desktop');
+    }
+    fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(TOKEN_FILE, token, { mode: 0o600 });
+    fs.chmodSync(TOKEN_FILE, 0o600);
+  } else console.error('login: already present');
+  const m = spawnSync(agyBin(), ['models'], { encoding: 'utf8' });
+  if (m.status !== 0 || !/argon/i.test(m.stdout)) {
+    throw new Error(`agy models does not list an argon model (login expired? delete ${TOKEN_FILE} and retry):\n${m.stdout}${m.stderr}`);
+  }
+  console.log(`ok: ${agyBin()} (${m.stdout.split('\n').filter((l) => /argon/i.test(l)).length} argon models)`);
+}
+
+function exportToken() {
+  if (process.stdout.isTTY) throw new Error('refusing to print a login to a terminal; use: argon export-token >> .env');
+  let raw;
+  try { raw = fs.readFileSync(TOKEN_FILE, 'utf8'); } catch { throw new Error('no login file; run `argon setup` first'); }
+  if (!normalizeToken(raw)) throw new Error(`${TOKEN_FILE} is not a valid agy login`);
+  if (spawnSync('git', ['check-ignore', '-q', '.env']).status === 1) console.error('warning: .env is not gitignored here; do not commit it');
+  process.stdout.write(`${TOKEN_ENV}=${Buffer.from(raw.trim()).toString('base64')}\n`);
+}
+
+function main(argv) {
+  if (!argv.length || ['-h', '--help', 'help'].includes(argv[0])) return console.log(USAGE);
+  const { cmd, opts, prompt } = parseArgs(argv);
+  if (cmd === 'setup') return setup();
+  if (cmd === 'export-token') return exportToken();
+  if (cmd === 'models') {
+    if (!agyBin()) throw new Error('agy is not installed; run `argon setup`');
+    return void process.exit(spawnSync(agyBin(), ['models'], { stdio: 'inherit' }).status);
+  }
+  if (cmd === 'run') {
+    const text = prompt !== null ? prompt : process.stdin.isTTY ? '' : fs.readFileSync(0, 'utf8');
+    if (!text.trim()) throw new Error('no prompt given (pass it as an argument or on stdin)');
+    return runTurn(text, opts);
+  }
+  throw new Error(`unknown command ${cmd}\n${USAGE}`);
+}
+
+if (require.main === module) {
+  try { main(process.argv.slice(2)); } catch (e) { console.error(`argon: ${e.message}`); process.exit(1); }
+}
+module.exports = { parseArgs, agyArgs, render, normalizeToken, parseDotenv };
