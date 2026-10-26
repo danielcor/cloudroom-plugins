@@ -3,6 +3,7 @@
 // A message containing "hang" gets no reply until SIGINT.
 // FAKE_AGY_FIXTURE: transcript path. FAKE_AGY_ON_SIGINT: lines printed on SIGINT before exit 1.
 // FAKE_AGY_ARGS_LOG: each run appends its argv as one JSON line.
+// FAKE_AGY_INIT_DELAY_MS: delay before the init line. FAKE_AGY_IGNORE_SIGTERM=1: survive SIGTERM and stdin EOF.
 import { appendFileSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
@@ -14,7 +15,11 @@ const conv = args.includes("--conversation") ? args[args.indexOf("--conversation
 const known = conv !== "missing";
 if (!known) process.stderr.write(`warning: conversation "${conv}" not found\n`);
 init.conversation_id = known ? conv : "99999999-0000-0000-0000-000000000000";
-process.stdout.write(`${JSON.stringify(init)}\n`);
+setTimeout(() => process.stdout.write(`${JSON.stringify(init)}\n`), Number(process.env.FAKE_AGY_INIT_DELAY_MS ?? 0));
+if (process.env.FAKE_AGY_IGNORE_SIGTERM === "1") {
+  process.on("SIGTERM", () => {});
+  setInterval(() => {}, 1000); // a hung agy: stays up after stdin closes
+}
 
 const turns = [[]];
 for (const line of lines.slice(1)) {

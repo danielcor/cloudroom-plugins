@@ -56,7 +56,7 @@ Install step 1 there, then run `room-cli provider models agy --machine <name> --
    `--dangerously-skip-permissions`.
 4. Optional: the reasoning level maps to agy `--effort`.
 
-Threads resume after a restart: the thread's provider session id is agy's conversation id.
+Threads resume after a restart: agy-acp keeps each thread's agy conversation id and restarts agy with `--conversation`.
 
 ## Develop
 

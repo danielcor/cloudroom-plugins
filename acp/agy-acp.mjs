@@ -2,12 +2,15 @@
 // agy-acp: an Agent Client Protocol (ACP) agent on stdio that drives the
 // Google Antigravity CLI (`agy`) through its headless stream-json mode.
 // One long-lived `agy -p= --input-format stream-json --output-format stream-json`
-// process per ACP session; the ACP session id is agy's conversation id, so
-// session/load and session/resume map to `agy --conversation <id>`.
+// process per ACP session, started on the session's first prompt (so model probes
+// that only call session/new leave no empty agy conversations behind). The agy
+// conversation id is saved per session, and session/load and session/resume map
+// to `agy --conversation <id>`.
 // agy keeps its own login; this adapter never reads or writes credentials.
 
 import { spawn, spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -27,6 +30,7 @@ export const MODES = [
   { id: "bypass", name: "Bypass permissions", description: "agy --dangerously-skip-permissions: every tool runs without asking." },
 ];
 export const EFFORTS = ["default", "low", "medium", "high", "xhigh", "max"];
+const SESSION_PREFIX = "agyacp-";
 
 const ERR = { parse: -32700, invalidRequest: -32600, methodNotFound: -32601, invalidParams: -32602, internal: -32603, notFound: -32002 };
 const INIT_TIMEOUT_MS = 60_000;
@@ -105,7 +109,7 @@ export function promptText(blocks) {
   const parts = [];
   for (const b of blocks ?? []) {
     if (b.type === "text") parts.push(b.text);
-    else if (b.type === "resource_link") parts.push(`@${b.uri.replace(/^file:\/\//, "")}`);
+    else if (b.type === "resource_link") parts.push(`@${b.uri.startsWith("file:") ? fileURLToPath(b.uri) : b.uri}`);
     else if (b.type === "resource" && typeof b.resource?.text === "string") parts.push(`<resource uri="${b.resource.uri}">\n${b.resource.text}\n</resource>`);
     else throw Object.assign(new Error(`agy-acp accepts text and resource blocks only, not ${b.type}`), { code: ERR.invalidParams });
   }
@@ -217,22 +221,43 @@ export class AgyAcpAgent {
     if (sessionId !== undefined && !/^[\w-]{1,128}$/.test(sessionId)) throw Object.assign(new Error("Invalid sessionId"), { code: ERR.invalidParams });
     const models = this.getModels();
     const model = this.opts.model || (models.some((m) => m.modelId === "gemini-4-argon-high") ? "gemini-4-argon-high" : models[0].modelId);
-    const s = { id: sessionId ?? null, cwd, model, effort: this.opts.effort, mode: this.opts.mode, proc: null, procKey: "", turn: null, tools: new Map() };
-    const old = sessionId && this.sessions.get(sessionId);
+    const id = sessionId ?? `${SESSION_PREFIX}${randomUUID()}`;
+    // Our sessions map to the agy conversation saved at their first prompt (none yet: start fresh);
+    // any other id is taken as an agy conversation id.
+    const conversation = !sessionId ? null : sessionId.startsWith(SESSION_PREFIX) ? this.savedConversation(sessionId) : sessionId;
+    const s = { id, conversation, cwd, model, effort: this.opts.effort, mode: this.opts.mode, proc: null, procKey: "", turn: null, tools: new Map() };
+    const old = this.sessions.get(id);
     if (old) this.stopProc(old);
-    await this.ensureProc(s);
-    this.sessions.set(s.id, s);
-    if (replay && existsSync(this.transcriptPath(s.id))) {
-      for (const line of readFileSync(this.transcriptPath(s.id), "utf8").split("\n")) {
+    if (conversation) await this.ensureProc(s); // fails fast when agy has no such conversation
+    this.sessions.set(id, s);
+    if (replay && existsSync(this.transcriptPath(id))) {
+      for (const line of readFileSync(this.transcriptPath(id), "utf8").split("\n")) {
         if (line.trim()) this.update(s, JSON.parse(line), "no");
       }
     }
     return {
-      ...(sessionId === undefined ? { sessionId: s.id } : {}),
+      ...(sessionId === undefined ? { sessionId: id } : {}),
       models: { availableModels: models, currentModelId: s.model },
       modes: { availableModes: MODES, currentModeId: s.mode },
       configOptions: this.configOptions(s),
     };
+  }
+
+  savedConversation(id) {
+    try {
+      return readFileSync(join(this.stateDir, `${id}.conversation`), "utf8").trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  saveConversation(s) {
+    try {
+      mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+      writeFileSync(join(this.stateDir, `${s.id}.conversation`), `${s.conversation}\n`, { mode: 0o600 });
+    } catch (e) {
+      process.stderr.write(`agy-acp: could not save the session's agy conversation id: ${e.message}\n`);
+    }
   }
 
   configOptions(s) {
@@ -258,7 +283,7 @@ export class AgyAcpAgent {
     if (s.effort !== "default") args.push("--effort", s.effort);
     if (s.mode === "bypass") args.push("--dangerously-skip-permissions");
     else args.push("--mode", s.mode);
-    if (s.id) args.push("--conversation", s.id);
+    if (s.conversation) args.push("--conversation", s.conversation);
     return args;
   }
 
@@ -267,7 +292,7 @@ export class AgyAcpAgent {
     const key = JSON.stringify([s.model, s.effort, s.mode]);
     if (s.proc && s.procKey === key) return Promise.resolve();
     if (s.proc) this.stopProc(s);
-    const wanted = s.id;
+    const wanted = s.conversation;
     const proc = this.spawnAgy(this.agyArgs(s), s.cwd);
     s.proc = proc;
     s.procKey = key;
@@ -302,7 +327,10 @@ export class AgyAcpAgent {
           }
           ready = true;
           clearTimeout(timer);
-          s.id = ev.conversation_id;
+          if (!wanted) {
+            s.conversation = ev.conversation_id;
+            this.saveConversation(s);
+          }
           resolve();
           return;
         }
@@ -317,13 +345,17 @@ export class AgyAcpAgent {
     });
   }
 
+  // Resolves once the agy process has exited (SIGTERM, then SIGKILL after a grace period).
   stopProc(s) {
     const proc = s.proc;
     s.proc = null;
-    if (!proc || proc.exitCode !== null) return;
+    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
+    const exited = new Promise((resolve) => proc.once("exit", resolve));
     proc.stdin.end();
     proc.kill("SIGTERM");
-    setTimeout(() => proc.exitCode === null && proc.kill("SIGKILL"), KILL_GRACE_MS).unref();
+    const timer = setTimeout(() => proc.kill("SIGKILL"), KILL_GRACE_MS);
+    timer.unref();
+    return exited.then(() => clearTimeout(timer));
   }
 
   // ---- turns ----
@@ -337,6 +369,7 @@ export class AgyAcpAgent {
       await this.ensureProc(s);
     } catch (e) {
       s.turn = null;
+      if (turn.cancelled) return { stopReason: "cancelled" };
       throw e;
     }
     if (turn.cancelled) {
@@ -355,7 +388,11 @@ export class AgyAcpAgent {
     if (!s?.turn) return;
     s.turn.cancelled = true;
     const proc = s.proc;
-    if (!proc || !s.turn.resolve) return; // still starting: prompt() sees the flag
+    if (!s.turn.resolve) {
+      if (proc) this.stopProc(s); // abort a pending start: prompt() then answers "cancelled"
+      return;
+    }
+    if (!proc) return;
     s.procKey = ""; // the interrupted agy exits; the next prompt starts a new one on the same conversation
     proc.kill("SIGINT"); // agy ends the turn with result{status:ERROR,error:"interrupted"} and exits
     setTimeout(() => proc.exitCode === null && proc.kill("SIGKILL"), KILL_GRACE_MS).unref();
@@ -414,7 +451,7 @@ export class AgyAcpAgent {
   }
 
   shutdown() {
-    for (const s of this.sessions.values()) this.stopProc(s);
+    return Promise.all([...this.sessions.values()].map((s) => this.stopProc(s)));
   }
 }
 
@@ -443,10 +480,7 @@ export function main(argv = process.argv.slice(2)) {
     }
     void agent.handle(msg);
   });
-  const quit = () => {
-    agent.shutdown();
-    process.exit(0);
-  };
+  const quit = () => agent.shutdown().then(() => process.exit(0));
   rl.on("close", quit);
   process.on("SIGTERM", quit);
   process.on("SIGINT", quit);

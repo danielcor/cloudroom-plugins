@@ -5,8 +5,9 @@ Google Antigravity CLI (`agy`). Any ACP client (Cloudroom/BB, Zed, ...) can run 
 and the other `agy models` through it.
 
 It runs one long-lived `agy -p= --input-format stream-json --output-format stream-json` process
-per ACP session. The ACP session id is agy's conversation id, so `session/load` and
-`session/resume` become `agy --conversation <id>`. agy keeps its own login: agy-acp never reads,
+per ACP session, started on the session's first prompt, so clients that open sessions only to read
+the model list leave no empty agy conversations behind. agy-acp saves each session's agy
+conversation id, so `session/load` and `session/resume` become `agy --conversation <id>`. agy keeps its own login: agy-acp never reads,
 copies or logs credentials. It has no dependencies and needs Node 20 or newer.
 
 ## Install
@@ -28,8 +29,8 @@ agy-acp [--agy PATH] [--model ID] [--effort default|low|medium|high|xhigh|max]
 - `--model`: default model (default `gemini-4-argon-high`).
 - `--mode`: default session mode (default `accept-edits`). `--dangerously-skip-permissions` is the
   same as `--mode bypass`.
-- `--state-dir`: where session transcripts for `session/load` replay go (default
-  `$XDG_STATE_HOME/agy-acp/sessions`, files are 0600).
+- `--state-dir`: where each session's agy conversation id and its transcript for `session/load`
+  replay go (default `$XDG_STATE_HOME/agy-acp/sessions`, files are 0600).
 
 ## ACP compliance
 
@@ -38,9 +39,9 @@ Protocol version 1. Methods:
 | Method | Support |
 | --- | --- |
 | `initialize` | `loadSession: true`, `sessionCapabilities.resume`, prompt: text + embedded text resources, no auth methods (agy signs in by itself) |
-| `session/new` | Starts agy, returns its conversation id, `models`, `modes`, `configOptions` |
-| `session/load` | `agy --conversation <id>`; replays this machine's saved transcript as `session/update`s before replying |
-| `session/resume` | `agy --conversation <id>`, no replay |
+| `session/new` | Returns an `agyacp-<uuid>` session id, `models`, `modes`, `configOptions`; agy starts on the first prompt |
+| `session/load` | `agy --conversation <saved id>`; replays this machine's saved transcript as `session/update`s before replying. Any id that is not `agyacp-…` is taken as an agy conversation id |
+| `session/resume` | Same, without replay |
 | `session/prompt` | Streams `agent_message_chunk`, `agent_thought_chunk` (agy `thinking_delta`), `tool_call` / `tool_call_update`; ends with `stopReason` `end_turn` or `cancelled` and per-turn `usage` |
 | `session/cancel` | SIGINT to agy (it ends the turn as interrupted and exits); the next prompt restarts agy on the same conversation |
 | `session/set_model`, `session/set_mode`, `session/set_config_option` | `model` (category `model`), `effort` (category `thought_level`, agy `--effort`), `mode` (category `mode`). agy takes these as launch flags, so the next prompt restarts agy with `--conversation` |

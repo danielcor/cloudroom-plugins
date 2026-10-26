@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,11 +11,11 @@ const here = fileURLToPath(new URL(".", import.meta.url));
 const fixture = (name) => join(here, "fixtures", name);
 const CID = "11111111-2222-3333-4444-555555555555";
 
-function harness(transcript, { onSigint, argv = [] } = {}) {
+function harness(transcript, { onSigint, argv = [], env: extraEnv = {} } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "agy-acp-test-"));
   const argsLog = join(dir, "args.ndjson");
   const sent = [];
-  const env = { ...process.env, FAKE_AGY_FIXTURE: fixture(transcript), FAKE_AGY_ARGS_LOG: argsLog, ...(onSigint ? { FAKE_AGY_ON_SIGINT: fixture(onSigint) } : {}) };
+  const env = { ...process.env, FAKE_AGY_FIXTURE: fixture(transcript), FAKE_AGY_ARGS_LOG: argsLog, ...(onSigint ? { FAKE_AGY_ON_SIGINT: fixture(onSigint) } : {}), ...extraEnv };
   const agent = new AgyAcpAgent({
     send: (m) => sent.push(m),
     opts: { ...parseArgs(argv), agy: "fake-agy", stateDir: join(dir, "state") },
@@ -31,7 +31,7 @@ function harness(transcript, { onSigint, argv = [] } = {}) {
     return reply.result;
   };
   const updates = () => sent.filter((m) => m.method === "session/update").map((m) => m.params.update);
-  const spawns = () => readFileSync(argsLog, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const spawns = () => (existsSync(argsLog) ? readFileSync(argsLog, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : []);
   return { agent, call, sent, updates, spawns, dir };
 }
 
@@ -47,15 +47,17 @@ test("initialize advertises load, resume and text prompts", async () => {
   assert.equal(r.agentInfo.name, "agy-acp");
 });
 
-test("session/new uses agy's conversation id and lists Argon first, high by default", async () => {
+test("session/new starts no agy until the first prompt, lists Argon first, high by default", async () => {
   const h = harness("two-turn-read-file.ndjson");
   const r = await h.call("session/new", { cwd: "/tmp", mcpServers: [] });
-  assert.equal(r.sessionId, CID);
+  assert.match(r.sessionId, /^agyacp-[0-9a-f-]{36}$/);
+  assert.deepEqual(h.spawns(), [], "a model probe (session/new only) leaves no agy conversation");
   assert.deepEqual(r.models.availableModels.slice(0, 3).map((m) => m.modelId), ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"]);
   assert.equal(r.models.currentModelId, "gemini-4-argon-high");
   assert.equal(r.modes.currentModeId, "accept-edits");
   assert.deepEqual(r.configOptions.map((o) => [o.id, o.category]), [["model", "model"], ["effort", "thought_level"], ["mode", "mode"]]);
-  assert.deepEqual(h.spawns()[0], ["-p=", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-argon-high", "--mode", "accept-edits"]);
+  await h.call("session/prompt", { sessionId: r.sessionId, prompt: text("read note.txt") });
+  assert.deepEqual(h.spawns(), [["-p=", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-argon-high", "--mode", "accept-edits"]]);
   h.agent.shutdown();
 });
 
@@ -106,6 +108,27 @@ test("session/cancel interrupts agy, ends the turn as cancelled, and the next pr
   h.agent.shutdown();
 });
 
+test("session/cancel while agy is still starting answers cancelled at once", async () => {
+  const h = harness("two-turn-read-file.ndjson", { env: { FAKE_AGY_INIT_DELAY_MS: "20000" } });
+  const { sessionId } = await h.call("session/new", { cwd: "/tmp", mcpServers: [] });
+  const started = Date.now();
+  const pending = h.call("session/prompt", { sessionId, prompt: text("read note.txt") });
+  await new Promise((r) => setTimeout(r, 200));
+  await h.agent.handle({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
+  assert.deepEqual(await pending, { stopReason: "cancelled" });
+  assert.ok(Date.now() - started < 3000, "did not wait for agy to start");
+  await h.agent.shutdown();
+});
+
+test("shutdown waits for agy to exit, escalating to SIGKILL", async () => {
+  const h = harness("two-turn-read-file.ndjson", { env: { FAKE_AGY_IGNORE_SIGTERM: "1" } });
+  const { sessionId } = await h.call("session/new", { cwd: "/tmp", mcpServers: [] });
+  await h.call("session/prompt", { sessionId, prompt: text("read note.txt") });
+  const proc = h.agent.sessions.get(sessionId).proc;
+  await h.agent.shutdown();
+  assert.equal(proc.signalCode, "SIGKILL");
+});
+
 test("settings changes restart agy with new flags on the same conversation", async () => {
   const h = harness("two-turn-read-file.ndjson");
   const { sessionId } = await h.call("session/new", { cwd: "/tmp", mcpServers: [] });
@@ -116,7 +139,10 @@ test("settings changes restart agy with new flags on the same conversation", asy
   assert.deepEqual(h.updates().at(-1), { sessionUpdate: "current_mode_update", currentModeId: "bypass" });
   await assert.rejects(h.call("session/set_config_option", { sessionId, configId: "effort", value: "turbo" }), /Invalid effort/);
   await h.call("session/prompt", { sessionId, prompt: text("read note.txt") });
-  assert.deepEqual(h.spawns()[1], ["-p=", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-argon-low", "--effort", "high", "--dangerously-skip-permissions", "--conversation", CID]);
+  assert.deepEqual(h.spawns()[0], ["-p=", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-argon-low", "--effort", "high", "--dangerously-skip-permissions"]);
+  await h.call("session/set_mode", { sessionId, modeId: "plan" });
+  await h.call("session/prompt", { sessionId, prompt: text("what did you read?") });
+  assert.deepEqual(h.spawns()[1].slice(-4), ["--mode", "plan", "--conversation", CID]);
   h.agent.shutdown();
 });
 
@@ -138,6 +164,10 @@ test("session/load replays the saved transcript; resume does not; unknown ids fa
   assert.ok(replay.some((x) => x.sessionUpdate === "tool_call"));
   assert.deepEqual(h2.spawns().map((a) => a.slice(-2)), [["--conversation", CID], ["--conversation", CID]]);
   await assert.rejects(h2.call("session/load", { sessionId: "missing", cwd: "/tmp", mcpServers: [] }), (e) => e.code === -32002);
+  const fresh = await h2.call("session/new", { cwd: "/tmp", mcpServers: [] });
+  const before = h2.spawns().length;
+  await h2.call("session/resume", { sessionId: fresh.sessionId, cwd: "/tmp", mcpServers: [] });
+  assert.equal(h2.spawns().length, before, "resuming a never-prompted session starts nothing");
   await assert.rejects(h2.call("session/load", { sessionId: "../etc", cwd: "/tmp", mcpServers: [] }), /Invalid sessionId/);
   h2.agent.shutdown();
 });
@@ -145,7 +175,7 @@ test("session/load replays the saved transcript; resume does not; unknown ids fa
 test("helpers", () => {
   assert.deepEqual(parseModels("").map((m) => m.modelId), ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"]);
   assert.deepEqual(parseModels("x-1\tX One\ngemini-4-argon-low\tLow\n").map((m) => m.modelId), ["gemini-4-argon-low", "x-1"]);
-  assert.equal(promptText([{ type: "text", text: "a" }, { type: "resource_link", uri: "file:///w/b.ts", name: "b" }]), "a\n@/w/b.ts");
+  assert.equal(promptText([{ type: "text", text: "a" }, { type: "resource_link", uri: "file:///w/a%20b.ts", name: "b" }]), "a\n@/w/a b.ts");
   assert.throws(() => promptText([{ type: "image", data: "", mimeType: "image/png" }]), /text and resource blocks only/);
   assert.equal(toolKind("run_command"), "execute");
   assert.equal(parseArgs(["--dangerously-skip-permissions"]).mode, "bypass");
