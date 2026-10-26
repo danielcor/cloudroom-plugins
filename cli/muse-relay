@@ -141,7 +141,7 @@ const storedKey = () => (metaOf(readAuth()) || {}).api_key || null;
 function parseLogin(b64) {
   let auth;
   try { auth = JSON.parse(Buffer.from(String(b64).trim(), 'base64').toString('utf8')); } catch { return null; }
-  return metaOf(auth) && (metaOf(auth).access_token || metaOf(auth).api_key) ? auth : null;
+  return isPlanLogin(auth) ? auth : null; // an API-key login is never imported: it bills the API, not the plan
 }
 
 function writeLogin(auth) {
@@ -156,7 +156,7 @@ function loginFromDesktop() {
   if (r.error) return { err: `room-cli not available (${r.error.code || r.error.message})` };
   if (r.status !== 0) return { err: `room-cli mac run failed (exit ${r.status}): ${firstLine(r.stderr || '')}` };
   const auth = parseLogin(r.stdout);
-  return auth ? { auth } : { err: 'the desktop returned something that is not a Muse login file' };
+  return auth ? { auth } : { err: 'the desktop has no Muse plan login (run `muse login` there)' };
 }
 
 // env MUSE_AUTH_B64, then that key in the nearest .env. Returns where it came from, after saving it.
@@ -164,7 +164,7 @@ function loginFromEnv() {
   for (const [from, b64] of [['the environment', process.env[LOGIN_ENV]], ['.env', dotenvValue(LOGIN_ENV)]]) {
     if (!b64) continue;
     const auth = parseLogin(b64);
-    if (!auth) throw new Error(`${LOGIN_ENV} from ${from} is not a base64 Muse login file`);
+    if (!auth) throw new Error(`${LOGIN_ENV} from ${from} is not a base64 Muse plan login (an oauth auth.json from \`muse login\`)`);
     writeLogin(auth);
     return from;
   }
@@ -289,7 +289,6 @@ function setup() {
     } else {
       throw new Error(`no Muse login: ${LOGIN_ENV} not set, and ${d.err}. Run \`muse-relay export-login >> .env\` on a machine where \`muse login\` worked.`);
     }
-    if (d.auth && !isPlanLogin(d.auth)) console.error(`warning: that login is an API key, which bills the API per token, not your plan. Run \`muse login\` on the desktop.`);
   }
   console.error(`login: ${from}`);
   const v = spawnSync(museBin(), ['--version'], { encoding: 'utf8' });

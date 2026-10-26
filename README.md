@@ -239,7 +239,7 @@ One dependency-free Node (>= 20) script: `cli/muse-relay`, the same UX as `argon
 `muse-relay` uses your **plan** login, not an API key. The login, in order: an existing plan login in
 `~/.config/muse/auth.json`; env `MUSE_AUTH_B64`; that key in the nearest `.env` (cwd up to the git root); the paired
 desktop's `~/.config/muse/auth.json` through `room-cli mac run`. A found login is written to `~/.config/muse/auth.json`
-with mode `0600`. Only when none of those exist does it fall back to `META_API_KEY` (env or `.env`), with a one-line
+with mode `0600`; only oauth (plan) logins are imported, an API-key `auth.json` is skipped. Only when none of those exist does it fall back to `META_API_KEY` (env or `.env`), with a one-line
 warning that this bills the API. While a plan login exists, `META_API_KEY` is removed from muse's environment, because
 muse would otherwise prefer it. Values are never printed. `muse` refreshes the login's token itself and writes it
 back to that file; a sandbox's copy refreshes on its own, so re-run `export-login` if Meta ever revokes it.

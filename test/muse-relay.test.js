@@ -147,6 +147,8 @@ test('parseLogin: a base64 login file, nothing else', () => {
   assert.deepStrictEqual(parseLogin(planB64 + '\n'), PLAN);
   assert.strictEqual(parseLogin('not base64 json'), null);
   assert.strictEqual(parseLogin(Buffer.from('{"providers":{}}').toString('base64')), null);
+  const apiOnly = { providers: { meta: { api_key: 'k', access_token: 't', mechanism: 'api_key' } } };
+  assert.strictEqual(parseLogin(Buffer.from(JSON.stringify(apiOnly)).toString('base64')), null); // bills the API: never imported
 });
 
 test('run: MUSE_AUTH_B64 (env or .env) installs the plan login 0600 and META_API_KEY is not passed on', () => {

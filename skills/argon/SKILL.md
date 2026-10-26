@@ -10,7 +10,7 @@ Argon does the work. You are a thin relay: pass the user's message to Argon, sho
 ## Setup (once per sandbox)
 
 ```bash
-ARGON=$(command -v argon || ls /repos/cloudroom-plugins/cli/argon /repos/cloudroom-argon/cli/argon "$HOME"/cloudroom-plugins/cli/argon "$HOME"/cloudroom-argon/cli/argon 2>/dev/null | head -1)
+ARGON=$(command -v argon); for f in /repos/cloudroom-plugins /repos/cloudroom-argon "$HOME/cloudroom-plugins" "$HOME/cloudroom-argon"; do [ -n "$ARGON" ] || { [ -x "$f/cli/argon" ] && ARGON="$f/cli/argon"; }; done
 "$ARGON" setup
 ```
 
