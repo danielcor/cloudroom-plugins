@@ -1,5 +1,6 @@
 // Replays a recorded agy stream-json transcript: prints the init line at start,
-// then one recorded turn (through its "result" line) per stdin user message.
+// then the next recorded turn (through its "result" line, cycling) per stdin user message.
+// A message containing "hang" gets no reply until SIGINT.
 // FAKE_AGY_FIXTURE: transcript path. FAKE_AGY_ON_SIGINT: lines printed on SIGINT before exit 1.
 // FAKE_AGY_ARGS_LOG: each run appends its argv as one JSON line.
 import { appendFileSync, readFileSync } from "node:fs";
@@ -20,9 +21,11 @@ for (const line of lines.slice(1)) {
   turns.at(-1).push(line);
   if (JSON.parse(line).event === "result") turns.push([]);
 }
+const recorded = turns.filter((t) => t.length > 0);
 let next = 0;
-createInterface({ input: process.stdin }).on("line", () => {
-  for (const line of turns[next++] ?? []) process.stdout.write(`${line}\n`);
+createInterface({ input: process.stdin }).on("line", (line) => {
+  if (line.includes("hang")) return;
+  for (const out of recorded[next++ % recorded.length] ?? []) process.stdout.write(`${out}\n`);
 });
 process.on("SIGINT", () => {
   if (process.env.FAKE_AGY_ON_SIGINT) process.stdout.write(readFileSync(process.env.FAKE_AGY_ON_SIGINT, "utf8"));

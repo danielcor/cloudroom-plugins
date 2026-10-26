@@ -1,0 +1,45 @@
+{
+  "name": "bb-plugin-provider-agy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Run Cloudroom threads with Google Antigravity (agy) and Gemini 4 Argon, through the agy-acp adapter.",
+  "engines": {
+    "bb": ">=0.0",
+    "bbPluginSdk": ">=0.6.49"
+  },
+  "bb": {
+    "name": "Antigravity provider",
+    "description": "Run Cloudroom threads with Google Antigravity (agy) and Gemini 4 Argon.",
+    "branding": {
+      "icon": "./icons/antigravity.svg"
+    },
+    "server": "./server.ts",
+    "host": "./src/host.ts",
+    "experimental_providers": [
+      {
+        "kind": "agent",
+        "id": "agy",
+        "displayName": "Antigravity"
+      }
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@get-bb/plugin-sdk": "0.6.49"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "better-sqlite3": "^12.11.1",
+    "cron-parser": "^5.10.2",
+    "hono": "^4.13.14",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.1"
+  }
+}
