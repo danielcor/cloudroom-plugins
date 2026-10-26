@@ -1,0 +1,15 @@
+#!/bin/sh
+# muse-clean: muse for Cloudroom sessions. muse-acp points the adapter's
+# MUSE_CODE_EXECUTABLE here. `serve` and `exec` get contributor mode off, no
+# reminder observers (extra model calls per turn), and no user or managed hooks;
+# MUSE_ACP_FULL=1 also turns the OS sandbox off. Everything else passes through.
+real="${MUSE_ACP_REAL_MUSE:?muse-clean is started by muse-acp}"
+case "$1" in
+  serve | exec)
+    sub=$1
+    shift
+    if [ "${MUSE_ACP_FULL:-}" = 1 ]; then set -- --disable-sandbox "$@"; fi
+    set -- "$sub" --contributor-mode off -c 'run.reminder_roster=[]' -c 'managed_hooks_path=null' -c 'hooks={}' "$@"
+    ;;
+esac
+exec "$real" "$@"

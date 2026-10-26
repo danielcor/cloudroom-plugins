@@ -1,0 +1,13 @@
+{
+  "name": "muse-acp",
+  "version": "0.1.0",
+  "description": "Muse Code (Meta Muse) over the Agent Client Protocol for Cloudroom: the pinned @bex-co/muse-code-acp adapter, with contributor mode, personal rules and skills, reminders and hooks off",
+  "type": "module",
+  "bin": { "muse-acp": "./muse-acp.mjs" },
+  "files": ["muse-acp.mjs", "muse-clean"],
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "dependencies": { "@bex-co/muse-code-acp": "0.11.0" },
+  "license": "MIT",
+  "private": true
+}
