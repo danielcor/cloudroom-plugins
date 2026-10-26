@@ -24,7 +24,7 @@ aliengaming-wsl-debian join it as machines, so the plugin goes on aipc only.
 ```sh
 curl -fsSL https://antigravity.google/cli/install.sh | bash   # skip if `agy --version` works
 agy models                                                   # must list gemini-4-argon-*; if not, run `agy` and sign in
-mkdir -p ~/src && git clone https://github.com/danielcor/cloudroom-argon ~/src/cloudroom-argon
+mkdir -p ~/src && git clone https://github.com/danielcor/cloudroom-plugins ~/src/cloudroom-argon
 npm install -g ~/src/cloudroom-argon/acp                     # links agy-acp into npm's global bin; keep the clone
 agy-acp --version
 ```
