@@ -24,14 +24,15 @@ aliengaming-wsl-debian join it as machines, so the plugin goes on aipc only.
 ```sh
 curl -fsSL https://antigravity.google/cli/install.sh | bash   # skip if `agy --version` works
 agy models                                                   # must list gemini-4-argon-*; if not, run `agy` and sign in
-mkdir -p ~/src && git clone https://github.com/danielcor/cloudroom-argon ~/src/cloudroom-argon
+mkdir -p ~/src && git clone https://github.com/danielcor/cloudroom-plugins ~/src/cloudroom-argon
 npm install -g ~/src/cloudroom-argon/acp                     # links agy-acp into npm's global bin; keep the clone
 agy-acp --version
 ```
 
-Cloudroom's daemon must find `agy-acp` on its PATH (on aipc, `~/.npm-global/bin` is on it). If
-`which agy-acp` is not on the daemon's PATH, link it into one that is, for example
-`ln -s "$(which agy-acp)" ~/.local/bin/agy-acp`. agy-acp itself finds agy on PATH or in
+The plugin finds `agy-acp` on each machine's host daemon even when that daemon has a bare PATH (SSH
+machines): it looks on PATH, then `~/.local/bin`, `~/.npm-global/bin`, `/opt/homebrew/bin` and
+`/usr/local/bin`, and launches it with those existing dirs added to PATH so `node` and `agy` resolve too.
+The `command` setting still accepts an absolute path. agy-acp itself finds agy on PATH or in
 `~/.local/bin`.
 
 ### 2. The plugin (on the Cloudroom server, aipc)
@@ -40,7 +41,7 @@ Cloudroom's daemon must find `agy-acp` on its PATH (on aipc, `~/.npm-global/bin`
 cd ~/src/cloudroom-argon/plugin && npm ci
 room-cli plugin build .
 room-cli plugin install path:$HOME/src/cloudroom-argon/plugin --yes
-room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.0  running
+room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.1  running
 room-cli provider models agy --machine aipc-ubuntu # Gemini 4 Argon High (default), Medium, Low
 ```
 
