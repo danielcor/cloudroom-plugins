@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { AgyAcpAgent, parseArgs, parseModels, promptText, toolKind } from "../agy-acp.mjs";
 
@@ -127,6 +128,39 @@ test("shutdown waits for agy to exit, escalating to SIGKILL", async () => {
   const proc = h.agent.sessions.get(sessionId).proc;
   await h.agent.shutdown();
   assert.equal(proc.signalCode, "SIGKILL");
+});
+
+test("the CLI waits for agy on stdin close plus SIGTERM, leaving no orphan", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "agy-acp-cli-"));
+  const pidLog = join(dir, "pids");
+  const cli = spawn(process.execPath, [join(here, "..", "agy-acp.mjs"), "--agy", join(here, "fake-agy"), "--state-dir", join(dir, "state")], {
+    env: { ...process.env, FAKE_AGY_FIXTURE: fixture("two-turn-read-file.ndjson"), FAKE_AGY_IGNORE_SIGTERM: "1", FAKE_AGY_PID_LOG: pidLog },
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+  const lines = [];
+  createInterface({ input: cli.stdout }).on("line", (l) => lines.push(JSON.parse(l)));
+  const reply = async (id) => {
+    while (!lines.some((m) => m.id === id)) await new Promise((r) => setTimeout(r, 20));
+    return lines.find((m) => m.id === id).result;
+  };
+  cli.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "session/new", params: { cwd: "/tmp", mcpServers: [] } })}\n`);
+  const { sessionId } = await reply(1);
+  cli.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "session/prompt", params: { sessionId, prompt: text("read note.txt") } })}\n`);
+  await reply(2);
+  const exited = new Promise((r) => cli.once("exit", r));
+  cli.stdin.end();
+  cli.kill("SIGTERM");
+  await exited;
+  const pid = Number(readFileSync(pidLog, "utf8").trim());
+  assert.throws(() => process.kill(pid, 0), /ESRCH/, "agy was killed before agy-acp exited");
+});
+
+test("a first prompt fails loudly when the session's conversation id cannot be saved", async () => {
+  const h = harness("two-turn-read-file.ndjson");
+  h.agent.stateDir = "/dev/null/agy-acp";
+  const { sessionId } = await h.call("session/new", { cwd: "/tmp", mcpServers: [] });
+  await assert.rejects(h.call("session/prompt", { sessionId, prompt: text("read note.txt") }), /could not save the session's agy conversation id/);
+  await h.agent.shutdown();
 });
 
 test("settings changes restart agy with new flags on the same conversation", async () => {

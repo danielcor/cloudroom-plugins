@@ -2,13 +2,18 @@
 // then the next recorded turn (through its "result" line, cycling) per stdin user message.
 // A message containing "hang" gets no reply until SIGINT.
 // FAKE_AGY_FIXTURE: transcript path. FAKE_AGY_ON_SIGINT: lines printed on SIGINT before exit 1.
-// FAKE_AGY_ARGS_LOG: each run appends its argv as one JSON line.
+// FAKE_AGY_ARGS_LOG: each run appends its argv as one JSON line. FAKE_AGY_PID_LOG: each run appends its pid.
 // FAKE_AGY_INIT_DELAY_MS: delay before the init line. FAKE_AGY_IGNORE_SIGTERM=1: survive SIGTERM and stdin EOF.
 import { appendFileSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 const args = process.argv.slice(2);
+if (args[0] === "models") {
+  process.stdout.write(readFileSync(new URL("fixtures/models.txt", import.meta.url), "utf8"));
+  process.exit(0);
+}
 if (process.env.FAKE_AGY_ARGS_LOG) appendFileSync(process.env.FAKE_AGY_ARGS_LOG, `${JSON.stringify(args)}\n`);
+if (process.env.FAKE_AGY_PID_LOG) appendFileSync(process.env.FAKE_AGY_PID_LOG, `${process.pid}\n`);
 const lines = readFileSync(process.env.FAKE_AGY_FIXTURE, "utf8").split("\n").filter(Boolean);
 const init = JSON.parse(lines[0]);
 const conv = args.includes("--conversation") ? args[args.indexOf("--conversation") + 1] : init.conversation_id;

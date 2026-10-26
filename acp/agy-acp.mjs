@@ -136,7 +136,7 @@ export class AgyAcpAgent {
     this.agy = findAgy(opts.agy);
     this.spawnAgy = spawnAgy ?? ((args, cwd) => spawn(this.agy, args, { cwd, stdio: ["pipe", "pipe", "pipe"] }));
     this.listModels = listModels ?? (() => {
-      const r = spawnSync(this.agy, ["models"], { encoding: "utf8", timeout: 30_000 });
+      const r = spawnSync(this.agy, ["models"], { encoding: "utf8", timeout: 30_000, killSignal: "SIGKILL" });
       return r.status === 0 ? r.stdout : "";
     });
     this.models = null;
@@ -246,18 +246,15 @@ export class AgyAcpAgent {
   savedConversation(id) {
     try {
       return readFileSync(join(this.stateDir, `${id}.conversation`), "utf8").trim() || null;
-    } catch {
-      return null;
+    } catch (e) {
+      if (e.code === "ENOENT") return null; // never prompted
+      throw e;
     }
   }
 
   saveConversation(s) {
-    try {
-      mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
-      writeFileSync(join(this.stateDir, `${s.id}.conversation`), `${s.conversation}\n`, { mode: 0o600 });
-    } catch (e) {
-      process.stderr.write(`agy-acp: could not save the session's agy conversation id: ${e.message}\n`);
-    }
+    mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(join(this.stateDir, `${s.id}.conversation`), `${s.conversation}\n`, { mode: 0o600 });
   }
 
   configOptions(s) {
@@ -325,12 +322,17 @@ export class AgyAcpAgent {
           if (wanted && ev.conversation_id !== wanted) {
             return fail(`agy has no conversation ${wanted} on this machine`, ERR.notFound);
           }
+          if (!wanted) {
+            try {
+              s.conversation = ev.conversation_id;
+              this.saveConversation(s); // without it the session could not be resumed
+            } catch (e) {
+              s.conversation = null;
+              return fail(`agy-acp could not save the session's agy conversation id in ${this.stateDir}: ${e.message}`);
+            }
+          }
           ready = true;
           clearTimeout(timer);
-          if (!wanted) {
-            s.conversation = ev.conversation_id;
-            this.saveConversation(s);
-          }
           resolve();
           return;
         }
@@ -480,7 +482,8 @@ export function main(argv = process.argv.slice(2)) {
     }
     void agent.handle(msg);
   });
-  const quit = () => agent.shutdown().then(() => process.exit(0));
+  let quitting = null;
+  const quit = () => (quitting ??= agent.shutdown().then(() => process.exit(0)));
   rl.on("close", quit);
   process.on("SIGTERM", quit);
   process.on("SIGINT", quit);
