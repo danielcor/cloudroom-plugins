@@ -1,14 +1,17 @@
-# cloudroom-argon
+# cloudroom-plugins
 
-Gemini 4 Argon (Google Antigravity, `agy`) for Cloudroom.
+More agent harnesses for Cloudroom: Gemini 4 Argon (Google Antigravity, `agy`) and Meta Muse
+(Muse Code, Muse Wonder Full). Argon is documented first; [Muse](#muse) has its own section below.
 
 - [`acp/`](acp/): **agy-acp**, an Agent Client Protocol agent that wraps the agy CLI's headless
   stream-json mode. Works with any ACP client. Its README has the ACP compliance note.
 - [`plugin/`](plugin/): **provider-agy**, a Cloudroom plugin that adds the "Antigravity" provider
   (id `agy`) to local threads. It runs agy-acp through the plugin SDK's ACP bridge.
-- [`cli/`](cli/) and [`skills/argon/`](skills/argon/): **argon**, a command plus a skill that run Argon
+- [`cli/argon`](cli/argon) and [`skills/argon/`](skills/argon/): **argon**, a command plus a skill that run Argon
   headless in Cloud threads through a cheap relay agent (Cloud threads cannot host a custom harness). See
   [Cloud threads](#cloud-threads-argon).
+- [`muse-acp/`](muse-acp/), [`plugin-muse/`](plugin-muse/), [`cli/muse-relay`](cli/muse-relay) and
+  [`skills/muse/`](skills/muse/): the same three pieces for Muse. See [Muse](#muse).
 
 For local threads, agy keeps its own Google login on each machine and the plugin never reads, copies or logs
 credentials. The `argon` command copies that login into Cloud sandboxes (below).
@@ -130,3 +133,117 @@ Limits:
 - Sandboxes are separate machines: Argon edits files in that sandbox's checkout, so commit and push to get them out.
 - Several sandboxes share one login; if Google ever revokes it, re-run `argon export-token >> .env` from a working machine.
 - Argon calls cost the user's Antigravity quota; the relay model costs Cloudroom usage on top.
+
+## Muse
+
+Meta Muse Code for Cloudroom, defaulting to **Muse Wonder Full** (`muse-wonder-full-1.0`, 1M context, needs the
+Power plan or higher). Local threads get a **Muse** provider (id `acp-muse`); Cloud threads use the `muse-relay`
+command and skill.
+
+- [`muse-acp/`](muse-acp/): **muse-acp**, the community ACP adapter
+  [`@bex-co/muse-code-acp`](https://github.com/bex-co/muse-code-acp) (Apache-2.0, built on Meta's `@muse-code/sdk`),
+  pinned to an exact version, plus a launcher that keeps Cloudroom sessions clean (below).
+- [`plugin-muse/`](plugin-muse/): **provider-muse**, the Cloudroom plugin. It runs muse-acp through the plugin SDK's
+  ACP bridge and finds muse-acp, node and muse on machines whose daemon has a bare PATH, like provider-agy.
+- [`cli/muse-relay`](cli/muse-relay) and [`skills/muse/`](skills/muse/): run Muse headless from Cloud threads.
+
+### What Cloudroom-started Muse sessions leave out
+
+Every session from the plugin or `muse-relay` runs with:
+
+| Off | How |
+| --- | --- |
+| Contributor mode (Meta may train on the session) | `--contributor-mode off` and `MUSE_CONTRIBUTOR_MODE=0`. The flag alone is not enough: Muse's server default model is `muse-wonder-1.0-contributor`. So only non-`-contributor` models are listed, the plugin runs the plain twin of any `-contributor` id a thread names and gives a thread without a model Wonder Full, and `muse-relay` refuses `-contributor` ids. |
+| Your Claude Code / Codex personal rules (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`) and their skills | `MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=1` (`--no-foreign-personal-context` for `muse exec`). The `context.foreign_personal_*` settings did not remove the rules in a `-c` override. |
+| Reminder observers (extra `muse-spark` calls on every turn) | `-c run.reminder_roster=[]` (`--disable-reminders` for `muse exec`) |
+| Hooks from your settings and `managed_hooks_path` (for example Orca's) | `-c managed_hooks_path=null -c hooks={}` |
+
+Muse's own skills (`~/.agents/skills`, `~/.config/muse/skills`, built-ins) and a trusted project's rules still load.
+None of this changes your saved Muse settings.
+
+### Install
+
+Each machine that runs Muse threads needs muse (signed in), Node 22 or newer, and muse-acp. The Cloudroom server
+(aipc) needs the plugin once.
+
+1. muse and muse-acp, on every machine (aipc, Mac, WSL):
+
+   ```sh
+   curl -fsSL https://dev.meta.ai/install.sh | sh        # skip if `muse --version` works
+   muse usage                                             # must show your plan; if "not logged in", run `muse login`
+   git clone https://github.com/danielcor/cloudroom-plugins ~/src/cloudroom-plugins
+   cd ~/src/cloudroom-plugins/muse-acp && npm ci --omit=dev && npm install -g .   # keep the clone
+   muse-acp --list-models                                 # muse-wonder-full-1.0 - Muse Wonder Full 1.0, ...
+   ```
+
+   `muse login` is a device-code sign-in: it prints a code to enter at a URL. `META_API_KEY` in the Cloudroom
+   daemon's environment also works instead of a login.
+
+2. The plugin, on the Cloudroom server (aipc):
+
+   ```sh
+   cd ~/src/cloudroom-plugins/plugin-muse && npm ci
+   room-cli plugin build .
+   room-cli plugin install path:$HOME/src/cloudroom-plugins/plugin-muse --yes
+   room-cli plugin list | grep -A1 provider-muse                 # provider-muse@0.1.0  running
+   room-cli provider models acp-muse --machine aipc-ubuntu       # Muse Wonder Full 1.0 (default), ...
+   ```
+
+A machine without muse-acp, or with a signed-out muse, shows "No models available" under
+`room-cli provider models acp-muse --machine <name>`. Do step 1 there (`muse login` included), then list again.
+
+### Start a Muse thread
+
+Pick the **Muse** provider and a model (Muse Wonder Full 1.0 is the default). The reasoning level is Muse's
+effort (low to max; default high). Permission modes:
+
+- **Accept edits**: Muse's defaults. It writes in the workspace, runs shell commands in its OS sandbox (network
+  through its proxy), and its own reviewer approves low-risk calls. Anything else becomes a Cloudroom approval.
+- **Full**: the bridge approves every request, and muse-acp turns Muse's OS sandbox off (`--full`).
+
+Expect a minute or more per Wonder Full turn: Muse's own system prompt and tools are about 28k input tokens per
+model call before your message.
+
+### Cloud threads: `muse-relay`
+
+One dependency-free Node (>= 20) script: `cli/muse-relay`, the same UX as `argon`.
+
+| Command | What it does |
+| --- | --- |
+| `muse-relay setup` | Idempotent. Installs `muse` (official `install.sh`) if missing and finds the login (below). |
+| `muse-relay run [--model M] [--effort L] [--new \| --session ID] [PROMPT]` | One turn in the cwd with approvals and Muse's sandbox off. Streams Muse's text and one line per tool call, then `model: <id> (<n> tokens in, <m> out)` and `session: <id>`. Continues the last session for this cwd unless `--new`. The prompt can come from stdin. Non-zero exit with Muse's error on failure. Default model `muse-wonder-full-1.0`; `-contributor` models are refused. |
+| `muse-relay models` | Muse's live model list, without contributor variants. |
+| `muse-relay export-key >> .env` | Prints `META_API_KEY=...`. Refuses to write to a terminal. |
+
+The login, in order: env `META_API_KEY`, that key in the nearest `.env` (cwd up to the git root, read on every run),
+an existing `muse login`, then the paired desktop's key through `room-cli mac run` (its `META_API_KEY` or
+`~/.config/muse/auth.json`), saved with `muse auth set`. Values are never printed.
+
+One time, on a machine where `muse` is logged in:
+
+```bash
+cd <your project> && git check-ignore .env   # must print ".env"; if not, add it to .gitignore first
+muse-relay export-key >> .env                # or from a Cloud thread: muse-relay setup && muse-relay export-key >> .env
+```
+
+Treat that `.env` like a password: the key spends your Muse plan. Never `source` it (keys can hold shell
+metacharacters such as `|`); `muse-relay` parses it.
+
+Add the `danielcor/cloudroom-plugins` repo to the project's Cloud environment (it appears as
+`/repos/cloudroom-plugins`), then start a relay thread: new Cloud thread, Claude Code, `claude-haiku-5-5`, first message:
+
+> Read /repos/cloudroom-plugins/skills/muse/SKILL.md and follow it. From now on relay everything I write to Muse.
+
+The limits are argon's: one turn per call, no mid-turn questions, edits stay in that sandbox until pushed.
+
+### Develop
+
+```sh
+npm test                                     # argon + muse-relay (fake muse replaying scrubbed transcripts)
+cd muse-acp && npm ci && npm test            # launcher, model list format, the muse-clean flags
+cd plugin-muse && npm ci && npx tsc --noEmit && npx vitest run
+MUSE_SMOKE=1 npx vitest run test/live-muse.smoke.test.ts    # live: two muse-spark-1.3 turns through the bridge
+```
+
+`MUSE_SMOKE_MODEL=muse-wonder-full-1.0` runs the smoke test on Wonder Full. `plugin-muse/src/resolve.ts` is a copy
+of provider-agy's; keep them in sync.

@@ -1,0 +1,38 @@
+{
+  "name": "bb-plugin-provider-muse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Run Cloudroom threads with Meta Muse Code (Muse Wonder Full and the other Muse models), through the muse-acp adapter.",
+  "engines": {
+    "bb": ">=0.0",
+    "bbPluginSdk": ">=0.6.49"
+  },
+  "bb": {
+    "name": "Muse provider",
+    "description": "Run Cloudroom threads with Meta Muse Code and Muse Wonder Full.",
+    "branding": {
+      "icon": "./icons/muse.svg"
+    },
+    "server": "./server.ts",
+    "host": "./src/host.ts"
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@get-bb/plugin-sdk": "0.6.49"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "better-sqlite3": "^12.11.1",
+    "cron-parser": "^5.10.2",
+    "hono": "^4.13.14",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.1"
+  }
+}
