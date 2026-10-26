@@ -69,6 +69,7 @@ test('normalizeToken / parseDotenv', () => {
   assert.strictEqual(normalizeToken('not a token'), null);
   assert.strictEqual(parseDotenv(`A=1\nexport K="${b64}"\n`, 'K'), b64);
   assert.strictEqual(parseDotenv('A=1\n', 'K'), null);
+  assert.strictEqual(parseDotenv('K=old\nK=new\n', 'K'), 'new');
 });
 
 test('run end to end against a fake agy replaying a fixture', () => {
@@ -96,5 +97,22 @@ test('run end to end against a fake agy replaying a fixture', () => {
   const r4 = spawnSync(process.execPath, [ARGON, 'run'], { cwd, env, encoding: 'utf8', input: 'from stdin' });
   assert.strictEqual(r4.status, 0);
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(tmp, 'stdin'), 'utf8')).message.content[0].text, 'from stdin');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('run keeps multibyte characters that arrive split across chunks', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'argon-test-'));
+  fs.mkdirSync(path.join(tmp, 'bin'));
+  fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/usr/bin/env node
+const b = Buffer.from(JSON.stringify({ event: 'step_update', step_update: { step_type: 'agent_response', state: 'ACTIVE', text_delta: 'caf\u00e9' } }) + '\\n'
+  + JSON.stringify({ event: 'result', result: { status: 'SUCCESS' } }) + '\\n');
+const cut = b.indexOf(0xc3) + 1;
+process.stdout.write(b.subarray(0, cut));
+setTimeout(() => process.stdout.write(b.subarray(cut)), 100);
+`, { mode: 0o755 });
+  const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}`, ARGON_CACHE_DIR: path.join(tmp, 'cache') };
+  const r = spawnSync(process.execPath, [ARGON, 'run', 'x'], { cwd: tmp, env, encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(r.stdout, 'caf\u00e9\n');
   fs.rmSync(tmp, { recursive: true, force: true });
 });
