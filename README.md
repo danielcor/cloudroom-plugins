@@ -66,6 +66,9 @@ cd plugin && npm ci && npx tsc --noEmit && npx vitest run   # registration + SDK
 AGY_SMOKE=1 npx vitest run test/live-agy.smoke.test.ts      # live: two gemini-4-argon-low turns through the bridge
 ```
 
+`room-cli plugin install` and `plugin reload` prune the plugin's dev dependencies; run `npm ci`
+again before running the tests in an installed plugin directory.
+
 ## Notes
 
 - Cloud threads cannot use this plugin: the cloud core has a fixed harness list. agy-acp is the
