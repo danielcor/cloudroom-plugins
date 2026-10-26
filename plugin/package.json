@@ -15,14 +15,7 @@
       "icon": "./icons/antigravity.svg"
     },
     "server": "./server.ts",
-    "host": "./src/host.ts",
-    "experimental_providers": [
-      {
-        "kind": "agent",
-        "id": "agy",
-        "displayName": "Antigravity"
-      }
-    ]
+    "host": "./src/host.ts"
   },
   "keywords": [
     "bb-plugin"
