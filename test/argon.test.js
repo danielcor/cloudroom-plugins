@@ -36,6 +36,9 @@ test('agyArgs: headless stream-json, optional effort and conversation', () => {
   assert.ok(a.includes('--dangerously-skip-permissions'));
   assert.deepStrictEqual(a.slice(-4), ['--effort', 'low', '--conversation', 'c1']);
   assert.ok(!agyArgs({ model: 'm' }, null).includes('--conversation'));
+  // agy refuses an --effort that conflicts with an effort-suffixed model id, so the id wins
+  assert.ok(!agyArgs({ model: 'gemini-4-argon-high', effort: 'low' }, null).includes('--effort'));
+  assert.ok(agyArgs({ model: 'some-model', effort: 'low' }, null).includes('--effort'));
 });
 
 test('render: two turns with a tool call', () => {

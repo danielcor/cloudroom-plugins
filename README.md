@@ -44,7 +44,7 @@ The `command` setting still accepts an absolute path. agy-acp itself finds agy o
 cd ~/src/cloudroom-argon/plugin && npm ci
 room-cli plugin build .
 room-cli plugin install path:$HOME/src/cloudroom-argon/plugin --yes
-room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.1  running
+room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.2  running
 room-cli provider models agy --machine aipc-ubuntu # Gemini 4 Argon High (default), Medium, Low
 ```
 
@@ -59,12 +59,31 @@ Install step 1 there, then run `room-cli provider models agy --machine <name> --
 1. In Cloudroom, start a new thread on a project and pick the machine (aipc-ubuntu, mac or
    aliengaming-wsl-debian).
 2. Pick the **Antigravity** provider and a model: Gemini 4 Argon High (default), Medium or Low.
-3. Pick the permission mode. **Accept edits** lets agy edit files but auto-denies shell commands
-   (headless agy cannot ask; the reply names what it denied). **Full** runs agy with
-   `--dangerously-skip-permissions`.
-4. Optional: the reasoning level maps to agy `--effort`.
+3. Pick the permission mode. **Accept edits** lets agy read and edit files in the thread's workspace but
+   auto-denies shell commands and file reads outside the workspace (headless agy cannot ask; the reply names what
+   it denied). **Full** runs agy with `--dangerously-skip-permissions`. See [Accept edits and reads](#accept-edits-and-reads).
+4. Optional: the reasoning level maps to agy `--effort`, except for models whose id ends in an effort
+   (`gemini-4-argon-high`, `-medium`, `-low`): agy rejects a conflicting `--effort` for those, so the id wins and
+   the level is ignored. Pick the Low/Medium/High model instead.
 
 Threads resume after a restart: agy-acp keeps each thread's agy conversation id and restarts agy with `--conversation`.
+
+### Accept edits and reads
+
+Headless `agy --mode accept-edits` reads and edits inside the workspace, but **silently denies file reads outside
+it** (the tool returns nothing; the turn ends with `denied_actions`). Reproduced on agy 1.4.7: a file next to the
+workspace under `$HOME` was denied while `/tmp` paths and the workspace itself read fine. `--mode auto` and
+`--mode plan` deny the same reads, so a reviewer that has to read other trees (skills, sibling worktrees) needs one of:
+
+- **Full**: everything allowed, shell included.
+- **Extra directories**: `--add-dir DIR` makes `DIR` part of the workspace: reads *and* edits allowed, shell still
+  denied (checked with a write and a shell call). Set it in the plugin setting "Extra directories for Accept edits"
+  (`:`-separated, every machine), in `AGY_ACP_ADD_DIRS`, with `agy-acp --add-dir DIR`, or per session through ACP's
+  `additionalDirectories`.
+- **Read-only grants**: `read_file(DIR/**)` entries under `permissions.allow` in
+  `~/.gemini/antigravity-cli/settings.json`. agy-acp never edits that file; it names this option in its denial message.
+
+Nothing grants "read anywhere, edit only the workspace, no shell" in one switch: agy has no such flag.
 
 ## Develop
 
@@ -116,16 +135,16 @@ Project `.env` files are copied into every Cloud sandbox, so Argon then works wi
 Treat that `.env` like a password: it holds a refresh token for your Google account's Antigravity login.
 Always append with `>>`; never run `export-token` where its output is captured into a chat or log.
 
-Make the script and skill available in sandboxes: add the `danielcor/cloudroom-argon` repo to the project's Cloud
-environment so it appears as `/repos/cloudroom-argon` (or `room-cli mac pull` a checkout from your desktop).
-Nothing else to install: the skill finds `/repos/cloudroom-argon/cli/argon` itself.
+Make the script and skill available in sandboxes: add the `danielcor/cloudroom-plugins` repo to the project's Cloud
+environment so it appears as `/repos/cloudroom-plugins` (older environments mount it as `/repos/cloudroom-argon`; the skill checks both) (or `room-cli mac pull` a checkout from your desktop).
+Nothing else to install: the skill finds `/repos/cloudroom-plugins/cli/argon` (or the old `/repos/cloudroom-argon`) itself.
 
 Then start a **relay thread**: new Cloud thread, Claude Code, `claude-haiku-5-5`, first message:
 
-> Read /repos/cloudroom-argon/skills/argon/SKILL.md and follow it. From now on relay everything I write to Argon.
+> Read /repos/cloudroom-plugins/skills/argon/SKILL.md and follow it. From now on relay everything I write to Argon.
 
 Every later message goes to Argon verbatim; Haiku only forwards it and quotes the answer. To use it from any other
-thread, say the same thing there, or install the skill: `ln -sfn /repos/cloudroom-argon/skills/argon ~/.claude/skills/argon`.
+thread, say the same thing there, or install the skill: `ln -sfn /repos/cloudroom-plugins/skills/argon ~/.claude/skills/argon`.
 
 Limits:
 - The relay agent sees Argon's output as command output, so the user may need to expand it; the skill tells it to quote the answer.
@@ -176,8 +195,9 @@ Each machine that runs Muse threads needs muse (signed in), Node 22 or newer, an
    muse-acp --list-models                                 # muse-wonder-full-1.0 - Muse Wonder Full 1.0, ...
    ```
 
-   `muse login` is a device-code sign-in: it prints a code to enter at a URL. `META_API_KEY` in the Cloudroom
-   daemon's environment also works instead of a login.
+   `muse login` is a device-code sign-in: it prints a code to enter at a URL, and it is the login that spends your
+   plan. `META_API_KEY` in the Cloudroom daemon's environment also works, but it is pay-per-token API billing with
+   no plan allowance (`muse usage` says `No subscription allowance (api_key)`), and it overrides a `muse login`.
 
 2. The plugin, on the Cloudroom server (aipc):
 
@@ -213,20 +233,25 @@ One dependency-free Node (>= 20) script: `cli/muse-relay`, the same UX as `argon
 | `muse-relay setup` | Idempotent. Installs `muse` (official `install.sh`) if missing and finds the login (below). |
 | `muse-relay run [--model M] [--effort L] [--new \| --session ID] [PROMPT]` | One turn in the cwd with approvals and Muse's sandbox off. Streams Muse's text and one line per tool call, then `model: <id> (<n> tokens in, <m> out)` and `session: <id>`. Continues the last session for this cwd unless `--new`. The prompt can come from stdin. Non-zero exit with Muse's error on failure. Default model `muse-wonder-full-1.0`; `-contributor` models are refused. |
 | `muse-relay models` | Muse's live model list, without contributor variants. |
-| `muse-relay export-key >> .env` | Prints `META_API_KEY=...`. Refuses to write to a terminal. |
+| `muse-relay export-login >> .env` | Prints `MUSE_AUTH_B64=...`, your `~/.config/muse/auth.json` (the `muse login` plan login) in base64. Refuses to write to a terminal. |
+| `muse-relay export-key >> .env` | Prints `META_API_KEY=...`, the pay-per-token **API** fallback (prints a warning). Refuses to write to a terminal. |
 
-The login, in order: env `META_API_KEY`, that key in the nearest `.env` (cwd up to the git root, read on every run),
-an existing `muse login`, then the paired desktop's key through `room-cli mac run` (its `META_API_KEY` or
-`~/.config/muse/auth.json`), saved with `muse auth set`. Values are never printed.
+`muse-relay` uses your **plan** login, not an API key. The login, in order: an existing plan login in
+`~/.config/muse/auth.json`; env `MUSE_AUTH_B64`; that key in the nearest `.env` (cwd up to the git root); the paired
+desktop's `~/.config/muse/auth.json` through `room-cli mac run`. A found login is written to `~/.config/muse/auth.json`
+with mode `0600`; only oauth (plan) logins are imported, an API-key `auth.json` is skipped. Only when none of those exist does it fall back to `META_API_KEY` (env or `.env`), with a one-line
+warning that this bills the API. While a plan login exists, `META_API_KEY` is removed from muse's environment, because
+muse would otherwise prefer it. Values are never printed. `muse` refreshes the login's token itself and writes it
+back to that file; a sandbox's copy refreshes on its own, so re-run `export-login` if Meta ever revokes it.
 
 One time, on a machine where `muse` is logged in:
 
 ```bash
 cd <your project> && git check-ignore .env   # must print ".env"; if not, add it to .gitignore first
-muse-relay export-key >> .env                # or from a Cloud thread: muse-relay setup && muse-relay export-key >> .env
+muse-relay export-login >> .env              # or from a Cloud thread: muse-relay setup && muse-relay export-login >> .env
 ```
 
-Treat that `.env` like a password: the key spends your Muse plan. Never `source` it (keys can hold shell
+Treat that `.env` like a password: the login spends your Muse plan. Never `source` it (keys can hold shell
 metacharacters such as `|`); `muse-relay` parses it.
 
 Add the `danielcor/cloudroom-plugins` repo to the project's Cloud environment (it appears as

@@ -14,7 +14,7 @@ copies or logs credentials. It has no dependencies and needs Node 20 or newer.
 
 ```sh
 curl -fsSL https://antigravity.google/cli/install.sh | bash   # agy, then run `agy` once and sign in
-git clone https://github.com/danielcor/cloudroom-argon && npm install -g ./cloudroom-argon/acp
+git clone https://github.com/danielcor/cloudroom-plugins && npm install -g ./cloudroom-plugins/acp
 agy-acp --version
 ```
 
