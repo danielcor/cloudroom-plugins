@@ -179,11 +179,8 @@ const API_WARNING = `warning: using ${KEY_ENV}: this bills the Muse API per toke
 function museEnv() {
   if (!isPlanLogin(readAuth()) && !loginFromEnv()) {
     const key = envKey();
-    if (key) {
-      console.error(API_WARNING);
-      return { ...process.env, [KEY_ENV]: key };
-    }
-    return process.env;
+    if (key || storedKey()) console.error(key ? API_WARNING : API_WARNING.replace(`using ${KEY_ENV}`, 'using the stored API-key login'));
+    return key ? { ...process.env, [KEY_ENV]: key } : process.env;
   }
   const { [KEY_ENV]: _drop, ...env } = process.env;
   return env;

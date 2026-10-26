@@ -181,6 +181,8 @@ test('run: an existing plan login beats META_API_KEY; an api_key login does not'
     const r = s.run(['hi'], { env: { META_API_KEY: 'x' } });
     assert.strictEqual(s.read('key'), 'x');
     assert.match(r.stderr, /bills the Muse API/);
+    const r2 = s.run(['hi']); // no META_API_KEY: the stored api_key login is used, with the same warning
+    assert.match(r2.stderr, /warning: using the stored API-key login: this bills the Muse API/);
   } finally {
     s.done();
   }
