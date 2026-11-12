@@ -65,9 +65,13 @@ Qoder sent an approval request for each write before touching anything. Both wer
 reported the denial, and the workspace stayed byte-identical. Qoder's `default` mode also asks before MCP tool
 calls and shell commands, even read-only ones, so expect approval requests for reads too.
 
-One limit remains: the bridge's approval gate only fires when Qoder asks. If a future Qoder wrote a file
-through ACP `fs/write_text_file` without asking first, the bridge would serve an in-workspace write in Accept
-edits.
+Two limits remain, because the bridge's approval gate only fires when Qoder asks:
+
+- **Writes.** If a future Qoder wrote a file through ACP `fs/write_text_file` without asking first, the bridge
+  would serve an in-workspace write in Accept edits. It refuses such a write outside the workspace.
+- **Reads.** The bridge serves ACP `fs/read_text_file` for **any** path, in both modes, with no approval
+  request and no workspace check. If Qoder read a file that way without asking first, it would get any file
+  the Cloudroom bridge process can read, inside or outside the workspace. Accept edits is not a read sandbox.
 
 Other behavior:
 
@@ -96,7 +100,7 @@ loaded its session without this warning and still remembered the earlier turns.
 ## Develop
 
 ```sh
-cd plugin-qoder && npm ci && npx tsc --noEmit && npx vitest run   # 3 files, 17 tests
+cd plugin-qoder && npm ci && npx tsc --noEmit && npx vitest run   # 3 files, 22 tests
 room-cli plugin types .                                            # regenerate SDK types for the running Cloudroom
 room-cli plugin build .                                            # dist/server.js and dist/host.js
 ```
@@ -113,8 +117,10 @@ install loaded it as `provider-qoder@0.1.0  running`.
 - `test/server.test.ts`: the declaration, the launch contract and the command setting, plus clean replacement
   and disposal of the registration. It runs the plugin in the SDK's fake plugin host and launches no agent.
 - `test/host.test.ts`: models and per-model levels from ACP config options (no `modelCli`), `reasoning_effort`
-  on start and resume, and none when no level is set or the model has no reasoning option; both permission
-  mappings, approval forwarding and denial in Accept edits, `auto` rejected, and a steer that cancels the
+  on start and resume, and none when no level is set or the model has no reasoning option (`auto`, `fast`,
+  `efficient`); the fresh-session fallback and its warning when `session/load` fails or `loadSession` is not
+  advertised; both permission mappings, approval forwarding and denial in Accept edits, the unasked
+  `fs/write_text_file` and `fs/read_text_file` limits above, `auto` rejected, and a steer that cancels the
   running prompt and resends in the same turn.
 - `test/provider-bridge.conformance.test.ts`: the SDK conformance suite (start, resume, tip fork, prompt deltas,
   zero-work turns, independent threads, interrupt and stop).

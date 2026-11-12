@@ -8,7 +8,11 @@
 //   "zero-work"          ends the turn with no updates
 //   "edit PATH"          asks session/request_permission, then writes PATH only if allowed
 //   "write-direct PATH"  calls fs/write_text_file with no permission request first
+//   "read-direct PATH"   calls fs/read_text_file with no permission request first
 //   anything else        replies with one text chunk
+// Two environment switches make a resume fall back to a fresh session:
+//   FAKE_QODER_FAIL_LOAD=1        session/load answers -32602
+//   FAKE_QODER_NO_LOAD_SESSION=1  initialize does not advertise loadSession
 // When FAKE_QODER_LOG is set it appends JSON lines: {argv, pid}, every message received
 // ({dir:"in", ...}), every request it sends ({dir:"out", ...}), the bridge's reply to each
 // request it makes ({reply: method, ...}), and how each prompt ended ({end: stopReason}).
@@ -18,6 +22,8 @@ import { createInterface } from "node:readline";
 // Ids, names and reasoning values as real Qoder reports them; the first value is the default.
 const MODELS = [
   { modelId: "auto", name: "Auto (default)", reasoning: [] },
+  { modelId: "fast", name: "Fast", reasoning: [] },
+  { modelId: "efficient", name: "Efficient", reasoning: [] },
   {
     modelId: "qmodel_latest",
     name: "Qwen4-Max-Preview",
@@ -123,6 +129,11 @@ async function prompt({ sessionId, prompt: blocks }) {
     say(sessionId, answer.error ? "write refused" : "wrote file");
     return "end_turn";
   }
+  if (word === "read-direct") {
+    const answer = await ask("fs/read_text_file", { sessionId, path });
+    say(sessionId, answer.error ? "read refused" : "read file");
+    return "end_turn";
+  }
   say(sessionId, `Qoder fake reply (${s.model}, ${s.effort ?? "no reasoning"})`);
   return "end_turn";
 }
@@ -132,7 +143,7 @@ async function dispatch(method, p) {
     case "initialize":
       return {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: true, promptCapabilities: { image: false }, sessionCapabilities: { fork: {} } },
+        agentCapabilities: { loadSession: !process.env.FAKE_QODER_NO_LOAD_SESSION, promptCapabilities: { image: false }, sessionCapabilities: { fork: {} } },
         authMethods: [],
         agentInfo: { name: "fake-qoder-acp", version: "0.0.0" },
       };
@@ -141,6 +152,7 @@ async function dispatch(method, p) {
       return { sessionId, ...state(sessionId) };
     }
     case "session/load":
+      if (process.env.FAKE_QODER_FAIL_LOAD) throw fail(-32602, `Session ${p.sessionId} not found`);
       open(p.sessionId);
       return state(p.sessionId);
     case "session/fork": {

@@ -36,7 +36,7 @@ Make the installed Qoder CLI available as a first-class Cloudroom provider so Qw
 
 ### Chosen: generic ACP wrapper
 
-Create `plugin-qoder` as a small headless package modeled on `plugin-muse`. It launches `qodercli --acp` through the SDK's generic ACP bridge.
+Create `plugin-qoder` as a small headless package modeled on `plugin-muse`. It launches `/home/danielcor/.qoder/entry/qoder` with `["--acp"]` through the SDK's generic ACP bridge.
 
 Advantages: maintained protocol mapping, less code, conformance harness, model discovery, resume/fork/stop behavior, and no private protocol dependency.
 
@@ -66,7 +66,7 @@ This could provide custom tool filtering but requires substantially more lifecyc
 
 Map modes deliberately:
 
-- `accept-edits` -> CLI arguments `--permission-mode default`: Qoder asks before mutations, and every `session/request_permission` is forwarded to Cloudroom. There is no bridge auto-approval in this mode. Review threads use this mode. The gate depends on Qoder asking: the bridge serves an in-workspace ACP `fs/write_text_file` without approval, so a mutation Qoder made through that call without first sending `session/request_permission` would not be gated (characterized in `test/host.test.ts`). In the Task 4 live check, Qoder 1.1.88 asked before both requested writes, and denying them left the workspace unchanged.
+- `accept-edits` -> CLI arguments `--permission-mode default`: Qoder asks before mutations, and every `session/request_permission` is forwarded to Cloudroom. There is no bridge auto-approval in this mode. Review threads use this mode. The gate depends on Qoder asking: the bridge serves an in-workspace ACP `fs/write_text_file` without approval, so a mutation Qoder made through that call without first sending `session/request_permission` would not be gated (characterized in `test/host.test.ts`). Reads have no bridge gate at all: in both modes the bridge serves ACP `fs/read_text_file` for any path, inside or outside the workspace, with no approval request and no workspace check, so a read Qoder made through that call without first asking would return any file the Cloudroom bridge process can read (SDK `0.6.49` `handleFsReadTextFile`; also characterized in `test/host.test.ts`). In the Task 4 live check, Qoder 1.1.88 asked before both requested writes, and denying them left the workspace unchanged.
 - `full` -> CLI arguments `--permission-mode bypass_permissions`: the bridge may approve every request. This is the only unrestricted mode and is not used for review threads.
 
 The provider documentation must say explicitly that Cloudroom's `accept-edits` label is approval-gated here: it asks before every edit and is not Qoder's own `acceptEdits` mode. Qoder's own `acceptEdits` mode is not offered.
@@ -97,7 +97,8 @@ Tests must prove that a write-like permission request reaches Cloudroom in `acce
    - no credentials appear in captured logs.
 3. Repository gates:
    - `npm ci`, `npx tsc --noEmit`, `npx vitest run`;
-   - `room-cli plugin types`, `room-cli plugin build`, and the SDK public-import scanner.
+   - `room-cli plugin types` and `room-cli plugin build`;
+   - no separate SDK public-import scanner (this repository has none): the SDK's `package.json` `exports` map makes `npx tsc --noEmit` and `npx vitest run` fail on any import of a private SDK path.
 4. Live verification after install:
    - `room-cli plugin list` is healthy and `room-cli provider models qoder` includes Qwen 4 Max Preview;
    - verify which reasoning efforts the live model supports and remove the reasoning declaration if it supports none;

@@ -273,7 +273,9 @@ Permission modes:
   Cloudroom approval, and nothing is auto-approved. Qoder's own `acceptEdits` mode is not offered. The gate
   depends on Qoder asking: the bridge serves an in-workspace ACP `fs/write_text_file` without approval, so a
   write Qoder made that way without asking first would not be gated. A live check on 2026-11-12 saw Qoder ask
-  before both requested writes; both were denied and the workspace stayed unchanged.
+  before both requested writes; both were denied and the workspace stayed unchanged. Reads are not sandboxed:
+  in both modes the bridge serves ACP `fs/read_text_file` for any path, inside or outside the workspace, with
+  no approval.
 - **Full** runs `--permission-mode bypass_permissions` and approves everything.
 
 Reasoning uses each model's own levels from ACP `reasoning_effort`, never a CLI flag (Qwen4-Max-Preview: none,

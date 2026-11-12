@@ -45,29 +45,29 @@
 - Consumes: `bb.providers.register` and `bb.settings.define` from the existing Plugin SDK, following `plugin-muse/server.ts`.
 - Produces: `QODER_PROVIDER_ID`, `DEFAULT_QODER_COMMAND`, `qoderLaunchSpec(command: string): AcpLaunchSpec`, `qoderProviderDeclaration(command: string): PluginProviderDeclaration`, and default async `qoderProviderPlugin(bb: BbPluginApi): Promise<void>`.
 
-- [ ] **Step 1: Create the branch and write the failing registration tests**
+- [x] **Step 1: Create the branch and write the failing registration tests**
 
 Create `feat/qoder-provider` from `origin/main`, carrying only the design/plan documents. In `test/server.test.ts`, add tests named:
 - `registers Qoder through generic ACP with the exact launch contract`: assert provider id, display name, both permission modes, no `nativeReasoning` hint, generic dialect, fallback model `qmodel_latest` with its live levels, `maintenance.usage === false`, and the exact launch spec including `--acp`, no `modelCli`, and both permission flag arrays.
 - `uses the command setting and an empty one falls back to the absolute Qoder wrapper`: assert custom command and `/home/danielcor/.qoder/entry/qoder`.
 - `replaces and disposes the registration without leaking resources`: assert reload leaves one current registration and disposal removes it.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cd plugin-qoder && npm ci && npx vitest run test/server.test.ts`
 Expected: FAIL because `server.ts` and `src/declaration.ts` do not exist.
 
-- [ ] **Step 3: Implement the package, declaration, registration, and icon**
+- [x] **Step 3: Implement the package, declaration, registration, and icon**
 
 Use `plugin-muse` only as the structural template. `qoderLaunchSpec` returns `{ displayName: "Qoder", command: command.trim() || DEFAULT_QODER_COMMAND, args: ["--acp"], env: {}, permissionCli: { workspaceWrite: ["--permission-mode", "default"], full: ["--permission-mode", "bypass_permissions"] } }`. There is no `nativeReasoning` hint: the bridge discovers each model's levels from its live ACP `reasoning_effort` (`thought_level`) option, and a hint would invent levels for Qoder models that have none.
 `qoderProviderDeclaration` sets generic ACP options, host-scoped dynamic models with the single Qwen fallback, and only the documented capabilities. `qoderProviderPlugin` defines the command setting, replaces registration on change, and disposes it on plugin disposal. Use a monochrome SVG icon and no frontend manifest entry.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cd plugin-qoder && npx vitest run test/server.test.ts`
 Expected: all registration tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add plugin-qoder docs/superpowers
@@ -86,25 +86,25 @@ git add plugin-qoder docs/superpowers
 - Consumes: Task 1's `qoderLaunchSpec` and `qoderProviderDeclaration`.
 - Produces: named `experimental_providerBridge` re-exported from `@get-bb/plugin-sdk/provider-bridge/acp`, with no custom protocol wrapper.
 
-- [ ] **Step 1: Write the failing bridge tests**
+- [x] **Step 1: Write the failing bridge tests**
 
 In `test/host.test.ts`, cover model discovery through ACP, no use of `modelCli`, and exact reasoning/permission mappings. In `test/provider-bridge.conformance.test.ts`, wire `experimental_runBridgeConformance` to the exported bridge for start, resume, tip fork, prompt deltas, queued steer, and stop. In `fake-qoder-acp.mjs`, implement only the ACP methods needed by the tests, including `availableModels`, `reasoning_effort`, and `session/request_permission`. Add `accept-edits forwards mutation approval without auto-approval` and `full uses bypass permissions` tests.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cd plugin-qoder && npx vitest run test/host.test.ts test/provider-bridge.conformance.test.ts`
 Expected: FAIL because `src/host.ts` and the fake ACP double are missing or incomplete.
 
-- [ ] **Step 3: Implement the bridge export and ACP double**
+- [x] **Step 3: Implement the bridge export and ACP double**
 
 Re-export `experimental_acpProviderBridge` unchanged as `experimental_providerBridge`. Keep the fake double minimal and deterministic, returning Qwen 4 Max Preview and only supported reasoning values. Do not add a second session store or custom lifecycle code.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cd plugin-qoder && npx vitest run test/host.test.ts test/provider-bridge.conformance.test.ts`
 Expected: all bridge and permission tests PASS, including approval forwarding and clean stop.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add plugin-qoder/src/host.ts plugin-qoder/test
@@ -122,11 +122,11 @@ git add plugin-qoder/src/host.ts plugin-qoder/test
 - Consumes: Tasks 1–2's provider declaration and verified permission/reasoning behavior.
 - Produces: install/build/test commands and operator-facing Qoder permission semantics.
 
-- [ ] **Step 1: Write operator documentation**
+- [x] **Step 1: Write operator documentation**
 
 Document installation, model selection, the approval-gated meaning of `accept-edits`, unrestricted `full`, ACP reasoning, queued steering, tip-only forks, missing usage data, aipc-only scope, and the prohibition on launching Qoder directly from a shell. State that Qoder's own `acceptEdits` mode is not offered.
 
-- [ ] **Step 2: Run all repository gates**
+- [x] **Step 2: Run all repository gates**
 
 Run:
 ```bash
@@ -138,9 +138,9 @@ cd ..
 room-cli plugin types plugin-qoder
 room-cli plugin build plugin-qoder
 ```
-Expected: typecheck, all tests, SDK type sync, and backend/host builds PASS with Qoder metadata present. Run the SDK public-import scanner used by the repo's existing tests and expect no private dependency violations.
+Expected: typecheck, all tests, SDK type sync, and backend/host builds PASS with Qoder metadata present. This repository has no separate SDK public-import scanner: the SDK's `package.json` `exports` map makes `npx tsc --noEmit` and `npx vitest run` fail on any import of a private SDK path, so those two gates cover it.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add plugin-qoder README.md
@@ -150,26 +150,26 @@ git add plugin-qoder README.md
 ### Task 4: Install, live Cloudroom verification, and Sol review
 
 **Files:**
-- Create: `plugin-qoder/test/live-qoder.smoke.test.ts`
+- Not created: `plugin-qoder/test/live-qoder.smoke.test.ts`. Live verification stayed manual, through Cloudroom threads (Steps 1–2), so that no test ever launches the real Qoder.
 - Modify only if verification exposes a defect: the relevant Task 1–3 files.
 
 **Interfaces:**
 - Consumes: the built `plugin-qoder` package and Cloudroom's provider/thread commands.
 - Produces: a healthy installed provider and an evidence-backed final verdict; no shell-launched Qoder agent.
 
-- [ ] **Step 1: Install and verify provider/model health**
+- [x] **Step 1: Install and verify provider/model health**
 
 Run: `room-cli plugin install path:/home/danielcor/src/cloudroom-plugins/plugin-qoder --yes`, `room-cli plugin list`, and `room-cli provider models qoder --machine aipc-ubuntu`.
 Expected: plugin healthy and Qwen 4 Max Preview available. If the model or login is missing, stop and report Settings → Agents; do not substitute a provider. Remove reasoning declarations if ACP reports no supported levels and rerun Tasks 1–2. Record the real ACP model-list shape (`session/new` `models.availableModels` versus a `configOptions` model/`thought_level` list) and the reasoning config id Qoder actually accepts; if either differs from Task 2's fake (`availableModels` only, `reasoning_effort`), fix the declaration and the fake and rerun Tasks 1–2.
 
-- [ ] **Step 2: Verify a real Cloudroom thread and approval behavior**
+- [x] **Step 2: Verify a real Cloudroom thread and approval behavior**
 
 Start a Qoder thread through `room-cli thread spawn` in `accept-edits` with a harmless read/report prompt. Confirm visible output, a second-turn resume, and clean stop. Ask for a mutation and verify Cloudroom receives an approval request; deny it and verify no file changed. Use a temporary session/workspace and remove every temporary artifact afterward.
 
-- [ ] **Step 3: Run Sol 6.1 review and resolve findings**
+- [x] **Step 3: Run Sol 6.1 review and resolve findings**
 
 Dispatch a read-only Codex `gpt-6.1-sol` high reviewer over `origin/main...HEAD` with the design, exact head, test receipts, and permission focus. Fix every finding including nits and re-review until zero findings, within four rounds. Rerun `npx tsc --noEmit`, `npx vitest run`, and `room-cli plugin build plugin-qoder` after each fix.
 
-- [ ] **Step 4: Commit the verified implementation and report**
+- [x] **Step 4: Commit the verified implementation and report**
 
 Commit any verification fixes with `feat(qoder): verify live provider workflow`, then report exact head, changed files, test counts, live thread evidence, Sol rounds/findings, install status, and anything not verified. Do not push, merge, alter other providers, or resume the separate Qwen proposal review until the user asks.

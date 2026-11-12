@@ -1,15 +1,23 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import qoderProviderPlugin from "../server.js";
 
 const QODER_WRAPPER = "/home/danielcor/.qoder/entry/qoder";
 
+// Every fake host owns a temporary storage directory that only dispose() removes.
+const hosts: ReturnType<typeof createFakePluginHost>[] = [];
+
 async function load(settings?: { command: string }) {
   const host = createFakePluginHost({ pluginId: "provider-qoder", ...(settings ? { settings } : {}) });
+  hosts.push(host);
   await qoderProviderPlugin(host.bb);
   return host;
 }
+
+afterEach(async () => {
+  for (const host of hosts.splice(0)) await host.harness.dispose();
+});
 
 const current = (host: ReturnType<typeof createFakePluginHost>) => {
   const decl = host.harness.registrations.providerRegistrations.at(-1)!;

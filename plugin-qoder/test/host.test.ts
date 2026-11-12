@@ -4,7 +4,7 @@
 // "reasoning_effort" option,
 // and the Cloudroom permission modes. Real Qoder's own approval behaviour is checked live
 // (plan Task 4), not here.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,8 @@ let logPath: string;
 let h: BridgeJsonRpcTestHarness;
 let nextId = 0;
 let started: { threadId: string; providerThreadId: string }[];
+// Extra environment for the next fake Qoder launched (the fake's FAKE_QODER_* switches).
+let fakeEnv: Record<string, string>;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qoder-host-"));
@@ -32,6 +34,7 @@ beforeEach(() => {
   mkdirSync(workspace);
   logPath = join(dir, "fake.log");
   started = [];
+  fakeEnv = {};
   h = createBridgeJsonRpcTestHarness(experimental_providerBridge.handleLine);
 });
 
@@ -52,7 +55,7 @@ afterEach(async () => {
 
 // The declared launch spec, pointed at the fake: same args and permission CLI.
 function launchSpec() {
-  return { ...qoderLaunchSpec(FAKE), env: { FAKE_QODER_LOG: logPath } };
+  return { ...qoderLaunchSpec(FAKE), env: { FAKE_QODER_LOG: logPath, ...fakeEnv } };
 }
 
 function providerOptions() {
@@ -156,8 +159,8 @@ describe("model/list through ACP", () => {
     expect(r.error).toBeUndefined();
     type Model = { id: string; displayName: string; isDefault: boolean; supportedReasoningEfforts: { reasoningEffort: string; description: string }[]; defaultReasoningEffort: string };
     const { models } = r.result as { models: Model[] };
-    expect(models.map((m) => m.id)).toEqual(["auto", "qmodel_latest"]);
-    const [auto, qwen] = models;
+    expect(models.map((m) => m.id)).toEqual(["auto", "fast", "efficient", "qmodel_latest"]);
+    const qwen = models[3];
     expect(qwen).toMatchObject({ displayName: "Qwen4-Max-Preview", isDefault: true, defaultReasoningEffort: "xhigh" });
     // The labels are the fake's option names, so the levels came over ACP, not a declared hint.
     expect(qwen.supportedReasoningEfforts).toEqual([
@@ -166,14 +169,23 @@ describe("model/list through ACP", () => {
       { reasoningEffort: "high", description: "High" },
       { reasoningEffort: "xhigh", description: "Extra High" },
     ]);
-    expect(auto).toMatchObject({ isDefault: false, defaultReasoningEffort: "medium" });
-    expect(auto.supportedReasoningEfforts.map((e) => e.reasoningEffort)).toEqual(["medium"]);
+    // auto, fast and efficient report no reasoning_effort option, so each comes back
+    // agent-managed: the bridge's single placeholder level and none of Qoder's own.
+    for (const model of models.slice(0, 3)) {
+      expect(model).toMatchObject({ isDefault: false, defaultReasoningEffort: "medium" });
+      expect(model.supportedReasoningEfforts.map((e) => e.reasoningEffort)).toEqual(["medium"]);
+    }
     // Discovery ran Qoder in ACP mode (no list-models invocation), opened one session and
-    // probed each model's reasoning by switching the model option.
+    // probed each model's reasoning by switching the model option, ending back on the default.
     const starts = log().filter((e) => e.argv);
     expect(starts.map((e) => e.argv)).toEqual([["--acp"]]);
     expect(received("session/new")).toHaveLength(1);
-    expect(received("session/set_config_option").map((e) => e.params?.configId)).toEqual(["model", "model"]);
+    expect(received("session/set_config_option").map((e) => [e.params?.configId, e.params?.value])).toEqual([
+      ["model", "auto"],
+      ["model", "fast"],
+      ["model", "efficient"],
+      ["model", "qmodel_latest"],
+    ]);
     await until(allExited, "the discovery process to exit");
   });
 });
@@ -218,19 +230,60 @@ describe("reasoning_effort", () => {
     await stop(threadId, providerThreadId);
   });
 
-  it("sends no reasoning_effort for a model that has none, on start or on resume", async () => {
-    const threadId = "thr_reasoning_auto";
-    const providerThreadId = await startThread(threadId, ACCEPT_EDITS, { model: "auto", reasoningLevel: "high" });
-    // Only the model switch: real Qoder rejects reasoning_effort on auto, so it is never sent.
-    const switchToAuto = { sessionId: providerThreadId, configId: "model", value: "auto" };
-    expect(received("session/set_config_option").map((e) => e.params)).toEqual([switchToAuto]);
+  it.each(["auto", "fast", "efficient"])("sends no reasoning_effort for %s, which has none, on start or on resume", async (model) => {
+    const threadId = `thr_reasoning_${model}`;
+    const providerThreadId = await startThread(threadId, ACCEPT_EDITS, { model, reasoningLevel: "high" });
+    // Only the model switch: real Qoder rejects reasoning_effort on these models (the fake
+    // answers "Unknown config option" as Qoder does), so it is never sent.
+    const switchModel = { sessionId: providerThreadId, configId: "model", value: model };
+    expect(received("session/set_config_option").map((e) => e.params)).toEqual([switchModel]);
     await stop(threadId, providerThreadId);
 
-    // session/load comes back on the default model, so the bridge switches to auto again, and still
-    // sends no reasoning_effort even though the thread asks for high.
-    await resume(threadId, providerThreadId, { model: "auto", reasoningLevel: "high" });
-    expect(received("session/set_config_option").map((e) => e.params)).toEqual([switchToAuto, switchToAuto]);
+    // session/load comes back on the default model, so the bridge switches the model again, and
+    // still sends no reasoning_effort even though the thread asks for high.
+    await resume(threadId, providerThreadId, { model, reasoningLevel: "high" });
+    expect(received("session/set_config_option").map((e) => e.params)).toEqual([switchModel, switchModel]);
     await stop(threadId, providerThreadId);
+  });
+});
+
+describe("resume without a restorable session", () => {
+  // README and SKILL.md promise this: the thread continues in a fresh Qoder session, under a
+  // new provider thread id, with a warning that starts with the launch command.
+  it.each<{ name: string; env: Record<string, string>; loadsTried: number }>([
+    { name: "session/load fails", env: { FAKE_QODER_FAIL_LOAD: "1" }, loadsTried: 1 },
+    { name: "Qoder does not advertise loadSession", env: { FAKE_QODER_NO_LOAD_SESSION: "1" }, loadsTried: 0 },
+  ])("starts a fresh session and warns when $name", async ({ env, loadsTried }) => {
+    const threadId = "thr_resume_fresh";
+    const providerThreadId = await startThread(threadId, ACCEPT_EDITS);
+    await stop(threadId, providerThreadId);
+
+    fakeEnv = env;
+    const resumed = await request("thread/resume", { threadId, providerThreadId, cwd: workspace, options: options(ACCEPT_EDITS), instructionMode: "append" });
+    expect(resumed.error).toBeUndefined();
+    const fresh = (resumed.result as { providerThreadId: string }).providerThreadId;
+    started.push({ threadId, providerThreadId: fresh });
+
+    // A new provider thread id, minted by the second Qoder process's session/new.
+    const pids = log().filter((e) => e.argv).map((e) => e.pid);
+    expect(pids).toHaveLength(2);
+    expect(fresh).not.toBe(providerThreadId);
+    expect(fresh.startsWith(`qoder-${pids[1]}-`)).toBe(true);
+    // session/new runs after the failed session/load, or straight away when load is not offered.
+    const sessionCalls = log().filter((e) => e.dir === "in" && ["session/new", "session/load"].includes(e.method ?? "")).map((e) => e.method);
+    expect(sessionCalls).toEqual(["session/new", ...Array<string>(loadsTried).fill("session/load"), "session/new"]);
+    if (loadsTried) expect(received("session/load").map((e) => e.params?.sessionId)).toEqual([providerThreadId]);
+
+    const warnings = () =>
+      h.messages
+        .filter((m) => m.method === "thread/delta" && (m.params as { threadId: string }).threadId === threadId)
+        .flatMap((m) => (m.params as { deltas: { kind: string; summary?: string }[] }).deltas)
+        .filter((d) => d.kind === "provider.warning");
+    await until(() => (warnings().length ? true : undefined), "the fresh-session warning");
+    expect(warnings().map((d) => d.summary)).toEqual([
+      `${FAKE} --acp could not restore the previous session; continuing in a fresh session without in-agent history.`,
+    ]);
+    await stop(threadId, fresh);
   });
 });
 
@@ -323,6 +376,23 @@ describe("permission modes", () => {
     const reply = await until(() => log().find((e) => e.reply === "fs/write_text_file"), "the direct write reply");
     expect(JSON.stringify(reply.error)).toContain("outside the workspace");
     expect(existsSync(outside)).toBe(false);
+    await stop(threadId, providerThreadId);
+  });
+
+  // Same boundary for reads, and wider: the SDK bridge serves fs/read_text_file for any path
+  // the bridge process can read, with no approval, no workspace check and no regard for the
+  // permission mode. Qoder's own "default" mode asking before reads is the only gate.
+  it("accept-edits serves a direct fs/read_text_file outside the workspace without a permission request", async () => {
+    const threadId = "thr_direct_read";
+    const providerThreadId = await startThread(threadId, ACCEPT_EDITS);
+    const outside = join(dir, "outside-read.txt");
+    writeFileSync(outside, "outside the workspace\n");
+    await prompt(threadId, providerThreadId, `read-direct ${outside}`, ACCEPT_EDITS);
+    const reply = await until(() => log().find((e) => e.reply === "fs/read_text_file"), "the direct read reply");
+    expect(reply.error).toBeUndefined();
+    expect(reply.result).toEqual({ content: "outside the workspace\n" });
+    expect(log().filter((e) => e.dir === "out").map((e) => e.method)).toEqual(["fs/read_text_file"]);
+    expect(h.messages.filter((m) => m.method === "interaction/request")).toEqual([]);
     await stop(threadId, providerThreadId);
   });
 });

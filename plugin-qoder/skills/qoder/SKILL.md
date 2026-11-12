@@ -9,8 +9,9 @@ Qoder runs only as a Cloudroom thread on the `qoder` provider (plugin `provider-
 visible, approval-gated and stoppable.
 
 **How agents get this skill.** Cloudroom loads it from the installed plugin's `skills/` directory on its own.
-After the live install on 2026-11-12, Cloudroom agents listed it as the skill `cloudroom:qoder`, with no
-manifest entry and no manual linking.
+After the live install on 2026-11-12, `room-cli skill list --json` reported it as the skill `qoder` (scope
+`plugin`, plugin `provider-qoder`), with no manifest entry and no manual linking. A Claude Code agent sees
+the same skill under its Cloudroom namespace, as `cloudroom:qoder`.
 
 ## Hard rules
 
@@ -53,6 +54,9 @@ when you are done.
   serves an in-workspace ACP `fs/write_text_file` without approval, so a write Qoder made that way without
   asking would not be gated. Live, Qoder 1.1.88 asked before every requested write. Qoder also asks before MCP
   tool calls and shell commands, even read-only ones, so a review thread waits on approvals for its reads.
+  Reads are not sandboxed either: in both modes the bridge serves ACP `fs/read_text_file` for **any** path,
+  inside or outside the workspace, with no approval, so a read Qoder made that way without asking would get
+  any file the Cloudroom bridge process can read.
 - `--permission-mode full` maps to `--permission-mode bypass_permissions`. Every request is approved. This is
   the only unrestricted mode.
 - Qoder's own `acceptEdits` mode (`accept_edits`) is **not offered**, and neither are `dont_ask` and `auto`.
@@ -68,6 +72,7 @@ when you are done.
   turn.
 - **Forks are tip-only.** You can fork only from the latest turn.
 - **No usage or quota metrics.** A context-window figure appears only if Qoder sends ACP `usage_update`.
-- **Resume can lose history.** If `session/load` fails, the bridge starts a fresh Qoder session and shows a
-  warning. Qoder then has no memory of earlier turns, so restate the context.
+- **Resume can lose history.** If `session/load` fails, or Qoder does not advertise `loadSession`, the bridge
+  starts a fresh Qoder session and shows a warning that begins `<command> --acp could not restore the
+  previous session`. Qoder then has no memory of earlier turns, so restate the context.
 - No thread rename or archive on Qoder's side, no manual compaction, no native user questions.
