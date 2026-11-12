@@ -1,0 +1,145 @@
+#!/usr/bin/env node
+// Minimal deterministic ACP double for `qoder --acp`, enough for the SDK's generic bridge:
+// initialize, session/new|load|fork, set_model, the "reasoning_effort" config option, prompt
+// and cancel. Prompts drive it by keyword:
+//   "hang"               waits for session/cancel
+//   "zero-work"          ends the turn with no updates
+//   "edit PATH"          asks session/request_permission, then writes PATH only if allowed
+//   "write-direct PATH"  calls fs/write_text_file with no permission request first
+//   anything else        replies with one text chunk
+// When FAKE_QODER_LOG is set it appends JSON lines: {argv, pid}, every message received
+// ({dir:"in", ...}), the bridge's reply to each request it makes ({reply: method, ...}),
+// and how each prompt ended ({end: stopReason}).
+import { appendFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+
+const MODELS = [{ modelId: "qwen4-max-preview", name: "Qwen 4 Max Preview", description: "Reported by fake-qoder-acp over ACP" }];
+const REASONING = ["low", "medium", "high"];
+
+const record = (entry) => process.env.FAKE_QODER_LOG && appendFileSync(process.env.FAKE_QODER_LOG, `${JSON.stringify(entry)}\n`);
+const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
+const fail = (code, message) => Object.assign(new Error(message), { code });
+
+record({ argv: process.argv.slice(2), pid: process.pid });
+
+let counter = 0;
+const sessions = new Map(); // sessionId -> { model, effort, cancel?: () => void }
+const pending = new Map(); // our request id -> { method, resolve }
+
+function open(sessionId) {
+  const id = sessionId ?? `qoder-${process.pid}-${++counter}`;
+  sessions.set(id, { model: MODELS[0].modelId, effort: "high" });
+  return id;
+}
+const models = (id) => ({ availableModels: MODELS, currentModelId: sessions.get(id).model });
+function session(id) {
+  const s = sessions.get(id);
+  if (!s) throw fail(-32602, `Unknown session ${id}`);
+  return s;
+}
+
+function ask(method, params) {
+  const id = ++counter;
+  send({ id, method, params });
+  return new Promise((resolve) => pending.set(id, { method, resolve }));
+}
+const update = (sessionId, u) => send({ method: "session/update", params: { sessionId, update: u } });
+const say = (sessionId, text) => update(sessionId, { sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+
+async function prompt({ sessionId, prompt: blocks }) {
+  const s = session(sessionId);
+  const text = blocks.filter((b) => b.type === "text").map((b) => b.text).join("\n");
+  const [word, path] = text.trim().split(/\s+/);
+  if (word === "hang") {
+    say(sessionId, "working");
+    await new Promise((resolve) => (s.cancel = resolve));
+    return "cancelled";
+  }
+  if (word === "zero-work") return "end_turn";
+  if (word === "edit") {
+    const toolCallId = `edit-${++counter}`;
+    const call = { toolCallId, title: `Edit ${path}`, kind: "edit", locations: [{ path }], rawInput: { file_path: path, content: "edited by fake qoder\n" } };
+    update(sessionId, { sessionUpdate: "tool_call", status: "pending", ...call });
+    const answer = await ask("session/request_permission", {
+      sessionId,
+      toolCall: call,
+      options: [
+        { optionId: "allow", name: "Allow", kind: "allow_once" },
+        { optionId: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    });
+    const allowed = answer.result?.outcome?.outcome === "selected" && answer.result.outcome.optionId === "allow";
+    if (allowed) await ask("fs/write_text_file", { sessionId, path, content: "edited by fake qoder\n" });
+    update(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: allowed ? "completed" : "failed" });
+    return "end_turn";
+  }
+  if (word === "write-direct") {
+    const answer = await ask("fs/write_text_file", { sessionId, path, content: "written without asking\n" });
+    say(sessionId, answer.error ? "write refused" : "wrote file");
+    return "end_turn";
+  }
+  say(sessionId, `Qoder fake reply (${s.model}, ${s.effort})`);
+  return "end_turn";
+}
+
+async function dispatch(method, p) {
+  switch (method) {
+    case "initialize":
+      return {
+        protocolVersion: 1,
+        agentCapabilities: { loadSession: true, promptCapabilities: { image: false }, sessionCapabilities: { fork: {} } },
+        authMethods: [],
+        agentInfo: { name: "fake-qoder-acp", version: "0.0.0" },
+      };
+    case "session/new": {
+      const sessionId = open();
+      return { sessionId, models: models(sessionId) };
+    }
+    case "session/load":
+      open(p.sessionId);
+      return { models: models(p.sessionId) };
+    case "session/fork": {
+      // Like session/load, the source may come from an earlier process: any id is accepted.
+      const sessionId = open();
+      return { sessionId, models: models(sessionId) };
+    }
+    case "session/set_model":
+      if (!MODELS.some((m) => m.modelId === p.modelId)) throw fail(-32602, `Unknown model ${p.modelId}`);
+      session(p.sessionId).model = p.modelId;
+      return {};
+    case "session/set_config_option":
+      if (p.configId !== "reasoning_effort" || !REASONING.includes(p.value)) throw fail(-32602, `Unsupported config ${p.configId}=${p.value}`);
+      session(p.sessionId).effort = p.value;
+      return {};
+    case "session/prompt": {
+      const stopReason = await prompt(p);
+      record({ end: stopReason });
+      return { stopReason };
+    }
+    case "session/cancel":
+      sessions.get(p.sessionId)?.cancel?.();
+      return null;
+    default:
+      throw fail(-32601, `Method not found: ${method}`);
+  }
+}
+
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const msg = JSON.parse(line);
+  if (msg.method === undefined) {
+    const mine = pending.get(msg.id);
+    if (!mine) return;
+    pending.delete(msg.id);
+    record({ reply: mine.method, ...(msg.error ? { error: msg.error } : { result: msg.result }) });
+    mine.resolve(msg);
+    return;
+  }
+  record({ dir: "in", method: msg.method, params: msg.params, ...(msg.id !== undefined ? { id: msg.id } : {}) });
+  dispatch(msg.method, msg.params ?? {}).then(
+    (result) => msg.id !== undefined && send({ id: msg.id, result }),
+    (e) => msg.id !== undefined && send({ id: msg.id, error: { code: e.code ?? -32603, message: e.message } }),
+  );
+});
+rl.on("close", () => process.exit(0));

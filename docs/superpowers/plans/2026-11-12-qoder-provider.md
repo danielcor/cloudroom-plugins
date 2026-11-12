@@ -23,7 +23,7 @@
 
 ## Review Focus
 
-- Cloudroom `auto` must never reach the generic ACP bridge, which rejects it; `accept-edits` must forward mutation approvals instead of auto-approving. Covered by Tasks 1 and 2.
+- Cloudroom `auto` must never reach the generic ACP bridge, which rejects it; `accept-edits` must forward mutation approvals instead of auto-approving. Covered by Tasks 2 and 4.
 - Qoder's `DisplayName (key)` model-list output must not enter the SDK's incompatible `modelCli` parser. Covered by Task 1.
 - A resumed session must not have its saved reasoning overridden by a CLI flag; only model-aware ACP `reasoning_effort` is allowed. Covered by Tasks 1 and 2.
 - A settings reload or plugin disposal must not leak the old provider registration or process resources. Covered by Task 1.
