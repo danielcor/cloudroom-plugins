@@ -1,0 +1,38 @@
+{
+  "name": "bb-plugin-provider-qoder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Run Cloudroom threads with the Qoder CLI (Qwen 4 Max Preview and the other Qoder models) through Qoder's ACP mode.",
+  "engines": {
+    "bb": ">=0.0",
+    "bbPluginSdk": ">=0.6.49"
+  },
+  "bb": {
+    "name": "Qoder provider",
+    "description": "Run Cloudroom threads with the Qoder CLI and Qwen 4 Max Preview.",
+    "branding": {
+      "icon": "./icons/qoder.svg"
+    },
+    "server": "./server.ts",
+    "host": "./src/host.ts"
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@get-bb/plugin-sdk": "0.6.49"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "better-sqlite3": "^12.11.1",
+    "cron-parser": "^5.10.2",
+    "hono": "^4.13.14",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.1"
+  }
+}
