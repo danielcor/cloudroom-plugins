@@ -264,7 +264,7 @@ Install on aipc (Qoder CLI already installed and signed in with `qodercli`):
 cd ~/src/cloudroom-plugins/plugin-qoder && npm ci
 room-cli plugin build .
 room-cli plugin install path:$HOME/src/cloudroom-plugins/plugin-qoder --yes
-room-cli provider models qoder --machine aipc-ubuntu      # Qwen 4 Max Preview, plus Qoder's other models
+room-cli provider models qoder --machine aipc-ubuntu      # expected (confirmed live in Task 4): Qwen 4 Max Preview, ...
 ```
 
 Permission modes:
@@ -274,7 +274,8 @@ Permission modes:
   mode is not offered.
 - **Full** runs `--permission-mode bypass_permissions` and approves everything.
 
-Reasoning (low, medium, high; default high) goes through ACP `reasoning_effort`. Steering is queued, forks are
-tip-only, and there is no usage data. [`plugin-qoder/README.md`](plugin-qoder/README.md) has the details and
+Reasoning (low, medium, high; default high) goes through ACP `reasoning_effort`, never a CLI flag. Cloudroom
+re-applies the thread's level on resume. Steering is queued, forks are tip-only, and there are no usage or quota
+metrics. [`plugin-qoder/README.md`](plugin-qoder/README.md) has the details and
 the test commands. [`plugin-qoder/skills/qoder/SKILL.md`](plugin-qoder/skills/qoder/SKILL.md) tells agents how
 to start a Qoder thread.
