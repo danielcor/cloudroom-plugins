@@ -88,7 +88,7 @@ git add plugin-qoder docs/superpowers
 
 - [x] **Step 1: Write the failing bridge tests**
 
-In `test/host.test.ts`, cover model discovery through ACP, no use of `modelCli`, and exact reasoning/permission mappings. In `test/provider-bridge.conformance.test.ts`, wire `experimental_runBridgeConformance` to the exported bridge for start, resume, tip fork, prompt deltas, queued steer, and stop. In `fake-qoder-acp.mjs`, implement only the ACP methods needed by the tests, including `availableModels`, `reasoning_effort`, and `session/request_permission`. Add `accept-edits forwards mutation approval without auto-approval` and `full uses bypass permissions` tests.
+In `test/host.test.ts`, cover model discovery through ACP, no use of `modelCli`, exact reasoning/permission mappings, and queued steer. In `test/provider-bridge.conformance.test.ts`, wire `experimental_runBridgeConformance` to the exported bridge for start, resume, tip fork, prompt deltas, and stop (queued steer is not in the SDK conformance suite). In `fake-qoder-acp.mjs`, implement only the ACP methods needed by the tests, including `availableModels`, `reasoning_effort`, and `session/request_permission`. Add `accept-edits forwards mutation approval without auto-approval` and `full uses bypass permissions` tests.
 
 - [x] **Step 2: Run the tests to verify they fail**
 
@@ -138,7 +138,7 @@ cd ..
 room-cli plugin types plugin-qoder
 room-cli plugin build plugin-qoder
 ```
-Expected: typecheck, all tests, SDK type sync, and backend/host builds PASS with Qoder metadata present. This repository has no separate SDK public-import scanner: the SDK's `package.json` `exports` map makes `npx tsc --noEmit` and `npx vitest run` fail on any import of a private SDK path, so those two gates cover it.
+Expected: typecheck, all tests, SDK type sync, and backend/host builds PASS with Qoder metadata present. This repository has no separate SDK public-import scanner. The SDK's `package.json` `exports` map gives partial cover instead. For a subpath the SDK does not export (for example `@get-bb/plugin-sdk/dist/...`), Node and Vitest refuse to load it (`ERR_PACKAGE_PATH_NOT_EXPORTED`, "is not exported"), and `npx tsc --noEmit` (`moduleResolution: bundler`) reports `TS2307` on a value or type import but nothing on a side-effect-only import. The six `./internal/*` subpaths that SDK `0.6.49` exports on purpose (for example `@get-bb/plugin-sdk/internal/host-policy`) pass both `tsc` and Vitest, so no gate stops an import of those.
 
 - [x] **Step 3: Commit**
 
@@ -160,7 +160,7 @@ git add plugin-qoder README.md
 - [x] **Step 1: Install and verify provider/model health**
 
 Run: `room-cli plugin install path:/home/danielcor/src/cloudroom-plugins/plugin-qoder --yes`, `room-cli plugin list`, and `room-cli provider models qoder --machine aipc-ubuntu`.
-Expected: plugin healthy and Qwen 4 Max Preview available. If the model or login is missing, stop and report Settings → Agents; do not substitute a provider. Remove reasoning declarations if ACP reports no supported levels and rerun Tasks 1–2. Record the real ACP model-list shape (`session/new` `models.availableModels` versus a `configOptions` model/`thought_level` list) and the reasoning config id Qoder actually accepts; if either differs from Task 2's fake (`availableModels` only, `reasoning_effort`), fix the declaration and the fake and rerun Tasks 1–2.
+Expected: plugin healthy and Qwen 4 Max Preview available. If the model or login is missing, stop and report Settings → Agents; do not substitute a provider. Remove reasoning declarations if ACP reports no supported levels and rerun Tasks 1–2. Record the real ACP model-list shape (`session/new` `models.availableModels` versus a `configOptions` model/`thought_level` list) and the reasoning config id Qoder actually accepts; if either differs from Task 2's fake (`availableModels`, a `model` config option, and per-model `reasoning_effort`), fix the declaration and the fake and rerun Tasks 1–2.
 
 - [x] **Step 2: Verify a real Cloudroom thread and approval behavior**
 

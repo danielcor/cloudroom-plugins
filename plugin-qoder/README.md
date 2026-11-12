@@ -68,7 +68,10 @@ calls and shell commands, even read-only ones, so expect approval requests for r
 Two limits remain, because the bridge's approval gate only fires when Qoder asks:
 
 - **Writes.** If a future Qoder wrote a file through ACP `fs/write_text_file` without asking first, the bridge
-  would serve an in-workspace write in Accept edits. It refuses such a write outside the workspace.
+  would serve an in-workspace write in Accept edits. In Accept edits it refuses a path outside the workspace,
+  but that check compares path text and does not follow symlinks: a write through a symlink inside the
+  workspace that points outside lands outside, with no approval. In Full there is no workspace check at all,
+  so such a write goes to any path.
 - **Reads.** The bridge serves ACP `fs/read_text_file` for **any** path, in both modes, with no approval
   request and no workspace check. If Qoder read a file that way without asking first, it would get any file
   the Cloudroom bridge process can read, inside or outside the workspace. Accept edits is not a read sandbox.
@@ -100,7 +103,7 @@ loaded its session without this warning and still remembered the earlier turns.
 ## Develop
 
 ```sh
-cd plugin-qoder && npm ci && npx tsc --noEmit && npx vitest run   # 3 files, 22 tests
+cd plugin-qoder && npm ci && npx tsc --noEmit && npx vitest run   # 3 files, 23 tests
 room-cli plugin types .                                            # regenerate SDK types for the running Cloudroom
 room-cli plugin build .                                            # dist/server.js and dist/host.js
 ```
@@ -120,8 +123,8 @@ install loaded it as `provider-qoder@0.1.0  running`.
   on start and resume, and none when no level is set or the model has no reasoning option (`auto`, `fast`,
   `efficient`); the fresh-session fallback and its warning when `session/load` fails or `loadSession` is not
   advertised; both permission mappings, approval forwarding and denial in Accept edits, the unasked
-  `fs/write_text_file` and `fs/read_text_file` limits above, `auto` rejected, and a steer that cancels the
-  running prompt and resends in the same turn.
+  `fs/write_text_file` (including the symlink escape) and `fs/read_text_file` limits above, `auto` rejected,
+  and a steer that cancels the running prompt and resends in the same turn.
 - `test/provider-bridge.conformance.test.ts`: the SDK conformance suite (start, resume, tip fork, prompt deltas,
   zero-work turns, independent threads, interrupt and stop).
 

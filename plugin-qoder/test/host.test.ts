@@ -4,7 +4,7 @@
 // "reasoning_effort" option,
 // and the Cloudroom permission modes. Real Qoder's own approval behaviour is checked live
 // (plan Task 4), not here.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -376,6 +376,25 @@ describe("permission modes", () => {
     const reply = await until(() => log().find((e) => e.reply === "fs/write_text_file"), "the direct write reply");
     expect(JSON.stringify(reply.error)).toContain("outside the workspace");
     expect(existsSync(outside)).toBe(false);
+    await stop(threadId, providerThreadId);
+  });
+
+  // That refusal is lexical: the bridge compares path text and never follows symlinks. A path
+  // through a symlink inside the workspace passes the check, and the write lands outside the
+  // workspace, still with no approval request.
+  it("accept-edits lets a direct fs/write_text_file escape the workspace through a symlink inside it", async () => {
+    const threadId = "thr_direct_write_symlink";
+    const providerThreadId = await startThread(threadId, ACCEPT_EDITS);
+    // Outside the workspace but under `dir`, so afterEach removes it with the rest.
+    const outsideDir = join(dir, "outside-dir");
+    mkdirSync(outsideDir);
+    symlinkSync(outsideDir, join(workspace, "link"));
+    await prompt(threadId, providerThreadId, `write-direct ${join(workspace, "link", "escape.txt")}`, ACCEPT_EDITS);
+    const reply = await until(() => log().find((e) => e.reply === "fs/write_text_file"), "the direct write reply");
+    expect(reply.error).toBeUndefined();
+    expect(readFileSync(join(outsideDir, "escape.txt"), "utf8")).toBe("written without asking\n");
+    expect(log().filter((e) => e.dir === "out").map((e) => e.method)).toEqual(["fs/write_text_file"]);
+    expect(h.messages.filter((m) => m.method === "interaction/request")).toEqual([]);
     await stop(threadId, providerThreadId);
   });
 

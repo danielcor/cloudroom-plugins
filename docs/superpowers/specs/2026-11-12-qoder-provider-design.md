@@ -66,8 +66,8 @@ This could provide custom tool filtering but requires substantially more lifecyc
 
 Map modes deliberately:
 
-- `accept-edits` -> CLI arguments `--permission-mode default`: Qoder asks before mutations, and every `session/request_permission` is forwarded to Cloudroom. There is no bridge auto-approval in this mode. Review threads use this mode. The gate depends on Qoder asking: the bridge serves an in-workspace ACP `fs/write_text_file` without approval, so a mutation Qoder made through that call without first sending `session/request_permission` would not be gated (characterized in `test/host.test.ts`). Reads have no bridge gate at all: in both modes the bridge serves ACP `fs/read_text_file` for any path, inside or outside the workspace, with no approval request and no workspace check, so a read Qoder made through that call without first asking would return any file the Cloudroom bridge process can read (SDK `0.6.49` `handleFsReadTextFile`; also characterized in `test/host.test.ts`). In the Task 4 live check, Qoder 1.1.88 asked before both requested writes, and denying them left the workspace unchanged.
-- `full` -> CLI arguments `--permission-mode bypass_permissions`: the bridge may approve every request. This is the only unrestricted mode and is not used for review threads.
+- `accept-edits` -> CLI arguments `--permission-mode default`: Qoder asks before mutations, and every `session/request_permission` is forwarded to Cloudroom. There is no bridge auto-approval in this mode. Review threads use this mode. The gate depends on Qoder asking: the bridge serves an in-workspace ACP `fs/write_text_file` without approval, so a mutation Qoder made through that call without first sending `session/request_permission` would not be gated (characterized in `test/host.test.ts`). For such an unasked write the bridge refuses a path outside the workspace only in `accept-edits`, and that check is lexical: it compares path text and does not resolve symlinks, so a write through a symlink inside the workspace that points outside lands outside with no approval request (SDK `0.6.49` `handleFsWriteTextFile` and `isPathInsideRoots`; also characterized in `test/host.test.ts`). Reads have no bridge gate at all: in both modes the bridge serves ACP `fs/read_text_file` for any path, inside or outside the workspace, with no approval request and no workspace check, so a read Qoder made through that call without first asking would return any file the Cloudroom bridge process can read (SDK `0.6.49` `handleFsReadTextFile`; also characterized in `test/host.test.ts`). In the Task 4 live check, Qoder 1.1.88 asked before both requested writes, and denying them left the workspace unchanged.
+- `full` -> CLI arguments `--permission-mode bypass_permissions`: the bridge may approve every request, and it applies no workspace check to `fs/write_text_file`, so an unasked write goes to any path. This is the only unrestricted mode and is not used for review threads.
 
 The provider documentation must say explicitly that Cloudroom's `accept-edits` label is approval-gated here: it asks before every edit and is not Qoder's own `acceptEdits` mode. Qoder's own `acceptEdits` mode is not offered.
 
@@ -93,12 +93,11 @@ Tests must prove that a write-like permission request reaches Cloudroom in `acce
    - unknown methods and invalid parameters return the SDK-defined errors;
    - `accept-edits` forwards a mutation permission request without auto-approval;
    - `full` uses the bypass mapping;
-   - reasoning uses `reasoning_effort`, not a CLI override;
-   - no credentials appear in captured logs.
+   - reasoning uses `reasoning_effort`, not a CLI override.
 3. Repository gates:
    - `npm ci`, `npx tsc --noEmit`, `npx vitest run`;
    - `room-cli plugin types` and `room-cli plugin build`;
-   - no separate SDK public-import scanner (this repository has none): the SDK's `package.json` `exports` map makes `npx tsc --noEmit` and `npx vitest run` fail on any import of a private SDK path.
+   - no separate SDK public-import scanner (this repository has none). The SDK's `package.json` `exports` map gives partial cover instead. For a subpath the SDK does not export (for example `@get-bb/plugin-sdk/dist/...`), Node and Vitest refuse to load it (`ERR_PACKAGE_PATH_NOT_EXPORTED`, "is not exported"), and `npx tsc --noEmit` (`moduleResolution: bundler`) reports `TS2307` on a value or type import but nothing on a side-effect-only import. The six `./internal/*` subpaths that SDK `0.6.49` exports on purpose (for example `@get-bb/plugin-sdk/internal/host-policy`) pass both `tsc` and Vitest, so no gate stops an import of those.
 4. Live verification after install:
    - `room-cli plugin list` is healthy and `room-cli provider models qoder` includes Qwen 4 Max Preview;
    - verify which reasoning efforts the live model supports and remove the reasoning declaration if it supports none;

@@ -52,12 +52,16 @@ when you are done.
   every permission request Qoder sends reaches Cloudroom as an approval, and nothing is auto-approved.
   Despite the label, it does not let edits through on its own. The gate depends on Qoder asking: the bridge
   serves an in-workspace ACP `fs/write_text_file` without approval, so a write Qoder made that way without
-  asking would not be gated. Live, Qoder 1.1.88 asked before every requested write. Qoder also asks before MCP
-  tool calls and shell commands, even read-only ones, so a review thread waits on approvals for its reads.
+  asking would not be gated. The bridge refuses such a write to a path outside the workspace only in this
+  mode, and only by comparing path text: it does not follow symlinks, so a write through a symlink inside the
+  workspace that points outside lands outside. Live, Qoder 1.1.88 asked before every requested write. Qoder
+  also asks before MCP tool calls and shell commands, even read-only ones, so a review thread waits on
+  approvals for its reads.
   Reads are not sandboxed either: in both modes the bridge serves ACP `fs/read_text_file` for **any** path,
   inside or outside the workspace, with no approval, so a read Qoder made that way without asking would get
   any file the Cloudroom bridge process can read.
-- `--permission-mode full` maps to `--permission-mode bypass_permissions`. Every request is approved. This is
+- `--permission-mode full` maps to `--permission-mode bypass_permissions`. Every request is approved, and the
+  bridge applies no workspace check to `fs/write_text_file`, so an unasked write goes to any path. This is
   the only unrestricted mode.
 - Qoder's own `acceptEdits` mode (`accept_edits`) is **not offered**, and neither are `dont_ask` and `auto`.
   Cloudroom's `auto` fails, because the generic ACP bridge rejects it.
