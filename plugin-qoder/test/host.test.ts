@@ -398,6 +398,21 @@ describe("permission modes", () => {
     await stop(threadId, providerThreadId);
   });
 
+  // In full the bridge applies no workspace check at all: the same unasked write that
+  // accept-edits refuses outside the workspace goes through, with no approval request.
+  it("full lets a direct fs/write_text_file without a permission request write outside the workspace", async () => {
+    const threadId = "thr_direct_write_full";
+    const providerThreadId = await startThread(threadId, FULL);
+    const outside = join(dir, "outside-full.txt");
+    await prompt(threadId, providerThreadId, `write-direct ${outside}`, FULL);
+    const reply = await until(() => log().find((e) => e.reply === "fs/write_text_file"), "the direct write reply");
+    expect(reply.error).toBeUndefined();
+    expect(readFileSync(outside, "utf8")).toBe("written without asking\n");
+    expect(log().filter((e) => e.dir === "out").map((e) => e.method)).toEqual(["fs/write_text_file"]);
+    expect(h.messages.filter((m) => m.method === "interaction/request")).toEqual([]);
+    await stop(threadId, providerThreadId);
+  });
+
   // Same boundary for reads, and wider: the SDK bridge serves fs/read_text_file for any path
   // the bridge process can read, with no approval, no workspace check and no regard for the
   // permission mode. Qoder's own "default" mode asking before reads is the only gate.

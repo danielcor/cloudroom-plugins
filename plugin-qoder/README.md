@@ -103,7 +103,7 @@ loaded its session without this warning and still remembered the earlier turns.
 ## Develop
 
 ```sh
-cd plugin-qoder && npm ci && npx tsc --noEmit && npx vitest run   # 3 files, 23 tests
+cd plugin-qoder && npm ci && npx tsc --noEmit && npx vitest run   # 3 files, 24 tests
 room-cli plugin types .                                            # regenerate SDK types for the running Cloudroom
 room-cli plugin build .                                            # dist/server.js and dist/host.js
 ```
@@ -123,8 +123,9 @@ install loaded it as `provider-qoder@0.1.0  running`.
   on start and resume, and none when no level is set or the model has no reasoning option (`auto`, `fast`,
   `efficient`); the fresh-session fallback and its warning when `session/load` fails or `loadSession` is not
   advertised; both permission mappings, approval forwarding and denial in Accept edits, the unasked
-  `fs/write_text_file` (including the symlink escape) and `fs/read_text_file` limits above, `auto` rejected,
-  and a steer that cancels the running prompt and resends in the same turn.
+  `fs/write_text_file` (including the symlink escape and Full's missing workspace check) and
+  `fs/read_text_file` limits above, `auto` rejected, and a steer that cancels the running prompt and resends
+  in the same turn.
 - `test/provider-bridge.conformance.test.ts`: the SDK conformance suite (start, resume, tip fork, prompt deltas,
   zero-work turns, independent threads, interrupt and stop).
 
