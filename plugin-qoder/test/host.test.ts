@@ -16,25 +16,37 @@ import { qoderLaunchSpec, qoderProviderDeclaration } from "../src/declaration.js
 
 const FAKE = fileURLToPath(new URL("./fake-qoder-acp.mjs", import.meta.url));
 
-type LogEntry = { argv?: string[]; dir?: "in"; method?: string; params?: Record<string, unknown>; id?: unknown; result?: unknown; error?: unknown; reply?: string; end?: string; pid?: number };
+type LogEntry = { argv?: string[]; dir?: "in" | "out"; method?: string; params?: Record<string, unknown>; id?: unknown; result?: unknown; error?: unknown; reply?: string; end?: string; pid?: number };
 
 let dir: string;
 let workspace: string;
 let logPath: string;
 let h: BridgeJsonRpcTestHarness;
 let nextId = 0;
+let started: { threadId: string; providerThreadId: string }[];
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "qoder-host-"));
   workspace = join(dir, "workspace");
   mkdirSync(workspace);
   logPath = join(dir, "fake.log");
+  started = [];
   h = createBridgeJsonRpcTestHarness(experimental_providerBridge.handleLine);
 });
 
-afterEach(() => {
-  h.restore();
-  rmSync(dir, { recursive: true, force: true });
+// Even when a test fails midway: release every thread it started, kill any Qoder process
+// still alive, and wait for them to exit before removing the temporary directory.
+afterEach(async () => {
+  try {
+    for (const { threadId, providerThreadId } of started) {
+      await request("thread/stop", { threadId, providerThreadId, intent: "release", activeTurnId: null }).catch(() => undefined);
+    }
+    for (const { pid } of log()) if (pid !== undefined && alive(pid)) process.kill(pid, "SIGKILL");
+    await until(allExited, "every Qoder process to exit").catch(() => undefined);
+  } finally {
+    h.restore();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // The declared launch spec, pointed at the fake: same args, reasoning hint and permission CLI.
@@ -92,7 +104,9 @@ const deltaKinds = (threadId: string) =>
 async function startThread(threadId: string, policy: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   const r = await request("thread/start", { threadId, cwd: workspace, options: options(policy, extra), instructionMode: "append" });
   expect(r.error).toBeUndefined();
-  return (r.result as { providerThreadId: string }).providerThreadId;
+  const providerThreadId = (r.result as { providerThreadId: string }).providerThreadId;
+  started.push({ threadId, providerThreadId });
+  return providerThreadId;
 }
 
 async function prompt(threadId: string, providerThreadId: string, text: string, policy: Record<string, unknown>) {
@@ -131,7 +145,9 @@ describe("host artifact", () => {
 });
 
 describe("model/list through ACP", () => {
-  it("lists Qwen 4 Max Preview from ACP availableModels with low/medium/high, default high", async () => {
+  // The model comes from ACP; its low/medium/high levels (default high) come from the declared
+  // nativeReasoning hint, which the bridge applies because availableModels carries no levels.
+  it("lists Qwen 4 Max Preview from ACP availableModels with the declared low/medium/high hint, default high", async () => {
     const spec = launchSpec();
     expect(spec).not.toHaveProperty("modelCli");
     const r = await request("model/list", { providerOptions: providerOptions() });
@@ -191,6 +207,8 @@ describe("permission modes", () => {
     expect(turn.error).toBeUndefined();
     const approval = await until(() => h.messages.find((m) => m.method === "interaction/request"), "the approval request");
     expect((approval.params as { payload: { kind: string; subject: { kind: string } } }).payload).toMatchObject({ kind: "approval", subject: { kind: "file_change" } });
+    // The fake's outgoing log sees the request it sent (the R-1 test relies on this record).
+    expect(log().filter((e) => e.dir === "out").map((e) => e.method)).toEqual(["session/request_permission"]);
     // The bridge holds Qoder's request open: no answer and no write until Cloudroom decides.
     await new Promise((r) => setTimeout(r, 200));
     expect(log().filter((e) => e.reply === "session/request_permission")).toEqual([]);
@@ -246,8 +264,9 @@ describe("permission modes", () => {
     const reply = await until(() => log().find((e) => e.reply === "fs/write_text_file"), "the direct write reply");
     expect(reply.error).toBeUndefined();
     expect(readFileSync(inside, "utf8")).toBe("written without asking\n");
-    expect(received("session/request_permission")).toEqual([]);
-    expect(log().some((e) => e.method === "session/request_permission")).toBe(false);
+    // The fake records every request it sends: it never asked.
+    expect(log().filter((e) => e.dir === "out" && e.method === "session/request_permission")).toEqual([]);
+    expect(log().filter((e) => e.dir === "out").map((e) => e.method)).toEqual(["fs/write_text_file"]);
     expect(h.messages.filter((m) => m.method === "interaction/request")).toEqual([]);
     await stop(threadId, providerThreadId);
   });

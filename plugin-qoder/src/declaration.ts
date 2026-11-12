@@ -12,9 +12,9 @@ const REASONING_LEVELS = ["low", "medium", "high"] as const;
 // availableModels: no modelCli, because `qodercli` prints "DisplayName (key)"
 // lines the SDK parser cannot read. Reasoning is the model-aware ACP
 // "reasoning_effort" option, never a CLI flag that would override a resumed
-// session. Cloudroom accept-edits runs Qoder's own "default" mode, which asks
-// before every mutation and forwards each request to Cloudroom; only full
-// bypasses approvals.
+// session. Cloudroom accept-edits runs Qoder's own "default" mode, which is
+// expected to ask before each mutation so the bridge forwards the request to
+// Cloudroom; that is verified live in plan Task 4. Only full bypasses approvals.
 export function qoderLaunchSpec(command: string): AcpLaunchSpec {
   return {
     displayName: "Qoder",

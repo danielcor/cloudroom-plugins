@@ -23,7 +23,7 @@
 
 ## Review Focus
 
-- Cloudroom `auto` must never reach the generic ACP bridge, which rejects it; `accept-edits` must forward mutation approvals instead of auto-approving. Covered by Tasks 2 and 4.
+- Cloudroom `auto` must never reach the generic ACP bridge, which rejects it; `accept-edits` must forward mutation approvals instead of auto-approving. Covered by Tasks 1, 2 and 4.
 - Qoder's `DisplayName (key)` model-list output must not enter the SDK's incompatible `modelCli` parser. Covered by Task 1.
 - A resumed session must not have its saved reasoning overridden by a CLI flag; only model-aware ACP `reasoning_effort` is allowed. Covered by Tasks 1 and 2.
 - A settings reload or plugin disposal must not leak the old provider registration or process resources. Covered by Task 1.
@@ -160,7 +160,7 @@ git add plugin-qoder README.md
 - [ ] **Step 1: Install and verify provider/model health**
 
 Run: `room-cli plugin install path:/home/danielcor/src/cloudroom-plugins/plugin-qoder --yes`, `room-cli plugin list`, and `room-cli provider models qoder --machine aipc-ubuntu`.
-Expected: plugin healthy and Qwen 4 Max Preview available. If the model or login is missing, stop and report Settings → Agents; do not substitute a provider. Remove reasoning declarations if ACP reports no supported levels and rerun Tasks 1–2.
+Expected: plugin healthy and Qwen 4 Max Preview available. If the model or login is missing, stop and report Settings → Agents; do not substitute a provider. Remove reasoning declarations if ACP reports no supported levels and rerun Tasks 1–2. Record the real ACP model-list shape (`session/new` `models.availableModels` versus a `configOptions` model/`thought_level` list) and the reasoning config id Qoder actually accepts; if either differs from Task 2's fake (`availableModels` only, `reasoning_effort`), fix the declaration and the fake and rerun Tasks 1–2.
 
 - [ ] **Step 2: Verify a real Cloudroom thread and approval behavior**
 

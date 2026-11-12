@@ -8,7 +8,7 @@
 //   "write-direct PATH"  calls fs/write_text_file with no permission request first
 //   anything else        replies with one text chunk
 // When FAKE_QODER_LOG is set it appends JSON lines: {argv, pid}, every message received
-// ({dir:"in", ...}), the bridge's reply to each request it makes ({reply: method, ...}),
+// ({dir:"in", ...}), every request it sends ({dir:"out", ...}), the bridge's reply to each request it makes ({reply: method, ...}),
 // and how each prompt ended ({end: stopReason}).
 import { appendFileSync } from "node:fs";
 import { createInterface } from "node:readline";
@@ -40,6 +40,7 @@ function session(id) {
 
 function ask(method, params) {
   const id = ++counter;
+  record({ dir: "out", method, params, id });
   send({ id, method, params });
   return new Promise((resolve) => pending.set(id, { method, resolve }));
 }
