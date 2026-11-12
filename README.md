@@ -1,7 +1,8 @@
 # cloudroom-plugins
 
-More agent harnesses for Cloudroom: Gemini 4 Argon (Google Antigravity, `agy`) and Meta Muse
-(Muse Code, Muse Wonder Full). Argon is documented first; [Muse](#muse) has its own section below.
+More agent harnesses for Cloudroom: Gemini 4 Argon (Google Antigravity, `agy`), Meta Muse
+(Muse Code, Muse Wonder Full) and Qoder (Qwen 4 Max Preview). Argon is documented first; [Muse](#muse) and
+[Qoder](#qoder) have their own sections below.
 
 - [`acp/`](acp/): **agy-acp**, an Agent Client Protocol agent that wraps the agy CLI's headless
   stream-json mode. Works with any ACP client. Its README has the ACP compliance note.
@@ -12,6 +13,8 @@ More agent harnesses for Cloudroom: Gemini 4 Argon (Google Antigravity, `agy`) a
   [Cloud threads](#cloud-threads-argon).
 - [`muse-acp/`](muse-acp/), [`plugin-muse/`](plugin-muse/), [`cli/muse-relay`](cli/muse-relay) and
   [`skills/muse/`](skills/muse/): the same three pieces for Muse. See [Muse](#muse).
+- [`plugin-qoder/`](plugin-qoder/): **provider-qoder**, the "Qoder" provider (id `qoder`) for local threads on
+  aipc. It runs the Qoder CLI's own ACP mode through the SDK's generic ACP bridge. See [Qoder](#qoder).
 
 For local threads, agy keeps its own Google login on each machine and the plugin never reads, copies or logs
 credentials. The `argon` command copies that login into Cloud sandboxes (below).
@@ -247,3 +250,31 @@ MUSE_SMOKE=1 npx vitest run test/live-muse.smoke.test.ts    # live: two muse-spa
 
 `MUSE_SMOKE_MODEL=muse-wonder-full-1.0` runs the smoke test on Wonder Full. `plugin-muse/src/resolve.ts` is a copy
 of provider-agy's; keep them in sync.
+
+## Qoder
+
+[`plugin-qoder/`](plugin-qoder/) adds the **Qoder** provider (id `qoder`): the Qoder CLI in ACP mode
+(`~/.qoder/entry/qoder --acp`) under the SDK's generic ACP bridge, with models from Qoder's live list and
+Qwen 4 Max Preview as the fallback. It is for aipc local threads only: no Cloud threads, no Mac or WSL. Agents
+never start Qoder from a shell; every Qoder agent is a Cloudroom thread. The plugin never reads Qoder's login.
+
+Install on aipc (Qoder CLI already installed and signed in with `qodercli`):
+
+```sh
+cd ~/src/cloudroom-plugins/plugin-qoder && npm ci
+room-cli plugin build .
+room-cli plugin install path:$HOME/src/cloudroom-plugins/plugin-qoder --yes
+room-cli provider models qoder --machine aipc-ubuntu      # Qwen 4 Max Preview, plus Qoder's other models
+```
+
+Permission modes:
+
+- **Accept edits** runs Qoder's `--permission-mode default`. It is approval-gated: Qoder asks before each
+  mutation and every request becomes a Cloudroom approval. Nothing is auto-approved. Qoder's own `acceptEdits`
+  mode is not offered.
+- **Full** runs `--permission-mode bypass_permissions` and approves everything.
+
+Reasoning (low, medium, high; default high) goes through ACP `reasoning_effort`. Steering is queued, forks are
+tip-only, and there is no usage data. [`plugin-qoder/README.md`](plugin-qoder/README.md) has the details and
+the test commands. [`plugin-qoder/skills/qoder/SKILL.md`](plugin-qoder/skills/qoder/SKILL.md) tells agents how
+to start a Qoder thread.
