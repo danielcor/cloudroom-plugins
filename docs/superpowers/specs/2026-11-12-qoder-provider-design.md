@@ -66,7 +66,7 @@ This could provide custom tool filtering but requires substantially more lifecyc
 
 Map modes deliberately:
 
-- `accept-edits` -> CLI arguments `--permission-mode default`: Qoder asks before mutations, and every `session/request_permission` is forwarded to Cloudroom. There is no bridge auto-approval in this mode. Review threads use this mode, so a mutation cannot proceed silently.
+- `accept-edits` -> CLI arguments `--permission-mode default`: Qoder asks before mutations, and every `session/request_permission` is forwarded to Cloudroom. There is no bridge auto-approval in this mode. Review threads use this mode. The gate depends on Qoder asking: the bridge serves an in-workspace ACP `fs/write_text_file` without approval, so a mutation Qoder made through that call without first sending `session/request_permission` would not be gated (characterized in `test/host.test.ts`). In the Task 4 live check, Qoder 1.1.88 asked before both requested writes, and denying them left the workspace unchanged.
 - `full` -> CLI arguments `--permission-mode bypass_permissions`: the bridge may approve every request. This is the only unrestricted mode and is not used for review threads.
 
 The provider documentation must say explicitly that Cloudroom's `accept-edits` label is approval-gated here: it asks before every edit and is not Qoder's own `acceptEdits` mode. Qoder's own `acceptEdits` mode is not offered.
@@ -75,9 +75,9 @@ Tests must prove that a write-like permission request reaches Cloudroom in `acce
 
 ## Lifecycle, credentials, and cleanup
 
-- The generic ACP bridge handles `session/new`, resume/load, tip fork, prompt/cancel, and queued steering. The plugin adds no second session store.
+- The generic ACP bridge handles `session/new`, resume/load, tip fork, prompt/cancel, and steering (cancel the running prompt, then resend in the same turn). The plugin adds no second session store.
 - Qoder owns its existing login and configuration. The plugin neither reads nor redacts credential files because it never opens them.
-- Process environment contains only required non-secret launch values. Logs never include Qoder configuration, authorization headers, or environment dumps.
+- The plugin adds no environment values of its own (`env: {}` in the launch spec). Qoder still inherits the host daemon's environment, because the SDK bridge builds the child environment from the daemon's `process.env` (minus the bridge's own runtime variables) plus the thread's resolved environment. The plugin never reads, logs or dumps that environment, Qoder configuration or authorization headers.
 - Registrations and provider resources are disposed on settings reload and plugin disposal. Changing the command replaces the old registration before starting the new one.
 - No background services, schedules, frontend assets, or persistent plugin database are needed.
 

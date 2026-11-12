@@ -269,9 +269,11 @@ room-cli provider models qoder --machine aipc-ubuntu      # qmodel_latest  Qwen4
 
 Permission modes:
 
-- **Accept edits** runs Qoder's `--permission-mode default`. It is approval-gated: Qoder asks before each
-  mutation and every request becomes a Cloudroom approval. Nothing is auto-approved. Qoder's own `acceptEdits`
-  mode is not offered. A live check on 2026-11-12 denied two writes and the workspace stayed unchanged.
+- **Accept edits** runs Qoder's `--permission-mode default`. Every permission request Qoder sends becomes a
+  Cloudroom approval, and nothing is auto-approved. Qoder's own `acceptEdits` mode is not offered. The gate
+  depends on Qoder asking: the bridge serves an in-workspace ACP `fs/write_text_file` without approval, so a
+  write Qoder made that way without asking first would not be gated. A live check on 2026-11-12 saw Qoder ask
+  before both requested writes; both were denied and the workspace stayed unchanged.
 - **Full** runs `--permission-mode bypass_permissions` and approves everything.
 
 Reasoning uses each model's own levels from ACP `reasoning_effort`, never a CLI flag (Qwen4-Max-Preview: none,

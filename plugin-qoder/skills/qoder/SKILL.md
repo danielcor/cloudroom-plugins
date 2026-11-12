@@ -8,11 +8,9 @@ description: Use when the user wants Qoder or Qwen 4 Max Preview to do work or r
 Qoder runs only as a Cloudroom thread on the `qoder` provider (plugin `provider-qoder`). That keeps the agent
 visible, approval-gated and stoppable.
 
-**How agents get this skill.** The plugin manifest declares no skills, and the SDK has no field for shipping a
-skill to other providers. After the live install, no CLI skill directory linked it, so it does not load
-automatically. Distribute it by hand: tell the agent to read
-`~/src/cloudroom-plugins/plugin-qoder/skills/qoder/SKILL.md`, or link that `skills/qoder` directory into the
-agent CLI's skill directory.
+**How agents get this skill.** Cloudroom loads it from the installed plugin's `skills/` directory on its own.
+After the live install on 2026-11-12, Cloudroom agents listed it as the skill `cloudroom:qoder`, with no
+manifest entry and no manual linking.
 
 ## Hard rules
 
@@ -50,8 +48,10 @@ when you are done.
 ## What the options mean
 
 - `--permission-mode accept-edits` maps to Qoder's `--permission-mode default`. It is **approval-gated**:
-  Qoder asks before each mutation, and every request reaches Cloudroom as an approval. Nothing is
-  auto-approved. Despite the label, it does not let edits through on its own. Qoder also asks before MCP
+  every permission request Qoder sends reaches Cloudroom as an approval, and nothing is auto-approved.
+  Despite the label, it does not let edits through on its own. The gate depends on Qoder asking: the bridge
+  serves an in-workspace ACP `fs/write_text_file` without approval, so a write Qoder made that way without
+  asking would not be gated. Live, Qoder 1.1.88 asked before every requested write. Qoder also asks before MCP
   tool calls and shell commands, even read-only ones, so a review thread waits on approvals for its reads.
 - `--permission-mode full` maps to `--permission-mode bypass_permissions`. Every request is approved. This is
   the only unrestricted mode.

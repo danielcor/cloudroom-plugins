@@ -96,9 +96,9 @@ loaded its session without this warning and still remembered the earlier turns.
 ## Develop
 
 ```sh
-cd plugin-qoder && npm ci && npx tsc --noEmit && npx vitest run   # 3 files, 16 tests
-room-cli plugin types plugin-qoder                                 # regenerate SDK types for the running Cloudroom
-room-cli plugin build plugin-qoder                                 # dist/server.js and dist/host.js
+cd plugin-qoder && npm ci && npx tsc --noEmit && npx vitest run   # 3 files, 17 tests
+room-cli plugin types .                                            # regenerate SDK types for the running Cloudroom
+room-cli plugin build .                                            # dist/server.js and dist/host.js
 ```
 
 `room-cli plugin types` regenerates the SDK type surface for the running Cloudroom. It does **not** change the
@@ -111,12 +111,13 @@ current room-cli), which differs from the `0.6.49` pin. The running Cloudroom ac
 install loaded it as `provider-qoder@0.1.0  running`.
 
 - `test/server.test.ts`: the declaration, the launch contract and the command setting, plus clean replacement
-  and disposal of the registration.
+  and disposal of the registration. It runs the plugin in the SDK's fake plugin host and launches no agent.
 - `test/host.test.ts`: models and per-model levels from ACP config options (no `modelCli`), `reasoning_effort`
-  on start and resume and never for a model without it, both permission mappings, approval forwarding and
-  denial in Accept edits, and `auto` rejected.
+  on start and resume, and none when no level is set or the model has no reasoning option; both permission
+  mappings, approval forwarding and denial in Accept edits, `auto` rejected, and a steer that cancels the
+  running prompt and resends in the same turn.
 - `test/provider-bridge.conformance.test.ts`: the SDK conformance suite (start, resume, tip fork, prompt deltas,
-  queued steer, stop).
+  zero-work turns, independent threads, interrupt and stop).
 
-All three run against `test/fake-qoder-acp.mjs`, a scripted ACP double that copies the model and reasoning
-shapes real Qoder 1.1.88 reports. None of them start the real Qoder.
+`host.test.ts` and the conformance suite run against `test/fake-qoder-acp.mjs`, a scripted ACP double that
+copies the model and reasoning shapes real Qoder 1.1.88 reports. No test starts the real Qoder.

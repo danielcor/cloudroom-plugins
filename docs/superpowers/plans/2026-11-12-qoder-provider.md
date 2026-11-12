@@ -48,7 +48,7 @@
 - [ ] **Step 1: Create the branch and write the failing registration tests**
 
 Create `feat/qoder-provider` from `origin/main`, carrying only the design/plan documents. In `test/server.test.ts`, add tests named:
-- `registers Qoder through generic ACP with the exact launch contract`: assert provider id, display name, both permission modes, native reasoning, generic dialect, fallback model, `maintenance.usage === false`, and the exact launch spec including `--acp`, no `modelCli`, and both permission flag arrays.
+- `registers Qoder through generic ACP with the exact launch contract`: assert provider id, display name, both permission modes, no `nativeReasoning` hint, generic dialect, fallback model `qmodel_latest` with its live levels, `maintenance.usage === false`, and the exact launch spec including `--acp`, no `modelCli`, and both permission flag arrays.
 - `uses the command setting and an empty one falls back to the absolute Qoder wrapper`: assert custom command and `/home/danielcor/.qoder/entry/qoder`.
 - `replaces and disposes the registration without leaking resources`: assert reload leaves one current registration and disposal removes it.
 
@@ -59,7 +59,7 @@ Expected: FAIL because `server.ts` and `src/declaration.ts` do not exist.
 
 - [ ] **Step 3: Implement the package, declaration, registration, and icon**
 
-Use `plugin-muse` only as the structural template. `qoderLaunchSpec` returns `{ displayName: "Qoder", command: command.trim() || DEFAULT_QODER_COMMAND, args: ["--acp"], env: {}, nativeReasoning: { configId: "reasoning_effort", supportedLevels: ["low", "medium", "high"], defaultLevel: "high" }, permissionCli: { workspaceWrite: ["--permission-mode", "default"], full: ["--permission-mode", "bypass_permissions"] } }`.
+Use `plugin-muse` only as the structural template. `qoderLaunchSpec` returns `{ displayName: "Qoder", command: command.trim() || DEFAULT_QODER_COMMAND, args: ["--acp"], env: {}, permissionCli: { workspaceWrite: ["--permission-mode", "default"], full: ["--permission-mode", "bypass_permissions"] } }`. There is no `nativeReasoning` hint: the bridge discovers each model's levels from its live ACP `reasoning_effort` (`thought_level`) option, and a hint would invent levels for Qoder models that have none.
 `qoderProviderDeclaration` sets generic ACP options, host-scoped dynamic models with the single Qwen fallback, and only the documented capabilities. `qoderProviderPlugin` defines the command setting, replaces registration on change, and disposes it on plugin disposal. Use a monochrome SVG icon and no frontend manifest entry.
 
 - [ ] **Step 4: Run the tests to verify they pass**

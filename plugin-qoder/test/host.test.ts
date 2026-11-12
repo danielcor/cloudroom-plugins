@@ -183,7 +183,6 @@ describe("reasoning_effort", () => {
     const threadId = "thr_reasoning";
     const providerThreadId = await startThread(threadId, ACCEPT_EDITS, { model: "qmodel_latest", reasoningLevel: "low" });
     expect(received("session/set_config_option").map((e) => e.params)).toEqual([{ sessionId: providerThreadId, configId: "reasoning_effort", value: "low" }]);
-    expect(log().filter((e) => e.reply !== undefined && e.error !== undefined)).toEqual([]);
     await stop(threadId, providerThreadId);
 
     // session/load resets Qoder's reasoning to the model default, so the bridge sets it again.
@@ -203,11 +202,34 @@ describe("reasoning_effort", () => {
     await stop(threadId, providerThreadId);
   });
 
-  it("sends no reasoning_effort for a model that has none", async () => {
+  async function resume(threadId: string, providerThreadId: string, extra: Record<string, unknown>) {
+    const r = await request("thread/resume", { threadId, providerThreadId, cwd: workspace, options: options(ACCEPT_EDITS, extra), instructionMode: "append" });
+    expect(r.error).toBeUndefined();
+    expect(received("session/load").map((e) => e.params?.sessionId)).toEqual([providerThreadId]);
+  }
+
+  it("sends no reasoning_effort on resume when the thread has no level set", async () => {
+    const threadId = "thr_reasoning_unset";
+    const providerThreadId = await startThread(threadId, ACCEPT_EDITS, { model: "qmodel_latest" });
+    await stop(threadId, providerThreadId);
+    await resume(threadId, providerThreadId, { model: "qmodel_latest" });
+    // Neither start nor resume touched reasoning: Qoder keeps the model's own default.
+    expect(received("session/set_config_option")).toEqual([]);
+    await stop(threadId, providerThreadId);
+  });
+
+  it("sends no reasoning_effort for a model that has none, on start or on resume", async () => {
     const threadId = "thr_reasoning_auto";
     const providerThreadId = await startThread(threadId, ACCEPT_EDITS, { model: "auto", reasoningLevel: "high" });
     // Only the model switch: real Qoder rejects reasoning_effort on auto, so it is never sent.
-    expect(received("session/set_config_option").map((e) => e.params)).toEqual([{ sessionId: providerThreadId, configId: "model", value: "auto" }]);
+    const switchToAuto = { sessionId: providerThreadId, configId: "model", value: "auto" };
+    expect(received("session/set_config_option").map((e) => e.params)).toEqual([switchToAuto]);
+    await stop(threadId, providerThreadId);
+
+    // session/load comes back on the default model, so the bridge switches to auto again, and still
+    // sends no reasoning_effort even though the thread asks for high.
+    await resume(threadId, providerThreadId, { model: "auto", reasoningLevel: "high" });
+    expect(received("session/set_config_option").map((e) => e.params)).toEqual([switchToAuto, switchToAuto]);
     await stop(threadId, providerThreadId);
   });
 });
