@@ -14,9 +14,9 @@
 
 - Provider id is `qoder`; package is `plugin-qoder` / `bb-plugin-provider-qoder`.
 - Default command is exactly `/home/danielcor/.qoder/entry/qoder`, launched with `--acp`.
-- Models come from ACP `availableModels`, never `modelCli`. Fallback model is `qwen4-max-preview` / `Qwen 4 Max Preview`.
+- Models come from ACP (live Qoder reports `availableModels` and a `model` config option; the bridge uses the config option), never `modelCli`. Fallback model is `qmodel_latest` / `Qwen4-Max-Preview` (corrected in Task 4 from `qwen4-max-preview`).
 - Permission modes are only `accept-edits` and `full`, mapped respectively to `--permission-mode default` and `--permission-mode bypass_permissions`.
-- Reasoning uses `nativeReasoning.configId = "reasoning_effort"`, supported levels `low`, `medium`, `high`, default `high`; remove it if the live model supports none.
+- Reasoning uses the ACP `reasoning_effort` option (category `thought_level`). Task 4 removed the `nativeReasoning` hint: live models report their own levels, and `auto`/`fast`/`efficient` have none and reject the option.
 - aipc-only; no Cloud threads, frontend, usage metrics, installer, native stream-json protocol, or private `--sdk` protocol.
 - Do not read, copy, print, or store credentials. Do not start Qoder directly from a shell; live agents must start through Cloudroom.
 - Create branch `feat/qoder-provider` from `origin/main`, carrying only this design/plan documentation. Stop if other uncommitted work would be carried or overwritten; never include the existing `fix/relay-login-and-agy` work.

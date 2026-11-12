@@ -1,6 +1,7 @@
 // src/host.ts ships the SDK's generic ACP bridge unchanged. These tests drive that bridge
 // against fake-qoder-acp.mjs, a minimal ACP double, to pin what Qoder's launch spec asks of
-// it: models from ACP availableModels, reasoning through the ACP "reasoning_effort" option,
+// it: models from the ACP "model" config option, reasoning through each model's ACP
+// "reasoning_effort" option,
 // and the Cloudroom permission modes. Real Qoder's own approval behaviour is checked live
 // (plan Task 4), not here.
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -49,7 +50,7 @@ afterEach(async () => {
   }
 });
 
-// The declared launch spec, pointed at the fake: same args, reasoning hint and permission CLI.
+// The declared launch spec, pointed at the fake: same args and permission CLI.
 function launchSpec() {
   return { ...qoderLaunchSpec(FAKE), env: { FAKE_QODER_LOG: logPath } };
 }
@@ -145,23 +146,34 @@ describe("host artifact", () => {
 });
 
 describe("model/list through ACP", () => {
-  // The model comes from ACP; its low/medium/high levels (default high) come from the declared
-  // nativeReasoning hint, which the bridge applies because availableModels carries no levels.
-  it("lists Qwen 4 Max Preview from ACP availableModels with the declared low/medium/high hint, default high", async () => {
+  // Qoder reports models as the "model" config option and each model's levels as its own
+  // reasoning_effort option, so Qwen 4 Max Preview gets Qoder's none/low/high/xhigh (default
+  // xhigh) and a model without reasoning stays agent-managed: no declared levels are invented.
+  it("lists Qwen 4 Max Preview from ACP config options with its live reasoning levels", async () => {
     const spec = launchSpec();
     expect(spec).not.toHaveProperty("modelCli");
     const r = await request("model/list", { providerOptions: providerOptions() });
     expect(r.error).toBeUndefined();
-    const { models } = r.result as { models: { id: string; displayName: string; description: string; isDefault: boolean; supportedReasoningEfforts: { reasoningEffort: string }[]; defaultReasoningEffort: string }[] };
-    expect(models).toHaveLength(1);
-    expect(models[0]).toMatchObject({ id: "qwen4-max-preview", displayName: "Qwen 4 Max Preview", isDefault: true, defaultReasoningEffort: "high" });
-    // The description comes from the fake's session/new, so the list came over ACP, not a CLI parser.
-    expect(models[0].description).toBe("Reported by fake-qoder-acp over ACP");
-    expect(models[0].supportedReasoningEfforts.map((e) => e.reasoningEffort)).toEqual(["low", "medium", "high"]);
-    // Discovery ran Qoder in ACP mode (no list-models invocation) and opened one session.
+    type Model = { id: string; displayName: string; isDefault: boolean; supportedReasoningEfforts: { reasoningEffort: string; description: string }[]; defaultReasoningEffort: string };
+    const { models } = r.result as { models: Model[] };
+    expect(models.map((m) => m.id)).toEqual(["auto", "qmodel_latest"]);
+    const [auto, qwen] = models;
+    expect(qwen).toMatchObject({ displayName: "Qwen4-Max-Preview", isDefault: true, defaultReasoningEffort: "xhigh" });
+    // The labels are the fake's option names, so the levels came over ACP, not a declared hint.
+    expect(qwen.supportedReasoningEfforts).toEqual([
+      { reasoningEffort: "none", description: "None" },
+      { reasoningEffort: "low", description: "Low" },
+      { reasoningEffort: "high", description: "High" },
+      { reasoningEffort: "xhigh", description: "Extra High" },
+    ]);
+    expect(auto).toMatchObject({ isDefault: false, defaultReasoningEffort: "medium" });
+    expect(auto.supportedReasoningEfforts.map((e) => e.reasoningEffort)).toEqual(["medium"]);
+    // Discovery ran Qoder in ACP mode (no list-models invocation), opened one session and
+    // probed each model's reasoning by switching the model option.
     const starts = log().filter((e) => e.argv);
     expect(starts.map((e) => e.argv)).toEqual([["--acp"]]);
     expect(received("session/new")).toHaveLength(1);
+    expect(received("session/set_config_option").map((e) => e.params?.configId)).toEqual(["model", "model"]);
     await until(allExited, "the discovery process to exit");
   });
 });
@@ -169,23 +181,33 @@ describe("model/list through ACP", () => {
 describe("reasoning_effort", () => {
   it("sets the chosen level through ACP reasoning_effort, never a CLI flag, on start and on resume", async () => {
     const threadId = "thr_reasoning";
-    const providerThreadId = await startThread(threadId, ACCEPT_EDITS, { model: "qwen4-max-preview", reasoningLevel: "low" });
+    const providerThreadId = await startThread(threadId, ACCEPT_EDITS, { model: "qmodel_latest", reasoningLevel: "low" });
     expect(received("session/set_config_option").map((e) => e.params)).toEqual([{ sessionId: providerThreadId, configId: "reasoning_effort", value: "low" }]);
+    expect(log().filter((e) => e.reply !== undefined && e.error !== undefined)).toEqual([]);
     await stop(threadId, providerThreadId);
 
+    // session/load resets Qoder's reasoning to the model default, so the bridge sets it again.
     const resumed = await request("thread/resume", {
       threadId,
       providerThreadId,
       cwd: workspace,
-      options: options(ACCEPT_EDITS, { model: "qwen4-max-preview", reasoningLevel: "medium" }),
+      options: options(ACCEPT_EDITS, { model: "qmodel_latest", reasoningLevel: "high" }),
       instructionMode: "append",
     });
     expect(resumed.error).toBeUndefined();
     expect((resumed.result as { providerThreadId: string }).providerThreadId).toBe(providerThreadId);
     expect(received("session/load").map((e) => e.params?.sessionId)).toEqual([providerThreadId]);
-    expect(received("session/set_config_option").map((e) => e.params?.value)).toEqual(["low", "medium"]);
+    expect(received("session/set_config_option").map((e) => e.params?.value)).toEqual(["low", "high"]);
     // Every launch carries only the permission flags and --acp: no reasoning or model flag.
     for (const { argv } of log().filter((e) => e.argv)) expect(argv).toEqual(["--permission-mode", "default", "--acp"]);
+    await stop(threadId, providerThreadId);
+  });
+
+  it("sends no reasoning_effort for a model that has none", async () => {
+    const threadId = "thr_reasoning_auto";
+    const providerThreadId = await startThread(threadId, ACCEPT_EDITS, { model: "auto", reasoningLevel: "high" });
+    // Only the model switch: real Qoder rejects reasoning_effort on auto, so it is never sent.
+    expect(received("session/set_config_option").map((e) => e.params)).toEqual([{ sessionId: providerThreadId, configId: "model", value: "auto" }]);
     await stop(threadId, providerThreadId);
   });
 });

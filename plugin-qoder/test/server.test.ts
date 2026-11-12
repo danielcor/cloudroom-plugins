@@ -26,7 +26,7 @@ describe("provider-qoder", () => {
     expect(decl.id).toBe("qoder");
     expect(decl.displayName).toBe("Qoder");
     expect(decl.capabilities.permissionModes).toEqual(["accept-edits", "full"]);
-    expect(decl.capabilities.reasoningLevels).toEqual(["low", "medium", "high"]);
+    expect(decl.capabilities.reasoningLevels).toEqual(["none", "low", "high", "xhigh"]);
     expect(decl.capabilities).toMatchObject({
       fork: "tip",
       supportsManualCompaction: false,
@@ -36,23 +36,25 @@ describe("provider-qoder", () => {
     expect(decl.maintenance?.usage).toBe(false);
     expect(decl.maintenance?.installation).toBe(false);
     expect(decl.models?.scope).toBe("host");
+    // The fallback is Qwen 4 Max Preview as live Qoder 1.1.88 reports it over ACP.
     expect(decl.models?.fallback).toEqual([
       expect.objectContaining({
-        id: "qwen4-max-preview",
-        displayName: "Qwen 4 Max Preview",
+        id: "qmodel_latest",
+        displayName: "Qwen4-Max-Preview",
         isDefault: true,
-        defaultReasoningEffort: "high",
+        defaultReasoningEffort: "xhigh",
       }),
     ]);
+    expect(decl.models?.fallback?.[0].supportedReasoningEfforts.map((e) => e.reasoningEffort)).toEqual(["none", "low", "high", "xhigh"]);
     expect(options.acpDialect).toBe("generic");
-    // Models come from ACP availableModels: no CLI list parser and no primary-model filter.
+    // Models come from ACP config options: no CLI list parser and no primary-model filter.
     expect(options).not.toHaveProperty("primaryModels");
+    // No nativeReasoning hint: the bridge reads each model's live reasoning_effort option.
     expect(spec).toEqual({
       displayName: "Qoder",
       command: QODER_WRAPPER,
       args: ["--acp"],
       env: {},
-      nativeReasoning: { configId: "reasoning_effort", supportedLevels: ["low", "medium", "high"], defaultLevel: "high" },
       permissionCli: {
         workspaceWrite: ["--permission-mode", "default"],
         full: ["--permission-mode", "bypass_permissions"],
@@ -60,6 +62,7 @@ describe("provider-qoder", () => {
     });
     expect(spec).not.toHaveProperty("modelCli");
     expect(spec).not.toHaveProperty("reasoningCli");
+    expect(spec).not.toHaveProperty("nativeReasoning");
   });
 
   it("declares only a non-secret command setting and no frontend or installer", async () => {

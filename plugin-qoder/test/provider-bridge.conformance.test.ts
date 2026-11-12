@@ -76,7 +76,7 @@ it("passes the SDK bridge conformance suite with Qoder's launch spec", async () 
         permissionScope: "workspace",
         approvalReviewer: "user",
         permissionEscalation: "ask",
-        model: "qwen4-max-preview",
+        model: "qmodel_latest",
         reasoningLevel: "high",
         providerOptions: { ...bridgeOptions, acpLaunchSpec: { ...qoderLaunchSpec(FAKE), env: { FAKE_QODER_LOG: join(dir, "fake.log") } } },
       },

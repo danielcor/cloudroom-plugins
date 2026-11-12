@@ -25,8 +25,8 @@ Make the installed Qoder CLI available as a first-class Cloudroom provider so Qw
 
 - Qoder 1.1.88 has hidden `qodercli --acp` support with `loadSession`, resume, fork, prompt, cancel, and interactive permission requests.
 - The `~/.qoder/entry/qoder` wrapper forwards all flags to the real CLI and finds the binary on a minimal PATH.
-- Cloudroom's generic ACP bridge maps its provider protocol to ACP session operations. It must not use `modelCli`: Qoder's `DisplayName (key)` model-list output is incompatible with the SDK parser. Models come from ACP `availableModels`.
-- Qoder usage metrics are unavailable. Steering is queued, and forking is tip-only.
+- Cloudroom's generic ACP bridge maps its provider protocol to ACP session operations. It must not use `modelCli`: Qoder's `DisplayName (key)` model-list output is incompatible with the SDK parser. Models come from ACP. (Task 4, live Qoder 1.1.88: `session/new` returns both `models.availableModels` and `configOptions`; the bridge uses the `model` config option.)
+- Qoder usage metrics are unavailable. A steer cancels the running prompt and is sent in the same turn (the bridge's queue steer mode), and forking is tip-only.
 - The generic ACP bridge rejects Cloudroom `auto`; only `accept-edits` and `full` will be offered.
 - Qoder accepts `--permission-mode default|accept_edits|bypass_permissions|dont_ask|auto`, and those flags work with `--acp`.
 - Qoder exposes ACP config option `reasoning_effort` with category `thought_level`. The generic bridge can map Cloudroom levels to the values the selected model reports supporting. A command-line reasoning flag is not used because it overrides resumed-session values and is not model-aware.
@@ -55,9 +55,9 @@ This could provide custom tool filtering but requires substantially more lifecyc
 - Default command: absolute path `/home/danielcor/.qoder/entry/qoder`, with `--acp` in the launch arguments. A string setting permits an alternative absolute command.
 - Provider declaration:
   - display name `Qoder`;
-  - models from ACP, with one default fallback model: id `qwen4-max-preview`, display name `Qwen 4 Max Preview`;
-  - `nativeReasoning`: config id `reasoning_effort`, supported levels low/medium/high, default high. Remove this declaration if the live model reports no supported efforts;
-  - tip forking, queued steering, native permission interactions, and no manual compaction or usage reporting;
+  - models from ACP, with one default fallback model: id `qmodel_latest`, display name `Qwen4-Max-Preview` (the live ACP id and name; Task 4 corrected the original `qwen4-max-preview`);
+  - no `nativeReasoning` hint (removed in Task 4): the bridge reads each model's live `reasoning_effort` option (Qwen4-Max-Preview: none/low/high/xhigh, default xhigh), and Qoder's `auto`, `fast` and `efficient` have no reasoning option and reject `reasoning_effort`, so a hint would invent levels for them;
+  - tip forking, steering that cancels and resends in the same turn, native permission interactions, and no manual compaction or usage reporting;
   - permission modes `accept-edits` and `full` only.
 - No `modelCli`, usage probe, installer declaration, or reasoning CLI flag.
 - Static launch options contain only non-secret launch facts. Per-turn options derive model, reasoning, and permission mode without reading Qoder credential files.

@@ -5,23 +5,33 @@ import type { AcpLaunchSpec } from "@get-bb/plugin-sdk/provider-bridge/acp";
 export const QODER_PROVIDER_ID = "qoder";
 // Absolute so the daemon finds it on a bare PATH; the wrapper forwards every flag to qodercli.
 export const DEFAULT_QODER_COMMAND = "/home/danielcor/.qoder/entry/qoder";
-const FALLBACK_MODEL = { id: "qwen4-max-preview", displayName: "Qwen 4 Max Preview" };
-const REASONING_LEVELS = ["low", "medium", "high"] as const;
+// Qoder's live ACP id and name for Qwen 4 Max Preview, and the reasoning values it reports for it.
+const FALLBACK_MODEL = { id: "qmodel_latest", displayName: "Qwen4-Max-Preview" };
+const FALLBACK_REASONING = [
+  { reasoningEffort: "none", description: "None" },
+  { reasoningEffort: "low", description: "Low" },
+  { reasoningEffort: "high", description: "High" },
+  { reasoningEffort: "xhigh", description: "Extra High" },
+] as const;
 
-// Qoder runs in ACP mode under the SDK's generic bridge. Models come from ACP
-// availableModels: no modelCli, because `qodercli` prints "DisplayName (key)"
-// lines the SDK parser cannot read. Reasoning is the model-aware ACP
-// "reasoning_effort" option, never a CLI flag that would override a resumed
-// session. Cloudroom accept-edits runs Qoder's own "default" mode, which is
-// expected to ask before each mutation so the bridge forwards the request to
-// Cloudroom; that is verified live in plan Task 4. Only full bypasses approvals.
+// Qoder runs in ACP mode under the SDK's generic bridge. Its session/new reports
+// both models.availableModels and configOptions; the bridge uses the "model"
+// config option. No modelCli, because `qodercli` prints "DisplayName (key)"
+// lines the SDK parser cannot read. Reasoning is the per-model ACP
+// "reasoning_effort" option (category thought_level), which the bridge finds
+// on its own; there is no nativeReasoning hint, because Qoder's auto, fast and
+// efficient models have no reasoning option and reject "reasoning_effort".
+// The bridge sets reasoning over ACP on start and, only when the thread has a
+// level, again after session/load, which resets it to the model default.
+// Cloudroom accept-edits runs Qoder's own "default" mode, which asks before
+// each mutation, so the bridge forwards the request to Cloudroom. Only full
+// bypasses approvals.
 export function qoderLaunchSpec(command: string): AcpLaunchSpec {
   return {
     displayName: "Qoder",
     command: command.trim() || DEFAULT_QODER_COMMAND,
     args: ["--acp"],
     env: {},
-    nativeReasoning: { configId: "reasoning_effort", supportedLevels: [...REASONING_LEVELS], defaultLevel: "high" },
     permissionCli: {
       workspaceWrite: ["--permission-mode", "default"],
       full: ["--permission-mode", "bypass_permissions"],
@@ -49,8 +59,8 @@ export function qoderProviderDeclaration(command: string): PluginProviderDeclara
         {
           ...FALLBACK_MODEL,
           description: "Shown until Qoder reports its live model list over ACP.",
-          supportedReasoningEfforts: REASONING_LEVELS.map((level) => ({ reasoningEffort: level, description: `${level} reasoning effort` })),
-          defaultReasoningEffort: "high",
+          supportedReasoningEfforts: FALLBACK_REASONING.map((effort) => ({ ...effort })),
+          defaultReasoningEffort: "xhigh",
           isDefault: true,
         },
       ],
@@ -64,7 +74,7 @@ export function qoderProviderDeclaration(command: string): PluginProviderDeclara
       supportsThreadRename: false,
       fork: "tip",
       permissionModes: ["accept-edits", "full"],
-      reasoningLevels: [...REASONING_LEVELS],
+      reasoningLevels: FALLBACK_REASONING.map((effort) => effort.reasoningEffort),
     },
     composerActions: [],
   };

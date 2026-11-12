@@ -9,8 +9,8 @@ Qoder runs only as a Cloudroom thread on the `qoder` provider (plugin `provider-
 visible, approval-gated and stoppable.
 
 **How agents get this skill.** The plugin manifest declares no skills, and the SDK has no field for shipping a
-skill to other providers. So this file is not known to load automatically when the plugin is installed. Task 4
-checks that live. Until then, distribute it by hand: tell the agent to read
+skill to other providers. After the live install, no CLI skill directory linked it, so it does not load
+automatically. Distribute it by hand: tell the agent to read
 `~/src/cloudroom-plugins/plugin-qoder/skills/qoder/SKILL.md`, or link that `skills/qoder` directory into the
 agent CLI's skill directory.
 
@@ -25,22 +25,22 @@ agent CLI's skill directory.
 ## Check it is installed
 
 ```bash
-room-cli plugin list | grep -A1 provider-qoder        # expected: provider-qoder@0.1.0  running
-room-cli provider models qoder --machine aipc-ubuntu   # expected: lists qwen4-max-preview
+room-cli plugin list | grep -A1 provider-qoder        # provider-qoder@0.1.0  running
+room-cli provider models qoder --machine aipc-ubuntu   # qmodel_latest  Qwen4-Max-Preview  * , plus others
 ```
 
-Both `expected:` outputs are still unconfirmed live (Task 4). If the plugin is missing, install it as
+Qwen 4 Max Preview's model id is `qmodel_latest`. If the plugin is missing, install it as
 `plugin-qoder/README.md` describes. Until Qoder reports its live models, only the fallback entry
-`qwen4-max-preview` appears, so a listed model does not prove a login. If the thread then fails on login or the
+`qmodel_latest` appears, so a listed model does not prove a login. If the thread then fails on login or the
 model is missing, stop and tell the user to sign Qoder in: a person runs `qodercli` once on aipc, then reloads
-the plugin. Settings → Agents may also offer the sign-in, but that path is unconfirmed until Task 4. Do not
-switch providers.
+the plugin. Settings → Agents may also offer the sign-in, but that path has not been verified. Do not switch
+providers.
 
 ## Start a thread
 
 ```bash
 room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --machine aipc-ubuntu \
-  --provider qoder --model qwen4-max-preview --permission-mode accept-edits \
+  --provider qoder --model qmodel_latest --permission-mode accept-edits \
   --reasoning-level high --title "qoder: <topic>" --prompt-file "$ROOM_THREAD_STORAGE/qoder-prompt.md"
 ```
 
@@ -51,18 +51,21 @@ when you are done.
 
 - `--permission-mode accept-edits` maps to Qoder's `--permission-mode default`. It is **approval-gated**:
   Qoder asks before each mutation, and every request reaches Cloudroom as an approval. Nothing is
-  auto-approved. Despite the label, it does not let edits through on its own.
+  auto-approved. Despite the label, it does not let edits through on its own. Qoder also asks before MCP
+  tool calls and shell commands, even read-only ones, so a review thread waits on approvals for its reads.
 - `--permission-mode full` maps to `--permission-mode bypass_permissions`. Every request is approved. This is
   the only unrestricted mode.
 - Qoder's own `acceptEdits` mode (`accept_edits`) is **not offered**, and neither are `dont_ask` and `auto`.
   Cloudroom's `auto` fails, because the generic ACP bridge rejects it.
-- `--reasoning-level`: `low`, `medium` or `high` (default `high`). It is set over ACP (`reasoning_effort`)
-  for the selected model, never as a CLI flag. On resume, Cloudroom re-applies the thread's level over ACP
-  after the session loads.
+- `--reasoning-level`: one of the selected model's own levels. For `qmodel_latest` that is `none`, `low`,
+  `high` or `xhigh` (default `xhigh`). Qoder's `auto`, `fast` and `efficient` have no reasoning option, so no
+  level is sent for them. It is set over ACP (`reasoning_effort`), never as a CLI flag. On resume, only when the
+  thread has a level set, Cloudroom re-applies it over ACP after the session loads.
 
 ## Limits
 
-- **Steering is queued.** A message sent during a turn runs as the next turn, not mid-turn.
+- **Steering interrupts.** A message sent during a turn cancels Qoder's running prompt, then runs in the same
+  turn.
 - **Forks are tip-only.** You can fork only from the latest turn.
 - **No usage or quota metrics.** A context-window figure appears only if Qoder sends ACP `usage_update`.
 - **Resume can lose history.** If `session/load` fails, the bridge starts a fresh Qoder session and shows a
