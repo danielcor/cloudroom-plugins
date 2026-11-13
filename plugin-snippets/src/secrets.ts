@@ -17,8 +17,21 @@ const PATTERNS: readonly { kind: string; re: RegExp }[] = [
   { kind: "bearer token", re: /\bBearer\s+[A-Za-z0-9._~+/-]{24,}=*/u },
 ];
 
-// `token = 7f9c…`: a long random-looking value next to a secret-ish word.
-const ASSIGNED = /\b(?:token|secret|password|passwd|pwd|api[_-]?key|access[_-]?key|client[_-]?secret)\b["']?\s*[:=]\s*["']?([A-Za-z0-9/+_.=-]{16,})/giu;
+// `NAME = 7f9c…`: a long random-looking value assigned to a name whose last word is
+// secret-ish. The whole name is taken (`API_TOKEN`, `DATABASE_PASSWORD`, `apiKey`,
+// `stripe.secretKey`), so a `\b` before the secret word cannot hide it behind `_`.
+const ASSIGNED = /(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?([A-Za-z0-9/+_.=-]{16,})/gu;
+const SECRET_WORDS = new Set(["token", "secret", "password", "passwd", "pwd", "passphrase", "key", "apikey", "credential", "credentials", "auth", "pat"]);
+
+/** The name's last word, splitting on `_`, `.`, `-` and camelCase, is a secret word. */
+export function isSecretName(name: string): boolean {
+  const words = name
+    .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
+    .split(/[\s_.-]+/u)
+    .filter(Boolean);
+  const last = words.at(-1)?.toLowerCase();
+  return last !== undefined && SECRET_WORDS.has(last);
+}
 
 function entropy(s: string): number {
   const counts = new Map<string, number>();
@@ -41,7 +54,7 @@ export function scanSecrets(text: string): SecretFinding[] {
   text.split("\n").forEach((line, i) => {
     for (const { kind, re } of PATTERNS) if (re.test(line)) findings.push({ kind, line: i + 1 });
     for (const m of line.matchAll(ASSIGNED)) {
-      if (looksRandom(m[1]!)) findings.push({ kind: "secret-looking value", line: i + 1 });
+      if (isSecretName(m[1]!) && looksRandom(m[2]!)) findings.push({ kind: "secret-looking value", line: i + 1 });
     }
   });
   return findings;
@@ -61,10 +74,10 @@ export function findSecrets(parts: { title: string; tags: readonly string[]; bod
   ];
 }
 
-// Zero-width and joiner characters, bidi embeddings, overrides and isolates,
-// invisible operators, BOM, soft hyphen, Mongolian vowel separator and the
-// Unicode tag block.
-const INVISIBLE_SOURCE = "[\\u00AD\\u180E\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF\\u{E0000}-\\u{E007F}]";
+// Zero-width and joiner characters, bidi marks (including U+061C ARABIC LETTER
+// MARK), embeddings, overrides and isolates, invisible operators, BOM, soft
+// hyphen, Mongolian vowel separator and the Unicode tag block.
+const INVISIBLE_SOURCE = "[\\u00AD\\u061C\\u180E\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF\\u{E0000}-\\u{E007F}]";
 
 export function countInvisible(text: string): number {
   return text.match(new RegExp(INVISIBLE_SOURCE, "gu"))?.length ?? 0;

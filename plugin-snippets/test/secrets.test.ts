@@ -16,6 +16,10 @@ describe("secret scan", () => {
     ["JSON Web Token", `${fake("eyJ", 20)}.${fake("eyJ", 20)}.${fake("", 20)}`],
     ["bearer token", `Authorization: Bearer ${fake("", 32)}`],
     ["secret-looking value", `api_key = "${fake("", 32)}"`],
+    ["secret-looking value", `export API_TOKEN=${fake("", 32)}`],
+    ["secret-looking value", `DATABASE_PASSWORD="${fake("", 32)}"`],
+    ["secret-looking value", `"apiKey": "${fake("", 32)}"`],
+    ["secret-looking value", `stripe.secretKey: ${fake("", 32)}`],
   ])("flags %s", (kind, text) => {
     expect(scanSecrets(`line one\n${text}`)).toContainEqual({ kind, line: 2 });
   });
@@ -24,6 +28,8 @@ describe("secret scan", () => {
     "Use $GITHUB_TOKEN from the environment.",
     "password: {{password}}",
     "token = aaaaaaaaaaaaaaaaaaaa",
+    `monkey = "${fake("", 32)}"`,
+    `TOKEN_COUNT = 12`,
     "Ask for the sk- key with room-cli secret request.",
     "Review {{target}} as a strict senior reviewer.",
   ])("does not flag %s", (text) => {
@@ -47,12 +53,18 @@ describe("secret scan", () => {
 });
 
 describe("invisible characters", () => {
-  const sneaky = "ok​ ‮evil‬ \u{E0041}﻿";
+  const sneaky = "ok\u200B \u202Eevil\u202C \u{E0041}\uFEFF";
   it("counts, strips and marks zero-width, bidi, tag and BOM characters", () => {
     expect(countInvisible(sneaky)).toBe(5);
     expect(stripInvisible(sneaky)).toBe("ok evil ");
-    expect(markInvisible("a​b")).toBe("a⟦U+200B⟧b");
+    expect(markInvisible("a\u200Bb")).toBe("a⟦U+200B⟧b");
     expect(markInvisible("\u{E0041}")).toBe("⟦U+E0041⟧");
+  });
+
+  it("treats U+061C ARABIC LETTER MARK as invisible: counted, marked, stripped", () => {
+    expect(countInvisible("a\u061Cb")).toBe(1);
+    expect(markInvisible("a\u061Cb")).toBe("a⟦U+061C⟧b");
+    expect(stripInvisible("a\u061Cb")).toBe("ab");
   });
 
   it("leaves ordinary text and emoji alone", () => {

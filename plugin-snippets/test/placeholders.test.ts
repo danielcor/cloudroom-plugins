@@ -37,7 +37,8 @@ describe("placeholders", () => {
 
 describe("insert text", () => {
   it("strips invisible characters after filling", () => {
-    expect(prepareInsert("a​b {{x}}", { x: "c‮d" })).toBe("ab cd");
+    expect(prepareInsert("a\u200Bb {{x}}", { x: "c\u202Ed" })).toBe("ab cd");
+    expect(prepareInsert("a\u061Cb {{x}}", { x: "c\u061Cd" })).toBe("ab cd");
   });
 
   it("appends as its own paragraph", () => {

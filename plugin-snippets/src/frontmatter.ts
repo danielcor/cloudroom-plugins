@@ -16,7 +16,7 @@ export interface ParsedFile {
 const KEY = /^([A-Za-z0-9_-]+):(?:[ \t]+(.*))?$/;
 
 export function parseFile(raw: string): ParsedFile {
-  const text = raw.replace(/^﻿/u, "").replace(/\r\n?/gu, "\n");
+  const text = raw.replace(/^\uFEFF/u, "").replace(/\r\n?/gu, "\n");
   if (!text.startsWith("---\n")) return { hasFrontmatter: false, lines: [], body: text };
   const end = text.indexOf("\n---", 3);
   // The closing fence must be a whole line: `---` then newline or end of file.

@@ -16,6 +16,14 @@ export class FakeFiles implements FilesPort {
   readonly dirs = new Set<string>(["/"]);
   readonly writes: string[] = [];
   readonly mkdirs: string[] = [];
+  /** Runs once, just before the next remove or move: an edit that lands between a check and the act. */
+  beforeNextChange: (() => void) | null = null;
+
+  private changing(): void {
+    const hook = this.beforeNextChange;
+    this.beforeNextChange = null;
+    hook?.();
+  }
 
   constructor(seed: Record<string, string> = {}, dirs: string[] = []) {
     for (const [p, c] of Object.entries(seed)) {
@@ -68,7 +76,22 @@ export class FakeFiles implements FilesPort {
 
   async remove({ path, rootPath }: { path: string; rootPath?: string }) {
     this.root(path, rootPath);
+    this.changing();
     if (!this.files.delete(path)) throw notFound(path);
+    return { ok: true as const };
+  }
+
+  // host.move_path: rename(2) within an existing root; refuses an existing destination.
+  async move({ sourcePath, destinationPath, rootPath }: { sourcePath: string; destinationPath: string; rootPath?: string }) {
+    this.root(sourcePath, rootPath);
+    this.root(destinationPath, rootPath);
+    this.changing();
+    const content = this.files.get(sourcePath);
+    if (content === undefined) throw notFound(sourcePath);
+    if (this.files.has(destinationPath)) throw new Error(`Destination already exists: ${destinationPath}`);
+    if (!this.dirs.has(posix.dirname(destinationPath))) throw notFound(destinationPath);
+    this.files.delete(sourcePath);
+    this.files.set(destinationPath, content);
     return { ok: true as const };
   }
 

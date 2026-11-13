@@ -25,7 +25,7 @@ async function load(seed: Record<string, string> = {}, settings: Record<string, 
     pluginId: "snippets",
     settings,
     sdk: {
-      files: { read: (a) => files.read(a), write: (a) => files.write(a) as never, list: (a) => files.list(a), remove: (a) => files.remove(a) as never, mkdir: (a) => files.mkdir(a) as never },
+      files: { read: (a) => files.read(a), write: (a) => files.write(a) as never, list: (a) => files.list(a), remove: (a) => files.remove(a) as never, mkdir: (a) => files.mkdir(a) as never, move: (a) => files.move(a) as never },
       projects: { get: async () => project as never, list: async () => [project] as never },
       threads: { get: async ({ threadId }) => ({ projectId: threadId === "thr_1" ? "proj_1" : "other" }) as never },
     },
@@ -40,7 +40,7 @@ const md = (title: string, order: number, body: string) => `---\ntitle: ${title}
 describe("snippets server", () => {
   it("registers the rpc methods and the snip CLI", async () => {
     const { host } = await load();
-    expect([...host.harness.inspection.registrations.rpcMethods].sort()).toEqual(["create", "duplicate", "list", "move", "projects", "remove", "save", "threadProject"]);
+    expect([...host.harness.inspection.registrations.rpcMethods].sort()).toEqual(["create", "duplicate", "list", "move", "projects", "remove", "restore", "save", "threadProject"]);
     const help = await host.harness.runCli(["--help"]);
     expect(help.stdout).toContain("list");
     expect(help.stdout).toContain("show");
@@ -81,7 +81,7 @@ describe("snippets server", () => {
   it("room-cli snip list and show, with the project from the CLI context", async () => {
     const { host } = await load({
       "/g/commit.md": md("Commit message", 10, "Write a commit message.\n"),
-      "/repo/.snippets/brief.md": "---\ntitle: Worker brief\ntags: delegate\n---\nWORKER BRIEF for {{role}}​",
+      "/repo/.snippets/brief.md": "---\ntitle: Worker brief\ntags: delegate\n---\nWORKER BRIEF for {{role}}\u200B",
     });
     const list = await host.harness.runCli(["list"], { projectId: "proj_1" });
     expect(list.exitCode).toBe(0);
@@ -128,6 +128,20 @@ describe("snippets server", () => {
     expect(files.mkdirs).toEqual(["/repo/.snippets", "/home/d/skills/.snippets"]);
     const list = (await host.harness.callRpc("list", { projectId: "proj_1" })) as { snippets: { scope: string; id: string }[] };
     expect(list.snippets.map((s) => `${s.scope}:${s.id}`)).toEqual(["project:new-snippet", "global:new-snippet"]);
+  });
+
+  it("delete and Undo through the RPCs: trash hidden from list and the CLI, bytes restored", async () => {
+    const content = "---\ntitle: Brief\nowner: d\n# keep me\n---\nWORKER BRIEF";
+    const { host, files } = await load({ "/repo/.snippets/brief.md": content });
+    const { sha } = await import("./fake-files.js");
+    const r = (await host.harness.callRpc("remove", { scope: "project", projectId: "proj_1", id: "brief", expectedSha256: sha(content) })) as { outcome: string; trash: string };
+    expect(r.outcome).toBe("removed");
+    const list = (await host.harness.callRpc("list", { projectId: "proj_1" })) as { snippets: unknown[] };
+    expect(list.snippets).toEqual([]);
+    expect((await host.harness.runCli(["list"], { projectId: "proj_1" })).stdout).toBe("No snippets.\n");
+    await expect(host.harness.callRpc("restore", { scope: "project", projectId: "proj_1", id: "brief", trash: "../../etc/passwd" })).rejects.toThrow();
+    expect(await host.harness.callRpc("restore", { scope: "project", projectId: "proj_1", id: "brief", trash: r.trash })).toEqual({ outcome: "restored" });
+    expect(files.files.get("/repo/.snippets/brief.md")).toBe(content);
   });
 
   it("expands ~ in the global folder", () => {

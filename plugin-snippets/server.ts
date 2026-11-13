@@ -36,6 +36,7 @@ export default async function snippetsPlugin(bb: BbPluginApi): Promise<void> {
     list: (a) => bb.sdk.files.list(a),
     remove: (a) => bb.sdk.files.remove(a),
     mkdir: (a) => bb.sdk.files.mkdir(a),
+    move: (a) => bb.sdk.files.move(a),
   } satisfies FilesPort);
 
   async function globalLocation(): Promise<Location> {
@@ -103,8 +104,8 @@ export default async function snippetsPlugin(bb: BbPluginApi): Promise<void> {
       }
     },
     list: ({ projectId }) => listAll(projectId),
-    async create({ scope, projectId, title, tags, body, id, order, created }) {
-      return store.create(await locate(scope, projectId), { title, tags, body }, { id, order, created });
+    async create({ scope, projectId, title, tags, body }) {
+      return store.create(await locate(scope, projectId), { title, tags, body });
     },
     async save({ scope, projectId, id, expectedSha256, title, tags, body }) {
       return store.save(await locate(scope, projectId), id, { title, tags, body }, expectedSha256);
@@ -114,6 +115,9 @@ export default async function snippetsPlugin(bb: BbPluginApi): Promise<void> {
     },
     async remove({ scope, projectId, id, expectedSha256 }) {
       return store.remove(await locate(scope, projectId), id, expectedSha256);
+    },
+    async restore({ scope, projectId, id, trash }) {
+      return store.restore(await locate(scope, projectId), id, trash);
     },
     async move({ scope, projectId, id, toIndex }) {
       return store.move(await locate(scope, projectId), id, toIndex);

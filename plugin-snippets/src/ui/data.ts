@@ -2,7 +2,7 @@
 // write calls. Every write is followed by a re-read; there is no file watcher.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRpc } from "@get-bb/plugin-sdk/app";
-import type { ListResult, MoveOutcome, ProjectSummary, RemoveOutcome, SnippetsContract } from "../contract.js";
+import type { ListResult, MoveOutcome, ProjectSummary, RemoveOutcome, RestoreOutcome, SnippetsContract } from "../contract.js";
 import type { Scope, SnippetFields, SnippetView } from "../model.js";
 import type { WriteOutcome } from "../store.js";
 
@@ -27,10 +27,11 @@ export interface SnippetsData {
   error: string | null;
   loading: boolean;
   reload(): Promise<void>;
-  create(scope: Scope, fields: SnippetFields, restore?: Pick<SnippetView, "id" | "order" | "created">): Promise<WriteOutcome | Failed>;
+  create(scope: Scope, fields: SnippetFields): Promise<WriteOutcome | Failed>;
   save(s: SnippetView, fields: SnippetFields, expectedSha256?: string): Promise<WriteOutcome | Failed>;
   duplicate(s: SnippetView): Promise<WriteOutcome | Failed>;
   remove(s: SnippetView): Promise<RemoveOutcome | Failed>;
+  restore(s: SnippetView, trash: string): Promise<RestoreOutcome | Failed>;
   move(s: SnippetView, toIndex: number): Promise<MoveOutcome | Failed>;
 }
 
@@ -84,18 +85,11 @@ export function useSnippets(projectId: string | null): SnippetsData {
     error,
     loading,
     reload,
-    create: (scope, fields, restore) =>
-      after(
-        rpc.call("create", {
-          scope,
-          projectId: loaded,
-          ...fields,
-          ...(restore ? { id: restore.id, ...(restore.order !== null ? { order: restore.order } : {}), ...(restore.created ? { created: restore.created } : {}) } : {}),
-        }),
-      ),
+    create: (scope, fields) => after(rpc.call("create", { scope, projectId: loaded, ...fields })),
     save: (s, fields, expectedSha256) => after(rpc.call("save", { scope: s.scope, projectId: loaded, id: s.id, expectedSha256: expectedSha256 ?? s.sha256, ...fields })),
     duplicate: (s) => after(rpc.call("duplicate", { scope: s.scope, projectId: loaded, id: s.id })),
     remove: (s) => after(rpc.call("remove", { scope: s.scope, projectId: loaded, id: s.id, expectedSha256: s.sha256 })),
+    restore: (s, trash) => after(rpc.call("restore", { scope: s.scope, projectId: loaded, id: s.id, trash })),
     move: (s, toIndex) => after(rpc.call("move", { scope: s.scope, projectId: loaded, id: s.id, toIndex })),
   };
 }

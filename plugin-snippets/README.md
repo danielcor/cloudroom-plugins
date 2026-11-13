@@ -42,20 +42,27 @@ Focus on {{focus|correctness}}.
 - The frontmatter is a flat subset: one `key: value` per line. Keys the plugin does not know are kept when it saves.
 - Every write carries the SHA-256 of the file as it was read. If the file changed on disk in the meantime, the
   editor keeps your text and offers **Overwrite with mine** or **Discard mine**.
-- A delete checks the hash, then removes the file. `bb.sdk.files.remove` has no `expectedSha256`, so an edit
-  made in the moment between those two calls would be lost.
+- A delete never removes bytes. It checks the hash, then renames the file into `.trash/<id>~<time>.md` in the
+  same folder. The rename is atomic on the host. It then compares the moved bytes with the hash it checked.
+  If an edit landed in between, it renames the file back and reports a conflict. If that rename fails, it names
+  the trash file that holds the edit. **Undo** renames the file back byte for byte: unknown keys and comments
+  survive, and the secret scan does not run on content that was already on disk. The table and
+  `room-cli snip` never list `.trash/`. The plugin writes a `.trash/.gitignore` containing `*` so deleted
+  snippets stay out of Git. Nothing empties the trash yet: delete old files there by hand.
 - A move rewrites only the moved file's `order` key. The plugin renumbers the scope only when there is no gap left.
 
 ## Safety
 
 - The plugin never submits. Insert only appends visible, editable text.
 - **Secret scan.** It checks for private keys, AWS, GitHub, `sk-`, Slack and Google keys, JWTs, bearer tokens,
-  and long random values next to words like `token` or `password`. On save, a hit blocks the save and names
+  and long random values assigned to a name whose last word is secret-ish (`API_TOKEN=…`, `DATABASE_PASSWORD: …`,
+  `apiKey: …`, `token=…`). Names are split on `_`, `.`, `-` and camelCase. On save, a hit blocks the save and names
   the kind and the line, never the value. On load, a hit shows a warning badge. The picker then needs a
   confirmation before it inserts. `room-cli snip show` refuses to print the snippet, and `room-cli snip list`
   shows only its id. The scan runs with invisible characters removed, so a token split by a zero-width space
   still counts.
-- **Invisible characters.** Zero-width, bidi and Unicode tag characters are stripped on save and on insert.
+- **Invisible characters.** Zero-width, bidi (including U+061C ARABIC LETTER MARK) and Unicode tag characters
+  are stripped on save and on insert.
   The preview shows them as `⟦U+XXXX⟧`.
 - Bodies are always rendered as plain text, never as HTML or Markdown.
 

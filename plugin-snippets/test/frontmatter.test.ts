@@ -37,7 +37,7 @@ describe("frontmatter", () => {
   });
 
   it("accepts CRLF, a BOM, an empty head and a fence at end of file", () => {
-    expect(parseFile("﻿---\r\ntitle: A\r\n---\r\nline\r\n").body).toBe("line\n");
+    expect(parseFile("\uFEFF---\r\ntitle: A\r\n---\r\nline\r\n").body).toBe("line\n");
     expect(parseFile("---\n---\nbody").body).toBe("body");
     expect(parseFile("---\ntitle: T\n---").body).toBe("");
   });

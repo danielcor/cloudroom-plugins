@@ -58,7 +58,7 @@ describe("SnippetStore", () => {
 
   it("strips invisible characters on save", async () => {
     const { store } = setup();
-    const r = await store.create(G, { title: "T​", tags: [], body: "a‮b" });
+    const r = await store.create(G, { title: "T\u200B", tags: [], body: "a\u202Eb" });
     expect(r.outcome === "saved" && [r.snippet.title, r.snippet.body]).toEqual(["T", "ab"]);
   });
 
@@ -87,15 +87,76 @@ describe("SnippetStore", () => {
     expect(await store.duplicate(G, "x")).toMatchObject({ snippet: { id: "x-copy-2" } });
   });
 
-  it("removes with a hash check; Undo re-creates the same file name and order", async () => {
+  it("deletes into .trash, hides it from the list, and Undo restores the exact bytes", async () => {
     const path = `${G.dir}/x.md`;
-    const content = "---\ntitle: X\norder: 30\ncreated: 2026-01-01T00:00:00Z\n---\nbody";
-    const { store, files } = setup({ [path]: content });
+    // Unknown keys, a comment and an odd body: none of it may change across delete and Undo.
+    const content = "---\ntitle: X\nowner: d\n# hand note\norder: 30\n---\nbody  \n\n";
+    const { store, files } = setup({ [path]: content, [`${G.dir}/y.md`]: "---\ntitle: Y\n---\n" });
     expect(await store.remove(G, "x", "stale")).toMatchObject({ outcome: "conflict" });
-    expect(await store.remove(G, "x", sha(content))).toEqual({ outcome: "removed" });
+    expect(files.files.get(path)).toBe(content);
+    const r = await store.remove(G, "x", sha(content));
+    expect(r).toEqual({ outcome: "removed", trash: "x~20261113T100000000Z.md" });
     expect(files.files.has(path)).toBe(false);
-    const undo = await store.create(G, { title: "X", tags: [], body: "body" }, { id: "x", order: 30, created: "2026-01-01T00:00:00Z" });
-    expect(undo).toMatchObject({ outcome: "saved", snippet: { id: "x", order: 30, created: "2026-01-01T00:00:00Z" } });
+    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(content);
+    expect(files.files.get(`${G.dir}/.trash/.gitignore`)).toBe("*\n");
+    expect((await store.list(G)).map((s) => s.id)).toEqual(["y"]);
+    expect(await store.restore(G, "x", "x~20261113T100000000Z.md")).toEqual({ outcome: "restored" });
+    expect(files.files.get(path)).toBe(content);
+    expect(files.files.has(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(false);
+  });
+
+  it("Undo restores a snippet the secret scan flags, without scanning it", async () => {
+    const token = ["ghp", "_", "aB3dE5gH7jK9mN1pQ2sT4vW6xY8zaB3dE5gH7j"].join("");
+    const path = `${G.dir}/leak.md`;
+    const content = `---\ntitle: Leak\n---\n${token}`;
+    const { store, files } = setup({ [path]: content });
+    const r = await store.remove(G, "leak", sha(content));
+    expect(await store.restore(G, "leak", r.outcome === "removed" ? r.trash! : "")).toEqual({ outcome: "restored" });
+    expect(files.files.get(path)).toBe(content);
+  });
+
+  it("Undo refuses to overwrite a snippet created again meanwhile, and keeps the trashed one", async () => {
+    const path = `${G.dir}/x.md`;
+    const content = "---\ntitle: X\n---\nold";
+    const { store, files } = setup({ [path]: content });
+    const r = await store.remove(G, "x", sha(content));
+    files.files.set(path, "---\ntitle: X\n---\nnew");
+    expect(await store.restore(G, "x", r.outcome === "removed" ? r.trash! : "")).toMatchObject({ outcome: "conflict" });
+    expect(files.files.get(path)).toBe("---\ntitle: X\n---\nnew");
+    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(content);
+  });
+
+  it("Undo rejects a trash name for another id or outside the trash pattern", async () => {
+    const { store } = setup();
+    await expect(store.restore(G, "x", "y~20261113T100000000Z.md")).rejects.toThrow("Invalid trash entry");
+    await expect(store.restore(G, "x", "../x.md")).rejects.toThrow("Invalid trash entry");
+  });
+
+  it("keeps an edit that lands between the delete's hash check and the delete", async () => {
+    const path = `${G.dir}/x.md`;
+    const content = "---\ntitle: X\n---\nbody";
+    const { store, files } = setup({ [path]: content });
+    files.beforeNextChange = () => files.files.set(path, "---\ntitle: X\n---\nedited meanwhile");
+    const r = await store.remove(G, "x", sha(content));
+    expect(r.outcome).toBe("conflict");
+    expect(files.files.get(path)).toBe("---\ntitle: X\n---\nedited meanwhile");
+  });
+
+  it("keeps an edit that cannot be moved back in .trash and says where", async () => {
+    const path = `${G.dir}/x.md`;
+    const content = "---\ntitle: X\n---\nbody";
+    const { store, files } = setup({ [path]: content });
+    files.beforeNextChange = () => files.files.set(path, "---\ntitle: X\n---\nedited meanwhile");
+    const realMove = files.move.bind(files);
+    let moves = 0;
+    files.move = async (a) => {
+      // The rename back fails: someone created x.md again right after the delete.
+      if (++moves === 2) files.files.set(path, "recreated");
+      return realMove(a);
+    };
+    const r = await store.remove(G, "x", sha(content));
+    expect(r).toMatchObject({ outcome: "conflict", message: expect.stringContaining(".trash/x~20261113T100000000Z.md") });
+    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe("---\ntitle: X\n---\nedited meanwhile");
   });
 
   it("moves by rewriting only the order key of the moved file", async () => {

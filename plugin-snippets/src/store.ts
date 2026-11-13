@@ -41,6 +41,8 @@ export interface FilesPort {
   }>;
   remove(args: { hostId?: string; path: string; rootPath?: string }): Promise<unknown>;
   mkdir(args: { hostId?: string; path: string; recursive?: boolean }): Promise<unknown>;
+  /** host.move_path: an atomic rename that refuses an existing destination. */
+  move(args: { hostId?: string; sourcePath: string; destinationPath: string; rootPath?: string }): Promise<unknown>;
 }
 
 /** Where one scope's files live. */
@@ -51,6 +53,13 @@ export interface Location {
   /** Absolute snippets folder. */
   dir: string;
 }
+
+/** Deleted snippets go here as `<id>~<stamp>.md`, byte for byte, until Undo moves them back. */
+export const TRASH_DIR = ".trash";
+export const TRASH_NAME = /^([a-z0-9][a-z0-9-]{0,63})~(\d{8}T\d{9}Z)\.md$/u;
+
+export type RemoveOutcome = { outcome: "removed"; trash: string | null } | Extract<WriteOutcome, { outcome: "conflict" }>;
+export type RestoreOutcome = { outcome: "restored" } | Extract<WriteOutcome, { outcome: "conflict" }>;
 
 export type WriteOutcome =
   | { outcome: "saved"; snippet: SnippetView }
@@ -116,7 +125,7 @@ export class SnippetStore {
   async create(
     loc: Location,
     input: SnippetFields,
-    opts: { id?: string; order?: number; created?: string } = {},
+    opts: { id?: string } = {},
   ): Promise<WriteOutcome> {
     const fields = clean(input);
     const blocked = check(fields);
@@ -131,7 +140,7 @@ export class SnippetStore {
       id = opts.id;
     } else id = uniqueId(slugify(fields.title), taken);
     const stamp = this.now().toISOString();
-    const content = renderFile(null, fields, { order: opts.order ?? nextOrder(existing), created: opts.created ?? stamp, updated: stamp });
+    const content = renderFile(null, fields, { order: nextOrder(existing), created: stamp, updated: stamp });
     return this.put(loc, id, content, null);
   }
 
@@ -156,12 +165,47 @@ export class SnippetStore {
     return this.create(loc, { title, tags: view.tags, body: view.body }, { id: copyId });
   }
 
-  async remove(loc: Location, id: string, expectedSha256: string): Promise<{ outcome: "removed" } | Extract<WriteOutcome, { outcome: "conflict" }>> {
+  /**
+   * Delete by renaming the file into `.trash/` (atomic on the host), never by
+   * removing it: whatever the file holds at that instant survives in the
+   * trash. Then compare the trashed bytes with the hash the app last read; if
+   * an edit landed after the check, rename it back and report a conflict.
+   */
+  async remove(loc: Location, id: string, expectedSha256: string): Promise<RemoveOutcome> {
     const current = await this.read(loc, id);
-    if (current === null) return { outcome: "removed" };
+    if (current === null) return { outcome: "removed", trash: null };
     if (current.sha256 !== expectedSha256) return { outcome: "conflict", current: toView(current), message: "The file changed on disk." };
-    await this.files.remove({ hostId: loc.hostId, path: pathOf(loc, id), rootPath: loc.dir });
-    return { outcome: "removed" };
+    const trashDir = posix.join(loc.dir, TRASH_DIR);
+    await this.files.mkdir({ hostId: loc.hostId, path: trashDir, recursive: true });
+    // Keep the trash out of Git; an existing .gitignore here is left as it is.
+    await this.files.write({ hostId: loc.hostId, path: posix.join(trashDir, ".gitignore"), rootPath: loc.dir, content: "*\n", expectedSha256: null });
+    const trash = `${id}~${this.now().toISOString().replace(/[-:.]/gu, "")}.md`;
+    const trashPath = posix.join(trashDir, trash);
+    await this.files.move({ hostId: loc.hostId, sourcePath: current.path, destinationPath: trashPath, rootPath: loc.dir });
+    const moved = await this.files.read({ hostId: loc.hostId, path: trashPath, rootPath: loc.dir });
+    if (moved.sha256 === expectedSha256) return { outcome: "removed", trash };
+    try {
+      await this.files.move({ hostId: loc.hostId, sourcePath: trashPath, destinationPath: current.path, rootPath: loc.dir });
+    } catch {
+      return { outcome: "conflict", current: null, message: `The file changed on disk while it was being deleted. That version is kept in ${posix.join(TRASH_DIR, trash)}.` };
+    }
+    const back = await this.read(loc, id);
+    return { outcome: "conflict", current: back && toView(back), message: "The file changed on disk; it was not deleted." };
+  }
+
+  /** Undo a delete: rename the trashed file back, byte for byte. No re-render and no scan: it was already on disk. */
+  async restore(loc: Location, id: string, trash: string): Promise<RestoreOutcome> {
+    const m = TRASH_NAME.exec(trash);
+    if (!m || m[1] !== id) throw new Error(`Invalid trash entry "${trash}".`);
+    const path = pathOf(loc, id);
+    if ((await this.read(loc, id)) !== null) return { outcome: "conflict", current: null, message: `A snippet named ${id} exists again; the deleted one stays in ${posix.join(TRASH_DIR, trash)}.` };
+    try {
+      await this.files.move({ hostId: loc.hostId, sourcePath: posix.join(loc.dir, TRASH_DIR, trash), destinationPath: path, rootPath: loc.dir });
+    } catch (error) {
+      if (isMissing(error)) return { outcome: "conflict", current: null, message: "The deleted file is no longer in the trash." };
+      throw error;
+    }
+    return { outcome: "restored" };
   }
 
   /** Move `id` to `toIndex` within its scope. Rewrites only the `order` key. */

@@ -106,15 +106,15 @@ describe("picker", () => {
 });
 
 describe("table", () => {
-  it("deletes with an Undo that restores the same id and order", async () => {
+  it("deletes with an Undo that renames the trashed file back", async () => {
     const calls: unknown[] = [];
     const slot = renderSlot(
       { component: SnippetsPage },
       { subPath: "" },
       {
         rpc: rpc({
-          remove: (input) => (calls.push(["remove", input]), { outcome: "removed" }),
-          create: (input) => (calls.push(["create", input]), { outcome: "saved", snippet: LIST.snippets[2] }),
+          remove: (input) => (calls.push(["remove", input]), { outcome: "removed", trash: "bash-header~20261113T100000000Z.md" }),
+          restore: (input) => (calls.push(["restore", input]), { outcome: "restored" }),
         }),
         context: { projectId: "proj_1", threadId: null },
       },
@@ -123,10 +123,7 @@ describe("table", () => {
     fireEvent.click(await slot.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[0]).toEqual(["remove", { scope: "global", projectId: "proj_1", id: "bash-header", expectedSha256: "sha-bash-header" }]);
-    expect(calls[1]).toEqual([
-      "create",
-      { scope: "global", projectId: "proj_1", title: "Bash strict header", tags: [], body: "set -euo pipefail", id: "bash-header", order: 20 },
-    ]);
+    expect(calls[1]).toEqual(["restore", { scope: "global", projectId: "proj_1", id: "bash-header", trash: "bash-header~20261113T100000000Z.md" }]);
   });
 
   it("Alt+↓ moves a row within its scope", async () => {

@@ -120,7 +120,7 @@ function Table({ snippets, all, projectName, hasProject }: { snippets: SnippetsD
   const current = all.find((s) => keyOf(s) === selected) ?? null;
   const inScope = (s: SnippetView) => all.filter((x) => x.scope === s.scope);
 
-  function report(r: WriteOutcome | Failed | { outcome: "removed" } | { outcome: "moved" }, ok?: string): boolean {
+  function report(r: WriteOutcome | Failed | { outcome: "removed" | "moved" | "restored" }, ok?: string): boolean {
     if (r.outcome === "failed") setToast({ text: `That did not work: ${r.message}`, error: true });
     else if (r.outcome === "blocked") setToast({ text: r.reasons.join(" "), error: true });
     else if (r.outcome === "conflict") setToast({ text: `${r.message} Reloaded from disk.` });
@@ -150,12 +150,18 @@ function Table({ snippets, all, projectName, hasProject }: { snippets: SnippetsD
     const r = await snippets.remove(s);
     if (r.outcome !== "removed") return void report(r);
     if (selected === keyOf(s)) setSelected(null);
+    const trash = r.trash;
     setToast({
       text: `Deleted “${s.title}”.`,
-      undo: () => {
-        setToast(null);
-        void snippets.create(s.scope, { title: s.title, tags: s.tags, body: s.body }, s).then((u) => report(u, "Restored."));
-      },
+      // Undo renames the trashed file back, so it returns byte for byte.
+      ...(trash
+        ? {
+            undo: () => {
+              setToast(null);
+              void snippets.restore(s, trash).then((u) => report(u, "Restored."));
+            },
+          }
+        : {}),
     });
   }
 
