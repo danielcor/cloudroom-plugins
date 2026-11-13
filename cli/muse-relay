@@ -10,6 +10,7 @@ const { spawn, spawnSync } = require('child_process');
 const DEFAULT_MODEL = 'muse-wonder-full-1.0';
 const INSTALL_URL = 'https://dev.meta.ai/install.sh';
 const KEY_ENV = 'META_API_KEY';
+const LOGIN_ENV = 'MUSE_AUTH_B64';
 const AUTH_FILE = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'muse', 'auth.json');
 const CACHE_DIR = process.env.MUSE_RELAY_CACHE_DIR || path.join(os.homedir(), '.cache', 'muse-relay');
 // Every run: contributor mode off, no Claude Code / Codex personal rules or skills, no reminder
@@ -22,21 +23,20 @@ const EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 const NOISE = /^muse: (workspace root|workspace trust|Agent delegation)/;
 
 const USAGE = `usage: muse-relay <command>
-  setup                     install muse and find a login if missing (idempotent)
-  export-key >> .env        print ${KEY_ENV}=... (refuses to print to a terminal)
+  setup                     install muse and your plan login if missing (idempotent)
+  export-login >> .env      print ${LOGIN_ENV}=... for your plan login (refuses to print to a terminal)
+  export-key >> .env        print ${KEY_ENV}=... (pay-per-token API fallback; refuses to print to a terminal)
   models                    list models (contributor variants left out)
   run [--model M] [--effort ${EFFORTS.join('|')}] [--new | --session ID] [PROMPT]
                             one turn in the cwd (prompt may come from stdin); continues the
                             last session for this cwd unless --new
 default model: ${DEFAULT_MODEL}`;
 
-// Run on the paired desktop (via room-cli mac run) to print its Muse API key.
+// Run on the paired desktop (via room-cli mac run) to print its Muse login file, base64 on one line.
 const DESKTOP_SCRIPT = `
-[ -n "$${KEY_ENV}" ] && { printf '%s\\n' "$${KEY_ENV}"; exit 0; }
 f="\${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json"
 [ -s "$f" ] || { echo "no Muse login on the desktop ($f)" >&2; exit 1; }
-command -v node >/dev/null 2>&1 && exec node -e 'process.stdout.write(require(process.argv[1]).providers.meta.api_key + "\\n")' "$f"
-exec python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["providers"]["meta"]["api_key"])' "$f"
+base64 < "$f" | tr -d '\\n'
 `;
 
 function parseArgs(argv) {
@@ -121,27 +121,69 @@ function parseDotenv(text, key) {
 }
 
 // The nearest .env from the cwd up to the git root.
-function keyFromDotenv() {
+function dotenvValue(key) {
   for (let dir = process.cwd(); ; dir = path.dirname(dir)) {
     try {
-      const v = parseDotenv(fs.readFileSync(path.join(dir, '.env'), 'utf8'), KEY_ENV);
+      const v = parseDotenv(fs.readFileSync(path.join(dir, '.env'), 'utf8'), key);
       if (v) return v;
     } catch { /* no .env here */ }
     if (fs.existsSync(path.join(dir, '.git')) || dir === path.dirname(dir)) return null;
   }
 }
 
-const envKey = () => process.env[KEY_ENV] || keyFromDotenv();
-const storedKey = () => {
-  try { return JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8')).providers.meta.api_key || null; } catch { return null; }
-};
+// The login file. A plan login (oauth, from `muse login`) spends the user's plan allowance; an api_key one
+// is pay-per-token API billing with no allowance.
+const readAuth = () => { try { return JSON.parse(fs.readFileSync(AUTH_FILE, 'utf8')); } catch { return null; } };
+const metaOf = (auth) => (auth && auth.providers && auth.providers.meta) || null;
+const isPlanLogin = (auth) => { const m = metaOf(auth); return !!(m && m.access_token && m.mechanism !== 'api_key'); };
+const storedKey = () => (metaOf(readAuth()) || {}).api_key || null;
 
-function keyFromDesktop() {
+function parseLogin(b64) {
+  let auth;
+  try { auth = JSON.parse(Buffer.from(String(b64).trim(), 'base64').toString('utf8')); } catch { return null; }
+  return isPlanLogin(auth) ? auth : null; // an API-key login is never imported: it bills the API, not the plan
+}
+
+function writeLogin(auth) {
+  fs.mkdirSync(path.dirname(AUTH_FILE), { recursive: true, mode: 0o700 });
+  const tmp = `${AUTH_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(auth, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, AUTH_FILE);
+}
+
+function loginFromDesktop() {
   const r = spawnSync('room-cli', ['mac', 'run', '--stdin', 'sh -s'], { input: DESKTOP_SCRIPT, encoding: 'utf8', maxBuffer: 1 << 20 });
   if (r.error) return { err: `room-cli not available (${r.error.code || r.error.message})` };
   if (r.status !== 0) return { err: `room-cli mac run failed (exit ${r.status}): ${firstLine(r.stderr || '')}` };
-  const key = r.stdout.trim();
-  return /^\S{20,}$/.test(key) ? { key } : { err: 'the desktop returned something that is not a Muse API key' };
+  const auth = parseLogin(r.stdout);
+  return auth ? { auth } : { err: 'the desktop has no Muse plan login (run `muse login` there)' };
+}
+
+// env MUSE_AUTH_B64, then that key in the nearest .env. Returns where it came from, after saving it.
+function loginFromEnv() {
+  for (const [from, b64] of [['the environment', process.env[LOGIN_ENV]], ['.env', dotenvValue(LOGIN_ENV)]]) {
+    if (!b64) continue;
+    const auth = parseLogin(b64);
+    if (!auth) throw new Error(`${LOGIN_ENV} from ${from} is not a base64 Muse plan login (an oauth auth.json from \`muse login\`)`);
+    writeLogin(auth);
+    return from;
+  }
+  return null;
+}
+
+const envKey = () => process.env[KEY_ENV] || dotenvValue(KEY_ENV);
+const API_WARNING = `warning: using ${KEY_ENV}: this bills the Muse API per token, not your plan. Use \`muse login\` and \`muse-relay export-login\` instead.`;
+
+// The environment for muse: with a plan login on disk, no META_API_KEY (it would win over the login and
+// bill the API). Without one, the explicit ${KEY_ENV} fallback, with a warning.
+function museEnv() {
+  if (!isPlanLogin(readAuth()) && !loginFromEnv()) {
+    const key = envKey();
+    if (key || storedKey()) console.error(key ? API_WARNING : API_WARNING.replace(`using ${KEY_ENV}`, 'using the stored API-key login'));
+    return key ? { ...process.env, [KEY_ENV]: key } : process.env;
+  }
+  const { [KEY_ENV]: _drop, ...env } = process.env;
+  return env;
 }
 
 function runTurn(prompt, opts) {
@@ -152,9 +194,7 @@ function runTurn(prompt, opts) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-relay-'));
   const promptFile = path.join(tmp, 'prompt.txt');
   fs.writeFileSync(promptFile, prompt, { mode: 0o600 });
-  const key = envKey();
-  const env = key ? { ...process.env, [KEY_ENV]: key } : process.env;
-  const child = spawn(muse, museArgs(opts, session, promptFile), { stdio: ['ignore', 'pipe', 'pipe'], env });
+  const child = spawn(muse, museArgs(opts, session, promptFile), { stdio: ['ignore', 'pipe', 'pipe'], env: museEnv() });
   const st = { bol: true, session: null, terminal: null, error: null };
   let stderr = '';
   let errBuf = '';
@@ -201,8 +241,7 @@ function runTurn(prompt, opts) {
 function listModels() {
   const muse = museBin();
   if (!muse) throw new Error('muse is not installed; run `muse-relay setup`');
-  const key = envKey();
-  const child = spawn(muse, ['serve', ...CLEAN_FLAGS.slice(0, 2)], { stdio: ['pipe', 'pipe', 'inherit'], env: key ? { ...process.env, [KEY_ENV]: key } : process.env });
+  const child = spawn(muse, ['serve', ...CLEAN_FLAGS.slice(0, 2)], { stdio: ['pipe', 'pipe', 'inherit'], env: museEnv() });
   const send = (m) => child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...m }) + '\n');
   const timer = setTimeout(() => { console.error('muse-relay: muse serve did not list models in 20 s'); child.kill(); process.exit(1); }, 20_000);
   let buf = '';
@@ -233,32 +272,57 @@ function setup() {
     const r = spawnSync('bash', ['-c', `curl -fsSL ${INSTALL_URL} | bash`], { stdio: ['ignore', 2, 2] });
     if (r.status !== 0 || !museBin()) throw new Error('muse install failed');
   }
-  if (process.env[KEY_ENV]) console.error(`login: ${KEY_ENV} from the environment`);
-  else if (keyFromDotenv()) console.error(`login: ${KEY_ENV} from .env`);
-  else if (storedKey()) console.error('login: already present');
+  let from;
+  if (isPlanLogin(readAuth())) from = 'plan login already present';
+  else if ((from = loginFromEnv())) from = `plan login from ${from} (saved to ${AUTH_FILE})`;
   else {
-    const d = keyFromDesktop();
-    if (!d.key) throw new Error(`no Muse login: ${KEY_ENV} not set, and ${d.err}`);
-    const r = spawnSync(museBin(), ['auth', 'set', '--api-key-stdin'], { input: d.key + '\n', encoding: 'utf8' });
-    if (r.status !== 0) throw new Error(`muse auth set failed: ${firstLine(r.stderr || r.stdout || '')}`);
-    console.error('login: from the paired desktop (saved with `muse auth set`)');
+    const d = loginFromDesktop();
+    if (d.auth) {
+      writeLogin(d.auth);
+      from = `plan login from the paired desktop (saved to ${AUTH_FILE})`;
+    } else if (envKey()) {
+      console.error(API_WARNING);
+      from = `${KEY_ENV} (API billing)`;
+    } else {
+      throw new Error(`no Muse login: ${LOGIN_ENV} not set, and ${d.err}. Run \`muse-relay export-login >> .env\` on a machine where \`muse login\` worked.`);
+    }
   }
+  console.error(`login: ${from}`);
   const v = spawnSync(museBin(), ['--version'], { encoding: 'utf8' });
   console.log(`ok: ${museBin()} (${firstLine(v.stdout) || 'muse'}), default model ${DEFAULT_MODEL}`);
 }
 
+const refuseTty = (cmd) => {
+  if (process.stdout.isTTY) throw new Error(`refusing to print a secret to a terminal; use: muse-relay ${cmd} >> .env`);
+};
+
+function exportToEnv(name, value) {
+  if (spawnSync('git', ['check-ignore', '-q', '.env']).status === 1) console.error('warning: .env is not gitignored here; do not commit it');
+  process.stdout.write(`${name}=${value}\n`);
+}
+
+function exportLogin() {
+  refuseTty('export-login');
+  const file = fs.existsSync(AUTH_FILE) ? fs.readFileSync(AUTH_FILE) : null;
+  const b64 = file ? file.toString('base64') : process.env[LOGIN_ENV];
+  if (!b64) throw new Error('no Muse login: run `muse login` first');
+  if (file && !isPlanLogin(readAuth())) console.error('warning: this login is an API key (bills the API, not your plan). Run `muse login` for a plan login.');
+  exportToEnv(LOGIN_ENV, b64);
+}
+
 function exportKey() {
-  if (process.stdout.isTTY) throw new Error('refusing to print a key to a terminal; use: muse-relay export-key >> .env');
+  refuseTty('export-key');
   const key = process.env[KEY_ENV] || storedKey();
   if (!key) throw new Error(`no Muse key: set ${KEY_ENV}, or log in with \`muse login\` first`);
-  if (spawnSync('git', ['check-ignore', '-q', '.env']).status === 1) console.error('warning: .env is not gitignored here; do not commit it');
-  process.stdout.write(`${KEY_ENV}=${key}\n`);
+  console.error(API_WARNING);
+  exportToEnv(KEY_ENV, key);
 }
 
 function main(argv) {
   if (!argv.length || ['-h', '--help', 'help'].includes(argv[0])) return console.log(USAGE);
   const { cmd, opts, prompt } = parseArgs(argv);
   if (cmd === 'setup') return setup();
+  if (cmd === 'export-login') return exportLogin();
   if (cmd === 'export-key') return exportKey();
   if (cmd === 'models') return listModels();
   if (cmd === 'run') {
@@ -272,4 +336,4 @@ function main(argv) {
 if (require.main === module) {
   try { main(process.argv.slice(2)); } catch (e) { console.error(`muse-relay: ${e.message}`); process.exit(1); }
 }
-module.exports = { parseArgs, museArgs, render, parseDotenv };
+module.exports = { parseArgs, museArgs, render, parseDotenv, parseLogin };

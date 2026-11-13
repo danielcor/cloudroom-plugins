@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-provider-agy",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "Run Cloudroom threads with Google Antigravity (agy) and Gemini 4 Argon, through the agy-acp adapter.",

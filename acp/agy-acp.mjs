@@ -24,12 +24,15 @@ export const ARGON_MODELS = [
   { modelId: "gemini-4-argon-low", name: "Gemini 4 Argon (Low)" },
 ];
 export const MODES = [
-  { id: "accept-edits", name: "Accept edits", description: "agy --mode accept-edits: file edits run, shell commands are denied (headless agy cannot ask)." },
+  { id: "accept-edits", name: "Accept edits", description: "agy --mode accept-edits: reads and edits in the workspace (and any --add-dir / AGY_ACP_ADD_DIRS directories) run; shell commands and reads outside those directories are denied (headless agy cannot ask)." },
   { id: "auto", name: "Auto", description: "agy --mode auto." },
   { id: "plan", name: "Plan", description: "agy --mode plan: plan only, no changes." },
   { id: "bypass", name: "Bypass permissions", description: "agy --dangerously-skip-permissions: every tool runs without asking." },
 ];
 export const EFFORTS = ["default", "low", "medium", "high", "xhigh", "max"];
+// agy models can carry their effort in the id (gemini-4-argon-high). agy refuses --effort with such a model
+// unless the two agree, so the id's suffix wins and --effort is left off.
+export const effortSuffixed = (modelId) => /-(low|medium|high|xhigh|max)$/.test(modelId);
 const SESSION_PREFIX = "agyacp-";
 
 const ERR = { parse: -32700, invalidRequest: -32600, methodNotFound: -32601, invalidParams: -32602, internal: -32603, notFound: -32002 };
@@ -43,7 +46,7 @@ const FETCH_TOOLS = new Set(["read_url_content", "search_web", "view_content_chu
 const PATH_KEYS = ["AbsolutePath", "Path", "TargetFile", "File", "DirectoryPath", "SearchPath"];
 
 export function parseArgs(argv) {
-  const opts = { agy: process.env.AGY_PATH || "", mode: "accept-edits", model: "", effort: "default", stateDir: "" };
+  const opts = { agy: process.env.AGY_PATH || "", mode: "accept-edits", model: "", effort: "default", stateDir: "", addDirs: (process.env.AGY_ACP_ADD_DIRS || "").split(delimiter).filter(Boolean) };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const [flag, inline] = a.includes("=") ? [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)] : [a, undefined];
@@ -54,6 +57,7 @@ export function parseArgs(argv) {
     else if (flag === "--model") opts.model = value();
     else if (flag === "--effort") opts.effort = value();
     else if (flag === "--state-dir") opts.stateDir = value();
+    else if (flag === "--add-dir") opts.addDirs.push(value());
     else if (flag === "--version") opts.version = true;
     else if (flag === "--help" || flag === "-h") opts.help = true;
     else throw new Error(`Unknown argument: ${a}`);
@@ -173,9 +177,9 @@ export class AgyAcpAgent {
     switch (method) {
       case "initialize": return this.initialize(p);
       case "authenticate": return {};
-      case "session/new": return this.openSession({ cwd: p.cwd });
-      case "session/load": return this.openSession({ cwd: p.cwd, sessionId: p.sessionId, replay: true });
-      case "session/resume": return this.openSession({ cwd: p.cwd, sessionId: p.sessionId });
+      case "session/new": return this.openSession({ cwd: p.cwd, additionalDirectories: p.additionalDirectories });
+      case "session/load": return this.openSession({ cwd: p.cwd, sessionId: p.sessionId, replay: true, additionalDirectories: p.additionalDirectories });
+      case "session/resume": return this.openSession({ cwd: p.cwd, sessionId: p.sessionId, additionalDirectories: p.additionalDirectories });
       case "session/prompt": return this.prompt(p);
       case "session/cancel": return this.cancel(p);
       case "session/set_model": return this.setOption(p.sessionId, "model", p.modelId).then(() => ({}));
@@ -228,7 +232,7 @@ export class AgyAcpAgent {
     return s;
   }
 
-  async openSession({ cwd, sessionId, replay = false }) {
+  async openSession({ cwd, sessionId, replay = false, additionalDirectories = [] }) {
     if (typeof cwd !== "string" || !cwd.startsWith("/")) throw Object.assign(new Error("cwd must be an absolute path"), { code: ERR.invalidParams });
     if (sessionId !== undefined && !/^[\w-]{1,128}$/.test(sessionId)) throw Object.assign(new Error("Invalid sessionId"), { code: ERR.invalidParams });
     const models = this.getModels();
@@ -237,7 +241,7 @@ export class AgyAcpAgent {
     // Our sessions map to the agy conversation saved at their first prompt (none yet: start fresh);
     // any other id is taken as an agy conversation id.
     const conversation = !sessionId ? null : sessionId.startsWith(SESSION_PREFIX) ? this.savedConversation(sessionId) : sessionId;
-    const s = { id, conversation, cwd, model, effort: this.opts.effort, mode: this.opts.mode, proc: null, procKey: "", turn: null, tools: new Map() };
+    const s = { id, conversation, cwd, model, effort: this.opts.effort, mode: this.opts.mode, addDirs: [...new Set([...this.opts.addDirs, ...(Array.isArray(additionalDirectories) ? additionalDirectories : []).filter((d) => typeof d === "string" && d.startsWith("/"))])], proc: null, procKey: "", turn: null, tools: new Map() };
     const old = this.sessions.get(id);
     if (old) this.stopProc(old);
     if (conversation) await this.ensureProc(s); // fails fast when agy has no such conversation
@@ -289,9 +293,12 @@ export class AgyAcpAgent {
 
   agyArgs(s) {
     const args = ["-p=", "--input-format", "stream-json", "--output-format", "stream-json", "--model", s.model];
-    if (s.effort !== "default") args.push("--effort", s.effort);
+    if (s.effort !== "default" && !effortSuffixed(s.model)) args.push("--effort", s.effort);
     if (s.mode === "bypass") args.push("--dangerously-skip-permissions");
-    else args.push("--mode", s.mode);
+    else {
+      args.push("--mode", s.mode);
+      for (const dir of s.addDirs) args.push("--add-dir", dir);
+    }
     if (s.conversation) args.push("--conversation", s.conversation);
     return args;
   }
@@ -415,7 +422,7 @@ export class AgyAcpAgent {
     if (r.status !== "SUCCESS") return this.finishTurn(s, { error: `agy: ${r.error || r.status || "turn failed"}` });
     if (Array.isArray(r.denied_actions) && r.denied_actions.length > 0) {
       const denied = r.denied_actions.map((d) => `${d.action} (${d.display_name})`).join(", ");
-      this.update(s, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\n\n> agy auto-denied: ${denied}. Headless agy cannot ask for permission. Switch this session to the "bypass" mode (or add a permissions.allow rule to ~/.gemini/antigravity-cli/settings.json) and ask again.\n` } });
+      this.update(s, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: `\n\n> agy auto-denied: ${denied}. Headless agy cannot ask for permission. Switch this session to the "bypass" mode, start agy-acp with --add-dir DIR (or AGY_ACP_ADD_DIRS) for a directory it must read outside the workspace, or add a read_file(DIR/**) rule under permissions.allow in ~/.gemini/antigravity-cli/settings.json, and ask again.\n` } });
     }
     this.finishTurn(s, { stopReason: "end_turn", usage: s.turn.usage });
   }
@@ -475,7 +482,7 @@ export function main(argv = process.argv.slice(2)) {
   }
   if (opts.version) return process.stdout.write(`agy-acp ${VERSION}\n`);
   if (opts.help) {
-    return process.stdout.write(`Usage: agy-acp [--agy PATH] [--model ID] [--effort ${EFFORTS.join("|")}] [--mode ${MODES.map((m) => m.id).join("|")}] [--dangerously-skip-permissions] [--state-dir DIR]\nAn ACP agent on stdio for the Antigravity CLI (agy). agy must be installed and signed in.\n`);
+    return process.stdout.write(`Usage: agy-acp [--agy PATH] [--model ID] [--effort ${EFFORTS.join("|")}] [--mode ${MODES.map((m) => m.id).join("|")}] [--dangerously-skip-permissions] [--add-dir DIR]... [--state-dir DIR]\nAn ACP agent on stdio for the Antigravity CLI (agy). agy must be installed and signed in.\n`);
   }
   const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
   const agent = new AgyAcpAgent({ send, opts });

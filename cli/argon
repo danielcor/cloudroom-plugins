@@ -66,7 +66,8 @@ function parseArgs(argv) {
 function agyArgs(opts, conversation) {
   const a = ['-p=', '--input-format', 'stream-json', '--output-format', 'stream-json',
     '--model', opts.model, '--dangerously-skip-permissions'];
-  if (opts.effort) a.push('--effort', opts.effort);
+  // agy refuses --effort that conflicts with an effort-suffixed model id (gemini-4-argon-high): the id wins.
+  if (opts.effort && !/-(low|medium|high|xhigh|max)$/.test(opts.model)) a.push('--effort', opts.effort);
   if (conversation) a.push('--conversation', conversation);
   return a;
 }

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { AgyAcpAgent, parseArgs, parseModels, promptText, toolKind } from "../agy-acp.mjs";
+import { AgyAcpAgent, effortSuffixed, parseArgs, parseModels, promptText, toolKind } from "../agy-acp.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const fixture = (name) => join(here, "fixtures", name);
@@ -201,7 +201,7 @@ test("settings changes restart agy with new flags on the same conversation", asy
   assert.deepEqual(h.updates().at(-1), { sessionUpdate: "current_mode_update", currentModeId: "bypass" });
   await assert.rejects(h.call("session/set_config_option", { sessionId, configId: "effort", value: "turbo" }), /Invalid effort/);
   await h.call("session/prompt", { sessionId, prompt: text("read note.txt") });
-  assert.deepEqual(h.spawns()[0], ["-p=", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-argon-low", "--effort", "high", "--dangerously-skip-permissions"]);
+  assert.deepEqual(h.spawns()[0], ["-p=", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-argon-low", "--dangerously-skip-permissions"]); // the id's -low suffix wins over effort high
   await h.call("session/set_mode", { sessionId, modeId: "plan" });
   await h.call("session/prompt", { sessionId, prompt: text("what did you read?") });
   assert.deepEqual(h.spawns()[1].slice(-4), ["--mode", "plan", "--conversation", CID]);
@@ -242,4 +242,33 @@ test("helpers", () => {
   assert.equal(toolKind("run_command"), "execute");
   assert.equal(parseArgs(["--dangerously-skip-permissions"]).mode, "bypass");
   assert.throws(() => parseArgs(["--mode", "yolo"]), /--mode must be one of/);
+});
+
+test("an effort-suffixed model id wins over the effort setting: agy refuses --effort that conflicts with it", async () => {
+  assert.deepEqual(["gemini-4-argon-high", "gemini-3.8-flash-low", "x-medium", "x-xhigh", "x-max"].map(effortSuffixed), [true, true, true, true, true]);
+  assert.deepEqual(["gemini-4-argon", "high-model", "lowest"].map(effortSuffixed), [false, false, false]);
+  const h = harness("two-turn-read-file.ndjson");
+  const { sessionId } = await h.call("session/new", { cwd: "/tmp", mcpServers: [] });
+  await h.call("session/set_config_option", { sessionId, configId: "effort", value: "low" });
+  await h.call("session/prompt", { sessionId, prompt: text("read note.txt") }); // default model gemini-4-argon-high + effort low
+  assert.ok(!h.spawns()[0].includes("--effort"), h.spawns()[0].join(" "));
+  assert.deepEqual(h.spawns()[0].slice(h.spawns()[0].indexOf("--model"), h.spawns()[0].indexOf("--model") + 2), ["--model", "gemini-4-argon-high"]);
+  h.agent.shutdown();
+});
+
+test("accept-edits passes --add-dir (flag, AGY_ACP_ADD_DIRS, session additionalDirectories) so agy can read outside the workspace; bypass does not need them", async () => {
+  const env = process.env.AGY_ACP_ADD_DIRS;
+  process.env.AGY_ACP_ADD_DIRS = ["/env/a", "/env/b"].join(":");
+  let opts;
+  try { opts = parseArgs(["--add-dir", "/flag/c"]); } finally { env === undefined ? delete process.env.AGY_ACP_ADD_DIRS : (process.env.AGY_ACP_ADD_DIRS = env); }
+  assert.deepEqual(opts.addDirs, ["/env/a", "/env/b", "/flag/c"]);
+  const h = harness("two-turn-read-file.ndjson", { argv: ["--add-dir", "/flag/c"] });
+  const { sessionId } = await h.call("session/new", { cwd: "/tmp", mcpServers: [], additionalDirectories: ["/acp/d", "relative/ignored", 7] });
+  await h.call("session/prompt", { sessionId, prompt: text("read note.txt") });
+  const args = h.spawns()[0];
+  assert.deepEqual(args.slice(args.indexOf("--mode")), ["--mode", "accept-edits", "--add-dir", "/flag/c", "--add-dir", "/acp/d"]);
+  await h.call("session/set_mode", { sessionId, modeId: "bypass" });
+  await h.call("session/prompt", { sessionId, prompt: text("again") });
+  assert.ok(!h.spawns()[1].includes("--add-dir"));
+  h.agent.shutdown();
 });

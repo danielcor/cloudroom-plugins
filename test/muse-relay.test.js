@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { parseArgs, museArgs, render, parseDotenv } = require('../cli/muse-relay');
+const { parseArgs, museArgs, render, parseDotenv, parseLogin } = require('../cli/muse-relay');
 
 const RELAY = path.join(__dirname, '..', 'cli', 'muse-relay');
 const FIXTURES = path.join(__dirname, 'fixtures', 'muse');
@@ -94,6 +94,7 @@ test('run end to end against a fake muse replaying a fixture: sessions per cwd, 
     assert.doesNotMatch(r2.stderr, /workspace root/);
     assert.strictEqual(s.read('prompt'), 'read note.txt');
     assert.strictEqual(s.read('key'), 'k|from-dotenv');
+    assert.match(r2.stderr, /warning: using META_API_KEY: this bills the Muse API per token, not your plan/);
     const first = s.args();
     assert.deepStrictEqual(first.slice(4, 6), ['--model', 'muse-wonder-full-1.0']);
     assert.notStrictEqual(first[3], '00000000-0000-0000-0000-000000000001'); // a fresh session id
@@ -133,6 +134,72 @@ test('export-key: prints the stored key for .env, never to a terminal', () => {
     const r = spawnSync(process.execPath, [RELAY, 'export-key'], { cwd: tmp, env: { PATH: process.env.PATH, HOME: tmp }, encoding: 'utf8' });
     assert.strictEqual(r.status, 0, r.stderr);
     assert.strictEqual(r.stdout, 'META_API_KEY=stored|key\n');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+const PLAN = { schema_version: 1, providers: { meta: { access_token: 'tok', api_key: 'derived|key', mechanism: 'oauth', obtained_via: 'device_code' } } };
+const planB64 = Buffer.from(JSON.stringify(PLAN)).toString('base64');
+const authPath = (s) => path.join(s.tmp, '.config', 'muse', 'auth.json');
+
+test('parseLogin: a base64 login file, nothing else', () => {
+  assert.deepStrictEqual(parseLogin(planB64 + '\n'), PLAN);
+  assert.strictEqual(parseLogin('not base64 json'), null);
+  assert.strictEqual(parseLogin(Buffer.from('{"providers":{}}').toString('base64')), null);
+  const apiOnly = { providers: { meta: { api_key: 'k', access_token: 't', mechanism: 'api_key' } } };
+  assert.strictEqual(parseLogin(Buffer.from(JSON.stringify(apiOnly)).toString('base64')), null); // bills the API: never imported
+});
+
+test('run: MUSE_AUTH_B64 (env or .env) installs the plan login 0600 and META_API_KEY is not passed on', () => {
+  for (const where of ['env', 'dotenv']) {
+    const s = sandbox('two-turn.ndjson');
+    try {
+      let env = { META_API_KEY: 'api-key-must-not-win' };
+      if (where === 'env') env.MUSE_AUTH_B64 = planB64;
+      else fs.writeFileSync(path.join(s.cwd, '.env'), `MUSE_AUTH_B64=${planB64}\nMETA_API_KEY=also-not\n`);
+      const r = s.run(['hi'], { env });
+      assert.strictEqual(r.status, 0, r.stderr);
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(authPath(s), 'utf8')), PLAN);
+      assert.strictEqual(fs.statSync(authPath(s)).mode & 0o777, 0o600);
+      assert.strictEqual(s.read('key'), '');
+      assert.doesNotMatch(r.stderr, /bills the Muse API/);
+    } finally {
+      s.done();
+    }
+  }
+});
+
+test('run: an existing plan login beats META_API_KEY; an api_key login does not', () => {
+  const s = sandbox('two-turn.ndjson');
+  try {
+    fs.mkdirSync(path.dirname(authPath(s)), { recursive: true });
+    fs.writeFileSync(authPath(s), JSON.stringify(PLAN));
+    assert.strictEqual(s.run(['hi'], { env: { META_API_KEY: 'x' } }).status, 0);
+    assert.strictEqual(s.read('key'), '');
+    fs.writeFileSync(authPath(s), JSON.stringify({ providers: { meta: { api_key: 'k', mechanism: 'api_key' } } }));
+    const r = s.run(['hi'], { env: { META_API_KEY: 'x' } });
+    assert.strictEqual(s.read('key'), 'x');
+    assert.match(r.stderr, /bills the Muse API/);
+    const r2 = s.run(['hi']); // no META_API_KEY: the stored api_key login is used, with the same warning
+    assert.match(r2.stderr, /warning: using the stored API-key login: this bills the Muse API/);
+  } finally {
+    s.done();
+  }
+});
+
+test('export-login: prints the login file as MUSE_AUTH_B64 for .env, round-trips', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'muse-relay-test-'));
+  try {
+    fs.mkdirSync(path.join(tmp, '.config', 'muse'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.config', 'muse', 'auth.json'), JSON.stringify(PLAN));
+    const r = spawnSync(process.execPath, [RELAY, 'export-login'], { cwd: tmp, env: { PATH: process.env.PATH, HOME: tmp }, encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, r.stderr);
+    assert.strictEqual(r.stdout, `MUSE_AUTH_B64=${planB64}\n`);
+    assert.deepStrictEqual(parseLogin(parseDotenv(r.stdout, 'MUSE_AUTH_B64')), PLAN);
+    const none = spawnSync(process.execPath, [RELAY, 'export-login'], { cwd: tmp, env: { PATH: process.env.PATH, HOME: path.join(tmp, 'nobody') }, encoding: 'utf8' });
+    assert.strictEqual(none.status, 1);
+    assert.match(none.stderr, /no Muse login/);
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

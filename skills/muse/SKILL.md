@@ -14,9 +14,11 @@ MUSE_RELAY=$(command -v muse-relay || ls /repos/cloudroom-plugins/cli/muse-relay
 "$MUSE_RELAY" setup
 ```
 
-`setup` installs `muse` if missing and finds the login: `META_API_KEY` (env or the nearest `.env`), an existing
-`muse` login, else the paired desktop's. It ends with `ok: ...`. If it fails, show the error and stop.
-Never print, cat or log `META_API_KEY`, `.env` or `~/.config/muse/auth.json`, and never `source` a `.env`.
+`setup` installs `muse` if missing and finds the user's plan login: an existing one, `MUSE_AUTH_B64` (env or the
+nearest `.env`), else the paired desktop's `~/.config/muse/auth.json`. It ends with `ok: ...`. If it prints a
+`warning: ... bills the Muse API`, pass that on to the user: it fell back to `META_API_KEY`, which is pay-per-token.
+If it fails, show the error and stop. Never print, cat or log `MUSE_AUTH_B64`, `META_API_KEY`, `.env` or
+`~/.config/muse/auth.json`, and never `source` a `.env`.
 
 ## Relay
 
@@ -47,6 +49,6 @@ For each user message, run it verbatim, in the project directory:
 A cheap Cloud thread that only forwards messages:
 
 1. Make sure the project's Cloud environment includes the `danielcor/cloudroom-plugins` repo (it appears under `/repos`)
-   and that the project's `.env` has `META_API_KEY` (see the README: `muse-relay export-key >> .env`).
+   and that the project's `.env` has `MUSE_AUTH_B64` (see the README: `muse-relay export-login >> .env`).
 2. New Cloud thread, provider Claude Code, model `claude-haiku-5-5`.
 3. First message: `Read /repos/cloudroom-plugins/skills/muse/SKILL.md and follow it. From now on relay everything I write to Muse.`
