@@ -68,6 +68,17 @@ describe("SnippetStore", () => {
     expect(files.writes).toEqual([]);
   });
 
+  it("blocks a save with a secret after a flag and a space, quoted or not", async () => {
+    const { store, files } = setup();
+    const value = ["aB3dE5gH7jK9mN1p", "Q2sT4vW6xY8zaB3d"].join("");
+    for (const arg of [`--token ${value}`, `--api-key "${value}"`, `--password '${value}'`, `-token ${value}`]) {
+      const r = await store.create(G, { title: "Deploy", tags: [], body: `run ${arg}` });
+      expect(r.outcome, arg).toBe("blocked");
+    }
+    expect(files.writes).toEqual([]);
+    expect(await store.create(G, { title: "Count", tags: [], body: "run --token-count 5 --password-file /etc/pw" })).toMatchObject({ outcome: "saved" });
+  });
+
   it("blocks invalid fields", async () => {
     const r = await setup().store.create(G, { title: " ", tags: ["UPPER!"], body: "x".repeat(17 * 1024) });
     expect(r.outcome === "blocked" && r.reasons.length).toBe(3);

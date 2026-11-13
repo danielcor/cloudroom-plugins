@@ -61,7 +61,7 @@ Focus on {{focus|correctness}}.
 - The plugin never submits. Insert only appends visible, editable text.
 - **Secret scan.** It checks for private keys, AWS, GitHub, `sk-`, Slack and Google keys, JWTs, bearer tokens,
   and long random values assigned to a name whose last word is secret-ish (`API_TOKEN=…`, `DATABASE_PASSWORD: …`,
-  `apiKey: …`, `APIToken=…`, `clientsecret: …`, `token=…`, and CLI flags like `--api-key=…`). Names are split on `_`, `.`, `-`, camelCase and
+  `apiKey: …`, `APIToken=…`, `clientsecret: …`, `token=…`, and CLI flags like `--api-key=…` or `--token …`, quoted or not). Names are split on `_`, `.`, `-`, camelCase and
   acronyms. The last word counts when it ends in token, secret, password, passwd, passphrase or
   credential(s), or when it is `key`, `pwd`, `auth`, `pat`, or a compound like `apikey` or `accesskey`. On save, a hit blocks the save and names
   the kind and the line, never the value. On load, a hit shows a warning badge. The picker then needs a

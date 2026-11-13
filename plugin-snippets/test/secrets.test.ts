@@ -30,7 +30,15 @@ describe("secret scan", () => {
     ["secret-looking value", `cli --api-key=${fake("", 32)}`],
     ["secret-looking value", `--access-key=${fake("", 32)}`],
     ["secret-looking value", `-token=${fake("", 32)}`],
-  ])("flags %s", (kind, text) => {
+    // A space instead of `=` after a secret-named flag, quoted or not.
+    ["secret-looking value", `deploy --token ${fake("", 32)}`],
+    ["secret-looking value", `cli --api-key ${fake("", 32)} --verbose`],
+    ["secret-looking value", `--password ${fake("", 32)}`],
+    ["secret-looking value", `--token "${fake("", 32)}"`],
+    ["secret-looking value", `--api-key '${fake("", 32)}'`],
+    ["secret-looking value", `--password\t"${fake("", 32)}"`],
+    ["secret-looking value", `run -token ${fake("", 32)}`],
+  ])("flags %s: %s", (kind, text) => {
     expect(scanSecrets(`line one\n${text}`)).toContainEqual({ kind, line: 2 });
   });
 
@@ -40,6 +48,12 @@ describe("secret scan", () => {
     "token = aaaaaaaaaaaaaaaaaaaa",
     `monkey = "${fake("", 32)}"`,
     `TOKEN_COUNT = 12`,
+    "--token-count 5",
+    "--password-file /home/d/.config/pw.txt",
+    `--password-file ${fake("", 32)}`,
+    "--token aaaaaaaaaaaaaaaaaaaa",
+    "--token {{token}}",
+    `token ${fake("", 32)}`,
     "Ask for the sk- key with room-cli secret request.",
     "Review {{target}} as a strict senior reviewer.",
   ])("does not flag %s", (text) => {

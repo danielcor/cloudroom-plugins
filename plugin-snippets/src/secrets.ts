@@ -22,6 +22,10 @@ const PATTERNS: readonly { kind: string; re: RegExp }[] = [
 // `stripe.secretKey`), so a `\b` before the secret word cannot hide it behind `_`.
 // Leading CLI hyphens are skipped: `--token=…`, `--api-key=…`, `-token=…`.
 const ASSIGNED = /(?<![A-Za-z0-9_.-])-*([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?([A-Za-z0-9/+_.=-]{16,})/gu;
+// `--token VALUE`, `-token "VALUE"`: a flag (one or two hyphens), whitespace, then
+// the value, quoted or not. Same name rule and entropy test as ASSIGNED, so
+// `--token-count 5` and `--password-file PATH` stay clean.
+const FLAG_SPACED = /(?<![A-Za-z0-9_.-])--?([A-Za-z_][A-Za-z0-9_.-]*)\s+["']?([A-Za-z0-9/+_.=-]{16,})/gu;
 // A last word that ends in one of these is secret-ish (`dbpassword`, `clientsecret`, `authtoken`).
 const SECRET_ENDINGS = ["token", "secret", "password", "passwd", "passphrase", "credential", "credentials"];
 // These only as the whole last word: `monkey` must not count as a key.
@@ -62,8 +66,10 @@ export function scanSecrets(text: string): SecretFinding[] {
   const findings: SecretFinding[] = [];
   text.split("\n").forEach((line, i) => {
     for (const { kind, re } of PATTERNS) if (re.test(line)) findings.push({ kind, line: i + 1 });
-    for (const m of line.matchAll(ASSIGNED)) {
-      if (isSecretName(m[1]!) && looksRandom(m[2]!)) findings.push({ kind: "secret-looking value", line: i + 1 });
+    for (const re of [ASSIGNED, FLAG_SPACED]) {
+      for (const m of line.matchAll(re)) {
+        if (isSecretName(m[1]!) && looksRandom(m[2]!)) findings.push({ kind: "secret-looking value", line: i + 1 });
+      }
     }
   });
   return findings;
