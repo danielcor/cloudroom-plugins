@@ -31,12 +31,12 @@ const NAME = "([A-Za-z_][A-Za-z0-9_.-]*)";
 // never consumes a later name (`--verbose --registry-password VALUE`).
 const ASSIGNED = new RegExp(`(?<![A-Za-z0-9_.-])(?=-*${NAME}["']?[ \\t]*[:=][ \\t]*${VALUE})`, "dgu");
 const FLAG_SPACED = new RegExp(`(?<![A-Za-z0-9_.-])(?=--?${NAME}[ \\t]+${VALUE})`, "dgu");
-// scheme://user:password@host
-const URL_USERINFO = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]+:([^\s/?#@]+)@/dgiu;
-// Authorization: Basic <base64 user:password>
-const BASIC_AUTH = /\bauthorization\s*:\s*basic\s+([A-Za-z0-9+/]{4,}={0,2})(?![A-Za-z0-9+/=])/dgiu;
-// curl -u user:password, --user user:password, --user=user:password
-const CURL_USER = new RegExp(`(?<![A-Za-z0-9_-])(?:-u|--user)(?:[ \\t]+|=)${VALUE}`, "dgu");
+// scheme://user:password@host (the user name may be empty: https://:password@host)
+const URL_USERINFO = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]*:([^\s/?#@]+)@/dgiu;
+// Authorization: Basic <base64>; isBasicCredentials() checks it decodes to user:password.
+const BASIC_AUTH = /\bauthorization\s*:\s*basic\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9+/=])/dgiu;
+// curl -u user:password, -uuser:password, --user user:password, --user=user:password
+const CURL_USER = new RegExp(`(?<![A-Za-z0-9_-])(?:-u[ \\t]*|--user(?:[ \\t]+|=))${VALUE}`, "dgu");
 // A YAML block scalar under a key: `api_token: |`, `>-`, `|2`.
 const YAML_BLOCK = /^([ \t]*)(?:-[ \t]+)?["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*:[ \t]*[|>][+-]?\d?[+-]?[ \t]*(?:#.*)?$/u;
 
@@ -81,9 +81,40 @@ function unquote(v: string): string {
   return v;
 }
 
-/** `$VAR`, `${VAR}`, `${{ expr }}` or `{{placeholder}}`: a reference, not a value. */
-export function isReference(v: string): boolean {
-  return /^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}]*\}|\$?\{\{[^}]*\}\})$/u.test(v.trim());
+// Shell syntax that ends a word: `$VAR; echo`, `${VAR}&& deploy`.
+const SHELL_END = "(?:[;&|<>)].*)?";
+const PLAIN_REF = new RegExp(`^(?:\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}|\\$?\\{\\{[^}]*\\}\\})${SHELL_END}$`, "su");
+const DEFAULT_REF = new RegExp(`^\\$\\{[A-Za-z_][A-Za-z0-9_]*:?[-=?+]([^}]*)\\}${SHELL_END}$`, "su");
+
+/**
+ * The literal text a value stands for. A plain reference (`$VAR`, `${VAR}`,
+ * `${{ expr }}`, `{{placeholder}}`), even followed by shell syntax (`$VAR;`),
+ * stands for nothing: null. A shell default (`${VAR:-text}`) stands for its
+ * text. Anything else stands for itself.
+ */
+export function literalOf(v: string): string | null {
+  const t = v.trim();
+  if (PLAIN_REF.test(t)) return null;
+  const d = DEFAULT_REF.exec(t);
+  return d ? d[1]! : t;
+}
+
+/** Random-looking; a value with spaces counts only when one of its words does, so quoted prose stays clean. */
+function isSecretValue(v: string | null): boolean {
+  if (v === null) return false;
+  return /\s/u.test(v) ? v.split(/\s+/u).some((w) => looksRandom(w)) : looksRandom(v);
+}
+
+/** Base64 that decodes to printable `user:password` with a non-empty password. */
+function isBasicCredentials(b64: string): boolean {
+  if (b64.length < 8 || b64.length % 4 !== 0) return false;
+  let decoded: string;
+  try {
+    decoded = atob(b64);
+  } catch {
+    return false;
+  }
+  return /^[\x20-\x7E]*:[\x20-\x7E]+$/u.test(decoded);
 }
 
 /** A physical line joined with its shell `\` continuations, and a map back to line numbers. */
@@ -98,7 +129,8 @@ function logicalLines(physical: readonly string[]): LogicalLine[] {
   let current: LogicalLine | null = null;
   physical.forEach((raw, i) => {
     const continued = /(?:^|[^\\])(?:\\\\)*\\$/u.test(raw);
-    const piece = continued ? `${raw.slice(0, -1)} ` : raw;
+    // Shell drops the backslash and the newline and inserts nothing: `ab\` + `cd` is `abcd`.
+    const piece = continued ? raw.slice(0, -1) : raw;
     if (current === null) current = { text: "", starts: [] };
     current.starts.push({ offset: current.text.length, line: i + 1 });
     current.text += piece;
@@ -127,17 +159,15 @@ export function scanSecrets(text: string): SecretFinding[] {
     for (const { kind, re } of PATTERNS) for (const m of l.text.matchAll(re)) add(kind, at(m, 0));
     for (const re of [ASSIGNED, FLAG_SPACED]) {
       for (const m of l.text.matchAll(re)) {
-        const value = unquote(m[2]!);
-        if (isSecretName(m[1]!) && !isReference(value) && looksRandom(value)) add("secret-looking value", at(m, 2));
+        if (isSecretName(m[1]!) && isSecretValue(literalOf(unquote(m[2]!)))) add("secret-looking value", at(m, 2));
       }
     }
-    for (const m of l.text.matchAll(URL_USERINFO)) if (!isReference(m[1]!)) add("password in a URL", at(m, 1));
-    for (const m of l.text.matchAll(BASIC_AUTH)) add("Basic auth credentials", at(m, 1));
+    for (const m of l.text.matchAll(URL_USERINFO)) if (literalOf(m[1]!)) add("password in a URL", at(m, 1));
+    for (const m of l.text.matchAll(BASIC_AUTH)) if (isBasicCredentials(m[1]!)) add("Basic auth credentials", at(m, 1));
     for (const m of l.text.matchAll(CURL_USER)) {
       const value = unquote(m[1]!);
       const colon = value.indexOf(":");
-      const password = colon === -1 ? "" : value.slice(colon + 1);
-      if (password !== "" && !isReference(password)) add("password in -u/--user", at(m, 1));
+      if (colon !== -1 && literalOf(value.slice(colon + 1))) add("password in -u/--user", at(m, 1));
     }
   }
 
@@ -154,11 +184,11 @@ export function scanSecrets(text: string): SecretFinding[] {
       block.push({ text: next.trim(), line: j + 1 });
     }
     if (block.length === 0) return;
-    const hit = block.find((b) => !isReference(b.text) && looksRandom(b.text));
+    const hit = block.find((b) => isSecretValue(literalOf(b.text)));
     // A value folded over several lines: join them when each line is one word.
     const joined = block.every((b) => !/\s/u.test(b.text)) ? block.map((b) => b.text).join("") : "";
     if (hit) add("secret-looking value", hit.line);
-    else if (joined && !isReference(joined) && looksRandom(joined)) add("secret-looking value", block[0]!.line);
+    else if (joined && isSecretValue(literalOf(joined))) add("secret-looking value", block[0]!.line);
   });
 
   return [...found.values()].sort((a, b) => a.line - b.line);

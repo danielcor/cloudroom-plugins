@@ -52,6 +52,33 @@ describe("secret scan bypasses (round 4)", () => {
     expect(lines(text)).toContain(1);
   });
 
+  // Delta review of 2970fc4.
+  it.each([
+    ["S1 continuation inside an unquoted value", `deploy --token ${ALNUM.slice(0, 12)}\\\n${ALNUM.slice(12)}`, 1],
+    ["S4 a literal value with a shell delimiter after it is still a value", `export TOKEN=${ALNUM};echo done`, 1],
+    ["S5 shell default after NAME=", `export API_TOKEN=\${API_TOKEN:-${ALNUM}}`, 1],
+    ["S5 shell default in URL userinfo", `git clone https://deploy:\${PASS:-hunter2}@github.com/org/repo.git`, 1],
+    ["S5 shell default in curl credentials", `curl -u "admin:\${PASS:=hunter2}" https://x`, 1],
+    ["S6 empty user name in a URL", "curl https://:hunter2@example.com/api", 1],
+    ["S7 curl -u attached", "curl -uadmin:hunter2 https://example.com", 1],
+    ["S3 a random word inside quoted text", `password: "use ${PUNCT} for staging"`, 1],
+  ])("delta: catches %s", (_why, text, line) => {
+    expect(lines(text)).toContain(line);
+  });
+
+  it.each([
+    "Explain Authorization: Basic authentication.",
+    "Authorization: Basic auth is weaker than tokens.",
+    'password: "Choose a different password for each account"',
+    "token: 'Paste the token from the dashboard here'",
+    "export DATABASE_PASSWORD=$DATABASE_PASSWORD_2026; echo done",
+    "export API_TOKEN=${API_TOKEN}&& deploy",
+    "curl -u admin: https://example.com",
+    "curl -uadmin https://example.com",
+  ])("delta: keeps clean: %s", (text) => {
+    expect(scanSecrets(text)).toEqual([]);
+  });
+
   it.each([
     `export DATABASE_PASSWORD="$DB_PASSWORD"`,
     `export DATABASE_PASSWORD=\${DB_PASSWORD}`,

@@ -91,6 +91,10 @@ describe("SnippetStore", () => {
       ["URL userinfo", "psql postgres://app:pass@db/app"],
       ["Basic auth", `Authorization: Basic ${Buffer.from("app:" + PUNCT).toString("base64")}`],
       ["curl -u", "curl -u admin:hunter2 https://x"],
+      ["continuation inside a value", `deploy --token ${ALNUM.slice(0, 12)}\\\n${ALNUM.slice(12)}`],
+      ["shell default", `export API_TOKEN=\${API_TOKEN:-${ALNUM}}`],
+      ["empty URL user", "curl https://:hunter2@example.com"],
+      ["curl -u attached", "curl -uadmin:hunter2 https://x"],
     ])("blocks create and save: %s", async (_why, body) => {
       const path = `${G.dir}/x.md`;
       const clean = "---\ntitle: X\n---\nok";
@@ -99,6 +103,15 @@ describe("SnippetStore", () => {
       expect((await store.save(G, "x", { title: "X", tags: [], body }, sha(clean))).outcome).toBe("blocked");
       expect(files.writes).toEqual([]);
       expect(files.files.get(path)).toBe(clean);
+    });
+
+    it.each([
+      "Explain Authorization: Basic authentication.",
+      'password: "Choose a different password for each account"',
+      "export DATABASE_PASSWORD=$DATABASE_PASSWORD_2026; echo done",
+    ])("still saves guidance and references: %s", async (body) => {
+      const { store } = setup();
+      expect(await store.create(G, { title: "Guide", tags: [], body })).toMatchObject({ outcome: "saved" });
     });
 
     it("flags a placeholder-default secret on load", async () => {

@@ -71,8 +71,12 @@ Focus on {{focus|correctness}}.
   continued onto the next line with a shell `\`, and YAML `key: |` or `>` blocks. Findings give the line the
   value is on.
 
-  References are not values: `$VAR`, `${VAR}` and `{{placeholder}}` stay clean, and so does `user@host` with no
-  password. The body is also scanned with placeholder defaults filled in, so `--token {{token|…}}` counts.
+  References are not values: `$VAR`, `${VAR}` and `{{placeholder}}` stay clean, also when shell syntax follows
+  (`$VAR; echo`). So does `user@host` with no password. A shell default is a value: `${VAR:-text}` is checked
+  as `text`. A quoted value with spaces counts only when one of its words looks random, so quoted guidance such
+  as `password: "Choose a different one"` stays clean. `Authorization: Basic …` counts only when it decodes to
+  `user:password`. URLs with an empty user name (`https://:pass@host`) and curl's attached `-uuser:pass` are
+  covered too. The body is also scanned with placeholder defaults filled in, so `--token {{token|…}}` counts.
 
   On save, a hit blocks the save and names the kind and the line, never the value. On load, a hit shows a
   warning badge, and the picker then needs a confirmation before it inserts. `room-cli snip show` refuses to
