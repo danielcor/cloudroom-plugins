@@ -1,32 +1,53 @@
 // An in-memory `bb.sdk.files` with real sha256 compare-and-swap, for tests.
+// It follows the host daemon (bb-app 0.49.0, host-daemon/dist/daemon-bundle.mjs):
+// a `rootPath` must exist, or read/write/remove fail with "Path does not exist:
+// <path>" (HTTP 404 through the SDK) before `createParents` is looked at; a
+// write whose parent folder is missing needs `createParents`; `mkdir` with
+// `recursive` creates every missing folder and accepts an existing one.
 import { createHash } from "node:crypto";
 import { posix } from "node:path";
 import type { FilesPort } from "../src/store.js";
 
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
-const enoent = (p: string) => new Error(`ENOENT: no such file or directory, open '${p}'`);
+const notFound = (p: string) => new Error(`HTTP 404: Path does not exist: ${p}`);
 
 export class FakeFiles implements FilesPort {
   readonly files = new Map<string, string>();
+  readonly dirs = new Set<string>(["/"]);
   readonly writes: string[] = [];
+  readonly mkdirs: string[] = [];
 
-  constructor(seed: Record<string, string> = {}) {
-    for (const [p, c] of Object.entries(seed)) this.files.set(p, c);
+  constructor(seed: Record<string, string> = {}, dirs: string[] = []) {
+    for (const [p, c] of Object.entries(seed)) {
+      this.files.set(p, c);
+      this.addDirs(posix.dirname(p));
+    }
+    for (const d of dirs) this.addDirs(d);
   }
 
-  private confine(path: string, rootPath?: string): void {
-    if (rootPath && !(path === rootPath || path.startsWith(`${rootPath}/`))) throw new Error(`path escapes root: ${path}`);
+  private addDirs(dir: string): void {
+    for (let d = dir; !this.dirs.has(d); d = posix.dirname(d)) this.dirs.add(d);
+  }
+
+  private root(path: string, rootPath?: string): void {
+    if (rootPath === undefined) return;
+    if (!this.dirs.has(rootPath)) throw notFound(path);
+    if (!(path === rootPath || path.startsWith(`${rootPath}/`))) throw new Error(`Path "${path}" escapes write root`);
   }
 
   async read({ path, rootPath }: { path: string; rootPath?: string }) {
-    this.confine(path, rootPath);
+    this.root(path, rootPath);
     const content = this.files.get(path);
-    if (content === undefined) throw enoent(path);
+    if (content === undefined) throw notFound(path);
     return { content, contentEncoding: "utf8" as const, sha256: sha(content), modifiedAtMs: 1_700_000_000_000 };
   }
 
-  async write({ path, rootPath, content, expectedSha256 }: Parameters<FilesPort["write"]>[0]) {
-    this.confine(path, rootPath);
+  async write({ path, rootPath, content, expectedSha256, createParents }: Parameters<FilesPort["write"]>[0]) {
+    this.root(path, rootPath);
+    if (!this.dirs.has(posix.dirname(path))) {
+      if (!createParents) throw notFound(posix.dirname(path));
+      this.addDirs(posix.dirname(path));
+    }
     const current = this.files.get(path);
     if (expectedSha256 !== undefined) {
       const currentSha = current === undefined ? null : sha(current);
@@ -39,15 +60,22 @@ export class FakeFiles implements FilesPort {
 
   // Like the host's file finder: recursive, absolute paths.
   async list({ path }: { path: string }) {
+    if (!this.dirs.has(path)) throw notFound(path);
     const prefix = `${path}/`;
     const files = [...this.files.keys()].filter((p) => p.startsWith(prefix)).map((p) => ({ name: posix.basename(p), path: p }));
-    if (files.length === 0 && ![...this.files.keys()].some((p) => p.startsWith(prefix))) throw enoent(path);
     return { files, truncated: false };
   }
 
   async remove({ path, rootPath }: { path: string; rootPath?: string }) {
-    this.confine(path, rootPath);
-    if (!this.files.delete(path)) throw enoent(path);
+    this.root(path, rootPath);
+    if (!this.files.delete(path)) throw notFound(path);
+    return { ok: true as const };
+  }
+
+  async mkdir({ path, recursive }: { path: string; recursive?: boolean }) {
+    if (!recursive && !this.dirs.has(posix.dirname(path))) throw notFound(path);
+    this.addDirs(path);
+    this.mkdirs.push(path);
     return { ok: true as const };
   }
 }

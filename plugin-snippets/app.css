@@ -39,6 +39,7 @@
 .snip-keys { margin-top: 10px; font-size: 12px; }
 .snip-empty { padding: 16px 0; }
 .snip-toast { position: sticky; bottom: 0; display: flex; gap: 10px; align-items: center; margin-top: 12px; padding: 8px 12px; border: 1px solid var(--snip-line); border-radius: 8px; background: color-mix(in srgb, currentColor 10%, Canvas); }
+.snip-toast-error { border-color: #e5484d; color: #e5484d; }
 .snip-editor { width: 380px; flex-shrink: 0; border-left: 1px solid var(--snip-line); padding: 12px 16px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
 .snip-editor label, .snip-fields label { display: flex; flex-direction: column; gap: 4px; }
 .snip-editor label > span, .snip-label, .snip-fields label > span { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; opacity: .6; }

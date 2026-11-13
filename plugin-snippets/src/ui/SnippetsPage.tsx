@@ -8,7 +8,7 @@ import { parsePlaceholders } from "../placeholders.js";
 import { markInvisible } from "../secrets.js";
 import type { WriteOutcome } from "../store.js";
 import { useBridge } from "./bridge.js";
-import { useProjects, useSnippets, type SnippetsData } from "./data.js";
+import { useProjects, useSnippets, type Failed, type SnippetsData } from "./data.js";
 import { Picker } from "./Picker.js";
 
 type ScopeFilter = "all" | Scope;
@@ -101,12 +101,13 @@ function Table({ snippets, all, projectName, hasProject }: { snippets: SnippetsD
   const [tag, setTag] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ key: string; field: "title" | "tags"; value: string } | null>(null);
-  const [toast, setToast] = useState<{ text: string; undo?: () => void } | null>(null);
+  const [toast, setToast] = useState<{ text: string; undo?: () => void; error?: boolean } | null>(null);
   const [focusTitle, setFocusTitle] = useState(0);
   const dragKey = useRef<string | null>(null);
 
   useEffect(() => {
     if (!toast) return;
+    if (toast.error) return; // an error stays until dismissed
     const t = setTimeout(() => setToast(null), 6000);
     return () => clearTimeout(t);
   }, [toast]);
@@ -119,8 +120,9 @@ function Table({ snippets, all, projectName, hasProject }: { snippets: SnippetsD
   const current = all.find((s) => keyOf(s) === selected) ?? null;
   const inScope = (s: SnippetView) => all.filter((x) => x.scope === s.scope);
 
-  function report(r: WriteOutcome | { outcome: "removed" } | { outcome: "moved" }, ok?: string): boolean {
-    if (r.outcome === "blocked") setToast({ text: r.reasons.join(" ") });
+  function report(r: WriteOutcome | Failed | { outcome: "removed" } | { outcome: "moved" }, ok?: string): boolean {
+    if (r.outcome === "failed") setToast({ text: `That did not work: ${r.message}`, error: true });
+    else if (r.outcome === "blocked") setToast({ text: r.reasons.join(" "), error: true });
     else if (r.outcome === "conflict") setToast({ text: `${r.message} Reloaded from disk.` });
     else {
       if (ok) setToast({ text: ok });
@@ -320,11 +322,16 @@ function Table({ snippets, all, projectName, hasProject }: { snippets: SnippetsD
           duplicate · <kbd>Del</kbd> delete, with undo
         </p>
         {toast && (
-          <div className="snip-toast" role="status">
+          <div className={toast.error ? "snip-toast snip-toast-error" : "snip-toast"} role={toast.error ? "alert" : "status"}>
             {toast.text}
             {toast.undo && (
               <button type="button" onClick={toast.undo}>
                 Undo
+              </button>
+            )}
+            {toast.error && (
+              <button type="button" onClick={() => setToast(null)}>
+                Dismiss
               </button>
             )}
           </div>
@@ -402,6 +409,7 @@ function Editor({
         setSaved(sent);
         setStatus({ kind: "saved" });
       } else if (r.outcome === "blocked") setStatus({ kind: "blocked", reasons: r.reasons });
+      else if (r.outcome === "failed") setStatus({ kind: "blocked", reasons: [r.message] });
       else setStatus({ kind: "conflict", message: r.message, current: r.current });
     })();
     inFlight.current = run;

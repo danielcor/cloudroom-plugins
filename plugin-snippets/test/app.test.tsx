@@ -156,6 +156,27 @@ describe("table", () => {
     expect(calls[0]).toMatchObject({ scope: "global", id: "review-pr", expectedSha256: "sha-review-pr", title: "Review a PR", tags: ["review", "git"] });
   });
 
+  it("shows a failed create as an error that stays, instead of a silent revert", async () => {
+    const slot = renderSlot(
+      { component: SnippetsPage },
+      { subPath: "" },
+      {
+        rpc: rpc({
+          create: () => {
+            throw new Error("HTTP 404: Path does not exist: /repo/.snippets/new-snippet.md");
+          },
+        }),
+        context: { projectId: "proj_1", threadId: null },
+      },
+    );
+    await slot.findByLabelText("Delete Worker brief");
+    fireEvent.click(slot.getByRole("button", { name: "+ New snippet" }));
+    const alert = await slot.findByRole("alert");
+    expect(alert.textContent).toContain("That did not work: HTTP 404: Path does not exist: /repo/.snippets/new-snippet.md");
+    fireEvent.click(slot.getByRole("button", { name: "Dismiss" }));
+    expect(slot.queryByRole("alert")).toBeNull();
+  });
+
   it("keeps inline typing when the input itself is clicked", async () => {
     const slot = renderSlot({ component: SnippetsPage }, { subPath: "" }, { rpc: rpc(), context: { projectId: "proj_1", threadId: null } });
     fireEvent.click(await slot.findByText("Review this PR"));

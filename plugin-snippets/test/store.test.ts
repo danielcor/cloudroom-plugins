@@ -114,6 +114,24 @@ describe("SnippetStore", () => {
     await expect(setup().store.read(G, "../etc/passwd")).rejects.toThrow("Invalid snippet id");
   });
 
+  it("the fake host refuses a write into a missing folder, like the real one", async () => {
+    const files = new FakeFiles({}, ["/repo"]);
+    await expect(files.write({ path: "/repo/.snippets/x.md", rootPath: "/repo/.snippets", content: "", createParents: true, expectedSha256: null })).rejects.toThrow(
+      "HTTP 404: Path does not exist: /repo/.snippets/x.md",
+    );
+  });
+
+  it("creates the folder on the first create, project and global", async () => {
+    const files = new FakeFiles({}, ["/repo", "/home/d/skills"]);
+    const store = new SnippetStore(files, now);
+    expect(await store.list(P)).toEqual([]);
+    expect(await store.create(P, { title: "New snippet", tags: [], body: "" })).toMatchObject({ outcome: "saved", snippet: { path: "/repo/.snippets/new-snippet.md" } });
+    expect(await store.create(G, { title: "New snippet", tags: [], body: "" })).toMatchObject({ outcome: "saved", snippet: { path: "/home/d/skills/.snippets/new-snippet.md" } });
+    expect(files.mkdirs).toEqual(["/repo/.snippets", "/home/d/skills/.snippets"]);
+    // A second create into the now-existing folder still works (recursive mkdir accepts it).
+    expect(await store.create(P, { title: "New snippet", tags: [], body: "" })).toMatchObject({ outcome: "saved", snippet: { id: "new-snippet-2" } });
+  });
+
   it("a project save writes only the snippet file, never a .gitignore", async () => {
     const { store, files } = setup({ "/repo/.cloudroom/.gitignore": "*\n" });
     expect(await store.create(P, { title: "Worker brief", tags: [], body: "x" })).toMatchObject({ outcome: "saved", snippet: { path: "/repo/.snippets/worker-brief.md" } });

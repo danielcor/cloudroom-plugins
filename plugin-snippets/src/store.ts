@@ -40,6 +40,7 @@ export interface FilesPort {
     truncated: boolean;
   }>;
   remove(args: { hostId?: string; path: string; rootPath?: string }): Promise<unknown>;
+  mkdir(args: { hostId?: string; path: string; recursive?: boolean }): Promise<unknown>;
 }
 
 /** Where one scope's files live. */
@@ -179,6 +180,11 @@ export class SnippetStore {
 
   private async put(loc: Location, id: string, content: string, expectedSha256: string | null): Promise<WriteOutcome> {
     const path = pathOf(loc, id);
+    // The host resolves `rootPath` before it applies `createParents`, so a write into a
+    // folder that does not exist yet fails with "Path does not exist". Create the folder
+    // first (recursive: no error when it exists) on every create; saves and moves only
+    // rewrite files that are already there.
+    if (expectedSha256 === null) await this.files.mkdir({ hostId: loc.hostId, path: loc.dir, recursive: true });
     const r = await this.files.write({ hostId: loc.hostId, path, rootPath: loc.dir, content, createParents: true, expectedSha256 });
     if (r.outcome === "conflict") {
       const current = await this.read(loc, id);

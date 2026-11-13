@@ -19,16 +19,19 @@ export function useProjects(): ProjectSummary[] {
   return projects;
 }
 
+/** A write the server rejected outright (an RPC or host error), so the page can show it. */
+export type Failed = { outcome: "failed"; message: string };
+
 export interface SnippetsData {
   data: ListResult | null;
   error: string | null;
   loading: boolean;
   reload(): Promise<void>;
-  create(scope: Scope, fields: SnippetFields, restore?: Pick<SnippetView, "id" | "order" | "created">): Promise<WriteOutcome>;
-  save(s: SnippetView, fields: SnippetFields, expectedSha256?: string): Promise<WriteOutcome>;
-  duplicate(s: SnippetView): Promise<WriteOutcome>;
-  remove(s: SnippetView): Promise<RemoveOutcome>;
-  move(s: SnippetView, toIndex: number): Promise<MoveOutcome>;
+  create(scope: Scope, fields: SnippetFields, restore?: Pick<SnippetView, "id" | "order" | "created">): Promise<WriteOutcome | Failed>;
+  save(s: SnippetView, fields: SnippetFields, expectedSha256?: string): Promise<WriteOutcome | Failed>;
+  duplicate(s: SnippetView): Promise<WriteOutcome | Failed>;
+  remove(s: SnippetView): Promise<RemoveOutcome | Failed>;
+  move(s: SnippetView, toIndex: number): Promise<MoveOutcome | Failed>;
 }
 
 export function useSnippets(projectId: string | null): SnippetsData {
@@ -60,10 +63,13 @@ export function useSnippets(projectId: string | null): SnippetsData {
     void reload();
   }, [reload]);
 
+  // Every write resolves: a rejected call becomes a `failed` outcome the caller must show.
   const after = useCallback(
-    async <T>(p: Promise<T>): Promise<T> => {
+    async <T>(p: Promise<T>): Promise<T | Failed> => {
       try {
         return await p;
+      } catch (e) {
+        return { outcome: "failed", message: e instanceof Error ? e.message : String(e) };
       } finally {
         await reload();
       }

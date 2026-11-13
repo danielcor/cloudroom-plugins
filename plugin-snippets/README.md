@@ -37,6 +37,8 @@ Focus on {{focus|correctness}}.
 | Project | `<repo>/.snippets/`, committed with the repo. |
 | Global | The `globalDir` setting. The default is `~/skills/.snippets` on the Cloudroom server's machine, a dot-folder that `distribute-skills` skips. Change it with `room-cli plugin config snippets set globalDir <path>`. |
 
+- Neither folder has to exist. The first create makes it with `bb.sdk.files.mkdir` (recursive). The host
+  will not write into a missing `rootPath`, even with `createParents`.
 - The frontmatter is a flat subset: one `key: value` per line. Keys the plugin does not know are kept when it saves.
 - Every write carries the SHA-256 of the file as it was read. If the file changed on disk in the meantime, the
   editor keeps your text and offers **Overwrite with mine** or **Discard mine**.

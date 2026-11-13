@@ -19,13 +19,13 @@ const project = {
   sources: [{ id: "src_1", projectId: "proj_1", hostId: "host_aipc", path: "/repo", isDefault: true, type: "local_path", createdAt: 0, updatedAt: 0 }],
 };
 
-async function load(seed: Record<string, string> = {}, settings: Record<string, string> = { globalDir: "/g" }) {
-  const files = new FakeFiles(seed);
+async function load(seed: Record<string, string> = {}, settings: Record<string, string> = { globalDir: "/g" }, dirs: string[] = ["/repo"]) {
+  const files = new FakeFiles(seed, dirs);
   const host = createFakePluginHost({
     pluginId: "snippets",
     settings,
     sdk: {
-      files: { read: (a) => files.read(a), write: (a) => files.write(a) as never, list: (a) => files.list(a), remove: (a) => files.remove(a) as never },
+      files: { read: (a) => files.read(a), write: (a) => files.write(a) as never, list: (a) => files.list(a), remove: (a) => files.remove(a) as never, mkdir: (a) => files.mkdir(a) as never },
       projects: { get: async () => project as never, list: async () => [project] as never },
       threads: { get: async ({ threadId }) => ({ projectId: threadId === "thr_1" ? "proj_1" : "other" }) as never },
     },
@@ -116,6 +116,18 @@ describe("snippets server", () => {
     const r = (await host.harness.callRpc("list", { projectId: "proj_1" })) as { global: { dir: string }; project: { dir: string } };
     expect(r.global.dir).toBe(`${homedir()}/skills/.snippets`);
     expect(r.project.dir).toBe("/repo/.snippets");
+  });
+
+  it("the first create works when neither snippets folder exists yet", async () => {
+    // Only the checkout and the global folder's parent exist, as on a fresh aipc.
+    const { host, files } = await load({}, { globalDir: "/home/d/skills/.snippets" }, ["/repo", "/home/d/skills"]);
+    const project = await host.harness.callRpc("create", { scope: "project", projectId: "proj_1", title: "New snippet", tags: [], body: "" });
+    expect(project).toMatchObject({ outcome: "saved", snippet: { id: "new-snippet", path: "/repo/.snippets/new-snippet.md" } });
+    const global = await host.harness.callRpc("create", { scope: "global", projectId: null, title: "New snippet", tags: [], body: "" });
+    expect(global).toMatchObject({ outcome: "saved", snippet: { path: "/home/d/skills/.snippets/new-snippet.md" } });
+    expect(files.mkdirs).toEqual(["/repo/.snippets", "/home/d/skills/.snippets"]);
+    const list = (await host.harness.callRpc("list", { projectId: "proj_1" })) as { snippets: { scope: string; id: string }[] };
+    expect(list.snippets.map((s) => `${s.scope}:${s.id}`)).toEqual(["project:new-snippet", "global:new-snippet"]);
   });
 
   it("expands ~ in the global folder", () => {

@@ -35,6 +35,7 @@ export default async function snippetsPlugin(bb: BbPluginApi): Promise<void> {
     write: (a) => bb.sdk.files.write(a),
     list: (a) => bb.sdk.files.list(a),
     remove: (a) => bb.sdk.files.remove(a),
+    mkdir: (a) => bb.sdk.files.mkdir(a),
   } satisfies FilesPort);
 
   async function globalLocation(): Promise<Location> {
