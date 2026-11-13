@@ -42,15 +42,17 @@ Focus on {{focus|correctness}}.
 - The frontmatter is a flat subset: one `key: value` per line. Keys the plugin does not know are kept when it saves.
 - Every write carries the SHA-256 of the file as it was read. If the file changed on disk in the meantime, the
   editor keeps your text and offers **Overwrite with mine** or **Discard mine**.
-- A delete never removes bytes. It checks the hash, then renames the file into `.trash/<id>~<time>.md` in the
+- A delete never removes bytes. It checks the hash, then renames the file into `.trash/<id>~<time>-<random>.md` in the
   same folder. The rename is atomic on the host. It then compares the moved bytes with the hash it checked.
   If an edit landed in between, it writes those bytes back and reports a conflict. If a new file already holds
   that name, it names the trash file that has the edit. **Undo** writes the trashed bytes back exactly: unknown
   keys and comments survive, and the secret scan does not run on content that was already on disk. Both write
   with `expectedSha256: null`, so they never replace a file that appeared in the meantime. The host's
   move checks the destination and then renames, which could replace one. The trash copy stays. The table and
-  `room-cli snip` never list `.trash/`. The plugin writes a `.trash/.gitignore` containing `*` so deleted
-  snippets stay out of Git. Nothing empties the trash yet: delete old files there by hand.
+  `room-cli snip` never list `.trash/`. The random part keeps two deletes in the same millisecond from sharing
+  a name. Before it moves anything, the plugin makes sure `.trash/.gitignore` has a bare `*` line. It creates
+  the file, or appends the line to one that lacks it, with a compare-and-swap write. If that write conflicts,
+  nothing is deleted. Nothing empties the trash yet: delete old files there by hand.
 - A move rewrites only the moved file's `order` key. The plugin renumbers the scope only when there is no gap left.
 
 ## Safety
@@ -58,7 +60,7 @@ Focus on {{focus|correctness}}.
 - The plugin never submits. Insert only appends visible, editable text.
 - **Secret scan.** It checks for private keys, AWS, GitHub, `sk-`, Slack and Google keys, JWTs, bearer tokens,
   and long random values assigned to a name whose last word is secret-ish (`API_TOKEN=…`, `DATABASE_PASSWORD: …`,
-  `apiKey: …`, `APIToken=…`, `clientsecret: …`, `token=…`). Names are split on `_`, `.`, `-`, camelCase and
+  `apiKey: …`, `APIToken=…`, `clientsecret: …`, `token=…`, and CLI flags like `--api-key=…`). Names are split on `_`, `.`, `-`, camelCase and
   acronyms. The last word counts when it ends in token, secret, password, passwd, passphrase or
   credential(s), or when it is `key`, `pwd`, `auth`, `pat`, or a compound like `apikey` or `accesskey`. On save, a hit blocks the save and names
   the kind and the line, never the value. On load, a hit shows a warning badge. The picker then needs a

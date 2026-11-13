@@ -7,9 +7,16 @@ const P: Location = { scope: "project", hostId: "h1", dir: "/repo/.snippets" };
 const now = () => new Date("2026-11-13T10:00:00Z");
 const file = (title: string, order: number | null, body = "body") => `---\ntitle: ${title}\n${order === null ? "" : `order: ${order}\n`}---\n${body}`;
 
+// Deterministic per-delete suffixes: 00000001, 00000002, ...
+const counter = () => {
+  let n = 0;
+  return () => (++n).toString(16).padStart(8, "0");
+};
+const T1 = "x~20261113T100000000Z-00000001.md";
+
 function setup(seed: Record<string, string> = {}) {
   const files = new FakeFiles(seed);
-  return { files, store: new SnippetStore(files, now) };
+  return { files, store: new SnippetStore(files, now, counter()) };
 }
 
 describe("SnippetStore", () => {
@@ -48,6 +55,16 @@ describe("SnippetStore", () => {
     expect(r.outcome).toBe("blocked");
     expect(r.outcome === "blocked" && r.reasons[0]).toContain("GitHub token on body line 1");
     expect(r.outcome === "blocked" && r.reasons.join()).not.toContain(token);
+    expect(files.writes).toEqual([]);
+  });
+
+  it("blocks a save with a CLI-style secret flag", async () => {
+    const { store, files } = setup();
+    const value = ["aB3dE5gH7jK9mN1p", "Q2sT4vW6xY8zaB3d"].join("");
+    for (const flag of ["--token", "--password", "--api-key", "--access-key", "-token"]) {
+      const r = await store.create(G, { title: "Deploy", tags: [], body: `run ${flag}=${value}` });
+      expect(r.outcome, flag).toBe("blocked");
+    }
     expect(files.writes).toEqual([]);
   });
 
@@ -95,15 +112,15 @@ describe("SnippetStore", () => {
     expect(await store.remove(G, "x", "stale")).toMatchObject({ outcome: "conflict" });
     expect(files.files.get(path)).toBe(content);
     const r = await store.remove(G, "x", sha(content));
-    expect(r).toEqual({ outcome: "removed", trash: "x~20261113T100000000Z.md" });
+    expect(r).toEqual({ outcome: "removed", trash: T1 });
     expect(files.files.has(path)).toBe(false);
-    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(content);
+    expect(files.files.get(`${G.dir}/.trash/${T1}`)).toBe(content);
     expect(files.files.get(`${G.dir}/.trash/.gitignore`)).toBe("*\n");
     expect((await store.list(G)).map((s) => s.id)).toEqual(["y"]);
-    expect(await store.restore(G, "x", "x~20261113T100000000Z.md")).toEqual({ outcome: "restored" });
+    expect(await store.restore(G, "x", T1)).toEqual({ outcome: "restored" });
     expect(files.files.get(path)).toBe(content);
     // The trash copy stays: Undo writes, it never renames or removes.
-    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(content);
+    expect(files.files.get(`${G.dir}/.trash/${T1}`)).toBe(content);
     expect((await store.list(G)).map((s) => s.id)).toEqual(["x", "y"]);
   });
 
@@ -125,7 +142,7 @@ describe("SnippetStore", () => {
     files.files.set(path, "---\ntitle: X\n---\nnew");
     expect(await store.restore(G, "x", r.outcome === "removed" ? r.trash! : "")).toMatchObject({ outcome: "conflict" });
     expect(files.files.get(path)).toBe("---\ntitle: X\n---\nnew");
-    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(content);
+    expect(files.files.get(`${G.dir}/.trash/${T1}`)).toBe(content);
   });
 
   it("Undo never replaces a snippet created after its existence check", async () => {
@@ -135,15 +152,70 @@ describe("SnippetStore", () => {
     const r = await store.remove(G, "x", sha(content));
     // Created after restore's check, right before it puts the bytes back.
     files.hookWrites = true;
-    files.beforeNextChange = () => files.files.set(path, "created meanwhile");
+    files.beforeNextChange = () => {
+      files.files.set(path, "created meanwhile");
+    };
     expect(await store.restore(G, "x", r.outcome === "removed" ? r.trash! : "")).toMatchObject({ outcome: "conflict" });
     expect(files.files.get(path)).toBe("created meanwhile");
-    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(content);
+    expect(files.files.get(`${G.dir}/.trash/${T1}`)).toBe(content);
+  });
+
+  it("two deletes of one id in the same millisecond keep both archives", async () => {
+    const path = `${G.dir}/x.md`;
+    const content = "---\ntitle: X\n---\nfirst";
+    const { store, files } = setup({ [path]: content });
+    const r1 = await store.remove(G, "x", sha(content));
+    expect(await store.restore(G, "x", r1.outcome === "removed" ? r1.trash! : "")).toEqual({ outcome: "restored" });
+    const r2 = await store.remove(G, "x", sha(content));
+    expect(r2.outcome).toBe("removed");
+    const names = [r1, r2].map((r) => (r.outcome === "removed" ? r.trash : null));
+    expect(new Set(names).size).toBe(2);
+    for (const n of names) expect(files.files.get(`${G.dir}/.trash/${n}`)).toBe(content);
+  });
+
+  it("overlapping deletes with identical timestamps never overwrite each other's archive", async () => {
+    const path = `${G.dir}/x.md`;
+    const original = "---\ntitle: X\n---\noriginal";
+    const { store, files } = setup({ [path]: original });
+    let second: Awaited<ReturnType<typeof store.remove>> | null = null;
+    // Between the first delete's destination check and its rename (the host's lstat/rename gap):
+    // a second delete archives x, then someone writes a new x.
+    files.beforeNextChange = async () => {
+      second = await store.remove(G, "x", sha(original));
+      files.files.set(path, "---\ntitle: X\n---\nnewer");
+    };
+    const first = await store.remove(G, "x", sha(original));
+    expect(second).toMatchObject({ outcome: "removed" });
+    expect(first).toMatchObject({ outcome: "conflict" });
+    const archived = [...files.files.entries()].filter(([p]) => p.startsWith(`${G.dir}/.trash/x~`)).map(([, c]) => c);
+    // The original bytes survive in the trash, and the newer file is back in place.
+    expect(archived).toContain(original);
+    expect(files.files.get(path)).toBe("---\ntitle: X\n---\nnewer");
+  });
+
+  it("adds the * rule to an existing .trash/.gitignore that lacks it", async () => {
+    const path = `${G.dir}/x.md`;
+    const content = "---\ntitle: X\n---\nbody";
+    const { store, files } = setup({ [path]: content, [`${G.dir}/.trash/.gitignore`]: "# deleted snippets\n" });
+    expect(await store.remove(G, "x", sha(content))).toMatchObject({ outcome: "removed" });
+    expect(files.files.get(`${G.dir}/.trash/.gitignore`)).toBe("# deleted snippets\n*\n");
+  });
+
+  it("does not delete when it cannot make .trash ignored by Git", async () => {
+    const path = `${G.dir}/x.md`;
+    const content = "---\ntitle: X\n---\nbody";
+    const { store, files } = setup({ [path]: content, [`${G.dir}/.trash/.gitignore`]: "# deleted snippets\n" });
+    files.hookWrites = true;
+    // The .gitignore changes between the store's read and its CAS write.
+    files.beforeNextChange = () => void files.files.set(`${G.dir}/.trash/.gitignore`, "# edited\n");
+    expect(await store.remove(G, "x", sha(content))).toMatchObject({ outcome: "conflict" });
+    expect(files.files.get(path)).toBe(content);
+    expect([...files.files.keys()].filter((p) => p.includes(".trash/x~"))).toEqual([]);
   });
 
   it("Undo rejects a trash name for another id or outside the trash pattern", async () => {
     const { store } = setup();
-    await expect(store.restore(G, "x", "y~20261113T100000000Z.md")).rejects.toThrow("Invalid trash entry");
+    await expect(store.restore(G, "x", "y~20261113T100000000Z-00000001.md")).rejects.toThrow("Invalid trash entry");
     await expect(store.restore(G, "x", "../x.md")).rejects.toThrow("Invalid trash entry");
   });
 
@@ -151,7 +223,9 @@ describe("SnippetStore", () => {
     const path = `${G.dir}/x.md`;
     const content = "---\ntitle: X\n---\nbody";
     const { store, files } = setup({ [path]: content });
-    files.beforeNextChange = () => files.files.set(path, "---\ntitle: X\n---\nedited meanwhile");
+    files.beforeNextChange = () => {
+      files.files.set(path, "---\ntitle: X\n---\nedited meanwhile");
+    };
     const r = await store.remove(G, "x", sha(content));
     expect(r.outcome).toBe("conflict");
     expect(files.files.get(path)).toBe("---\ntitle: X\n---\nedited meanwhile");
@@ -161,7 +235,9 @@ describe("SnippetStore", () => {
     const path = `${G.dir}/x.md`;
     const content = "---\ntitle: X\n---\nbody";
     const { store, files } = setup({ [path]: content });
-    files.beforeNextChange = () => files.files.set(path, "---\ntitle: X\n---\nedited meanwhile");
+    files.beforeNextChange = () => {
+      files.files.set(path, "---\ntitle: X\n---\nedited meanwhile");
+    };
     const realWrite = files.write.bind(files);
     files.write = async (a) => {
       // Putting it back fails: someone created x.md again right before that write.
@@ -169,9 +245,9 @@ describe("SnippetStore", () => {
       return realWrite(a);
     };
     const r = await store.remove(G, "x", sha(content));
-    expect(r).toMatchObject({ outcome: "conflict", message: expect.stringContaining(".trash/x~20261113T100000000Z.md") });
+    expect(r).toMatchObject({ outcome: "conflict", message: expect.stringContaining(`.trash/${T1}`) });
     expect(files.files.get(path)).toBe("recreated");
-    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe("---\ntitle: X\n---\nedited meanwhile");
+    expect(files.files.get(`${G.dir}/.trash/${T1}`)).toBe("---\ntitle: X\n---\nedited meanwhile");
   });
 
   it("moves by rewriting only the order key of the moved file", async () => {

@@ -113,7 +113,7 @@ describe("table", () => {
       { subPath: "" },
       {
         rpc: rpc({
-          remove: (input) => (calls.push(["remove", input]), { outcome: "removed", trash: "bash-header~20261113T100000000Z.md" }),
+          remove: (input) => (calls.push(["remove", input]), { outcome: "removed", trash: "bash-header~20261113T100000000Z-0a1b2c3d.md" }),
           restore: (input) => (calls.push(["restore", input]), { outcome: "restored" }),
         }),
         context: { projectId: "proj_1", threadId: null },
@@ -123,7 +123,7 @@ describe("table", () => {
     fireEvent.click(await slot.findByRole("button", { name: "Undo" }));
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[0]).toEqual(["remove", { scope: "global", projectId: "proj_1", id: "bash-header", expectedSha256: "sha-bash-header" }]);
-    expect(calls[1]).toEqual(["restore", { scope: "global", projectId: "proj_1", id: "bash-header", trash: "bash-header~20261113T100000000Z.md" }]);
+    expect(calls[1]).toEqual(["restore", { scope: "global", projectId: "proj_1", id: "bash-header", trash: "bash-header~20261113T100000000Z-0a1b2c3d.md" }]);
   });
 
   it("Alt+↓ moves a row within its scope", async () => {

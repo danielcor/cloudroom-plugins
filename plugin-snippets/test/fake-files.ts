@@ -17,14 +17,14 @@ export class FakeFiles implements FilesPort {
   readonly writes: string[] = [];
   readonly mkdirs: string[] = [];
   /** Runs once, just before the next remove or move: an edit that lands between a check and the act. */
-  beforeNextChange: (() => void) | null = null;
+  beforeNextChange: (() => void | Promise<void>) | null = null;
   /** Also run `beforeNextChange` before a write (off by default: most tests hook the delete). */
   hookWrites = false;
 
-  private changing(): void {
+  private async changing(): Promise<void> {
     const hook = this.beforeNextChange;
     this.beforeNextChange = null;
-    hook?.();
+    await hook?.();
   }
 
   constructor(seed: Record<string, string> = {}, dirs: string[] = []) {
@@ -54,7 +54,7 @@ export class FakeFiles implements FilesPort {
 
   async write({ path, rootPath, content, expectedSha256, createParents }: Parameters<FilesPort["write"]>[0]) {
     this.root(path, rootPath);
-    if (this.hookWrites) this.changing();
+    if (this.hookWrites) await this.changing();
     if (!this.dirs.has(posix.dirname(path))) {
       if (!createParents) throw notFound(posix.dirname(path));
       this.addDirs(posix.dirname(path));
@@ -79,7 +79,7 @@ export class FakeFiles implements FilesPort {
 
   async remove({ path, rootPath }: { path: string; rootPath?: string }) {
     this.root(path, rootPath);
-    this.changing();
+    await this.changing();
     if (!this.files.delete(path)) throw notFound(path);
     return { ok: true as const };
   }
@@ -92,7 +92,7 @@ export class FakeFiles implements FilesPort {
     if (!this.files.has(sourcePath)) throw notFound(sourcePath);
     if (this.files.has(destinationPath)) throw new Error(`Destination already exists: ${destinationPath}`);
     if (!this.dirs.has(posix.dirname(destinationPath))) throw notFound(destinationPath);
-    this.changing();
+    await this.changing();
     const content = this.files.get(sourcePath)!;
     this.files.delete(sourcePath);
     this.files.set(destinationPath, content);

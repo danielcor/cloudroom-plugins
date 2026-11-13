@@ -20,7 +20,8 @@ const PATTERNS: readonly { kind: string; re: RegExp }[] = [
 // `NAME = 7f9c…`: a long random-looking value assigned to a name whose last word is
 // secret-ish. The whole name is taken (`API_TOKEN`, `DATABASE_PASSWORD`, `apiKey`,
 // `stripe.secretKey`), so a `\b` before the secret word cannot hide it behind `_`.
-const ASSIGNED = /(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?([A-Za-z0-9/+_.=-]{16,})/gu;
+// Leading CLI hyphens are skipped: `--token=…`, `--api-key=…`, `-token=…`.
+const ASSIGNED = /(?<![A-Za-z0-9_.-])-*([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?([A-Za-z0-9/+_.=-]{16,})/gu;
 // A last word that ends in one of these is secret-ish (`dbpassword`, `clientsecret`, `authtoken`).
 const SECRET_ENDINGS = ["token", "secret", "password", "passwd", "passphrase", "credential", "credentials"];
 // These only as the whole last word: `monkey` must not count as a key.

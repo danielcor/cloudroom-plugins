@@ -25,6 +25,11 @@ describe("secret scan", () => {
     ["secret-looking value", `APIToken=${fake("", 32)}`],
     ["secret-looking value", `DBPassword="${fake("", 32)}"`],
     ["secret-looking value", `privatekey = ${fake("", 32)}`],
+    ["secret-looking value", `deploy --token=${fake("", 32)}`],
+    ["secret-looking value", `--password=${fake("", 32)}`],
+    ["secret-looking value", `cli --api-key=${fake("", 32)}`],
+    ["secret-looking value", `--access-key=${fake("", 32)}`],
+    ["secret-looking value", `-token=${fake("", 32)}`],
   ])("flags %s", (kind, text) => {
     expect(scanSecrets(`line one\n${text}`)).toContainEqual({ kind, line: 2 });
   });

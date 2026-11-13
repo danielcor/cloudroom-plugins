@@ -1,6 +1,7 @@
 // Snippet storage over `bb.sdk.files`. One Markdown file per snippet; every
 // write carries `expectedSha256` (null = must not exist yet), so a file changed
 // on disk since the app read it is reported as a conflict, never overwritten.
+import { randomBytes } from "node:crypto";
 import { posix } from "node:path";
 import { compareOrder, nextOrder, planMove } from "./order.js";
 import { findSecrets, stripInvisible } from "./secrets.js";
@@ -55,9 +56,14 @@ export interface Location {
   dir: string;
 }
 
-/** Deleted snippets go here as `<id>~<stamp>.md`, byte for byte, until Undo moves them back. */
+/**
+ * Deleted snippets go here as `<id>~<stamp>-<random>.md`, byte for byte. The
+ * random part keeps two deletes of one id in the same millisecond apart: the
+ * host's move checks the destination and then renames, so a shared name could
+ * let one archive replace the other.
+ */
 export const TRASH_DIR = ".trash";
-export const TRASH_NAME = /^([a-z0-9][a-z0-9-]{0,63})~(\d{8}T\d{9}Z)\.md$/u;
+export const TRASH_NAME = /^([a-z0-9][a-z0-9-]{0,63})~(\d{8}T\d{9}Z)-([0-9a-f]{8})\.md$/u;
 
 export type RemoveOutcome = { outcome: "removed"; trash: string | null } | Extract<WriteOutcome, { outcome: "conflict" }>;
 export type RestoreOutcome = { outcome: "restored" } | Extract<WriteOutcome, { outcome: "conflict" }>;
@@ -79,6 +85,7 @@ export class SnippetStore {
   constructor(
     private readonly files: FilesPort,
     private readonly now: () => Date = () => new Date(),
+    private readonly random: () => string = () => randomBytes(4).toString("hex"),
   ) {}
 
   async read(loc: Location, id: string): Promise<ReadFile | null> {
@@ -178,9 +185,10 @@ export class SnippetStore {
     if (current.sha256 !== expectedSha256) return { outcome: "conflict", current: toView(current), message: "The file changed on disk." };
     const trashDir = posix.join(loc.dir, TRASH_DIR);
     await this.files.mkdir({ hostId: loc.hostId, path: trashDir, recursive: true });
-    // Keep the trash out of Git; an existing .gitignore here is left as it is.
-    await this.files.write({ hostId: loc.hostId, path: posix.join(trashDir, ".gitignore"), rootPath: loc.dir, content: "*\n", expectedSha256: null });
-    const trash = `${id}~${this.now().toISOString().replace(/[-:.]/gu, "")}.md`;
+    if (!(await this.ignoreTrash(loc, trashDir))) {
+      return { outcome: "conflict", current: toView(current), message: `Could not make ${TRASH_DIR}/ ignored by Git (its .gitignore changed while deleting); nothing was deleted.` };
+    }
+    const trash = `${id}~${this.now().toISOString().replace(/[-:.]/gu, "")}-${this.random()}.md`;
     const trashPath = posix.join(trashDir, trash);
     await this.files.move({ hostId: loc.hostId, sourcePath: current.path, destinationPath: trashPath, rootPath: loc.dir });
     const moved = await this.files.read({ hostId: loc.hostId, path: trashPath, rootPath: loc.dir });
@@ -190,6 +198,28 @@ export class SnippetStore {
     }
     const back = await this.read(loc, id);
     return { outcome: "conflict", current: back && toView(back), message: "The file changed on disk; it was not deleted." };
+  }
+
+  /**
+   * Make sure `.trash/.gitignore` holds a bare `*` line so trashed snippets stay
+   * out of Git: create it, or append the rule to an existing file, both with a
+   * compare-and-swap write. False when that write conflicts.
+   */
+  private async ignoreTrash(loc: Location, trashDir: string): Promise<boolean> {
+    const path = posix.join(trashDir, ".gitignore");
+    let text: string | null = null;
+    let sha: string | null = null;
+    try {
+      const r = await this.files.read({ hostId: loc.hostId, path, rootPath: loc.dir });
+      text = r.contentEncoding === "base64" ? Buffer.from(r.content, "base64").toString("utf8") : r.content;
+      sha = r.sha256;
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    if (text !== null && text.split(/\r?\n/u).some((l) => l.trim() === "*")) return true;
+    const content = text === null ? "*\n" : `${text}${text === "" || text.endsWith("\n") ? "" : "\n"}*\n`;
+    const w = await this.files.write({ hostId: loc.hostId, path, rootPath: loc.dir, content, expectedSha256: sha });
+    return w.outcome === "written";
   }
 
   /**
