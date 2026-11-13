@@ -40,6 +40,8 @@ Focus on {{focus|correctness}}.
 - The frontmatter is a flat subset: one `key: value` per line. Keys the plugin does not know are kept when it saves.
 - Every write carries the SHA-256 of the file as it was read. If the file changed on disk in the meantime, the
   editor keeps your text and offers **Overwrite with mine** or **Discard mine**.
+- A delete checks the hash, then removes the file. `bb.sdk.files.remove` has no `expectedSha256`, so an edit
+  made in the moment between those two calls would be lost.
 - A move rewrites only the moved file's `order` key. The plugin renumbers the scope only when there is no gap left.
 - Cloudroom puts a `.cloudroom/.gitignore` containing `*` in a checkout. That rule would keep project snippets
   out of Git. So on the first project save, the plugin appends `!snippets/` and `!snippets/*.md` to that file
@@ -51,7 +53,9 @@ Focus on {{focus|correctness}}.
 - **Secret scan.** It checks for private keys, AWS, GitHub, `sk-`, Slack and Google keys, JWTs, bearer tokens,
   and long random values next to words like `token` or `password`. On save, a hit blocks the save and names
   the kind and the line, never the value. On load, a hit shows a warning badge. The picker then needs a
-  confirmation before it inserts, and `room-cli snip show` refuses to print the snippet.
+  confirmation before it inserts. `room-cli snip show` refuses to print the snippet, and `room-cli snip list`
+  shows only its id. The scan runs with invisible characters removed, so a token split by a zero-width space
+  still counts.
 - **Invisible characters.** Zero-width, bidi and Unicode tag characters are stripped on save and on insert.
   The preview shows them as `⟦U+XXXX⟧`.
 - Bodies are always rendered as plain text, never as HTML or Markdown.

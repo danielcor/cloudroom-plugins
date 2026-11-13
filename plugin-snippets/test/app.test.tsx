@@ -44,6 +44,7 @@ describe("app registrations", () => {
     expect(c!.plusMenu!.map((i) => i.label)).toEqual(["Insert snippet…"]);
     expect(c!.banners!.map((b) => [b.id, b.chrome])).toEqual([["bridge", "bare"]]);
     expect(c!.experimental_popups).toBeUndefined();
+    expect(c!.scopes).toEqual(["thread", "new-thread"]);
   });
 });
 
@@ -80,7 +81,7 @@ describe("composer bridge", () => {
 describe("picker", () => {
   it("fills placeholders and queues the text for the target thread, then goes back to it", async () => {
     bridge.setTarget({ key: "thread-composer-key", scope: { kind: "thread", threadId: "thr_1" } });
-    const slot = renderSlot({ component: SnippetsPage }, { subPath: "pick" }, { rpc: rpc() });
+    const slot = renderSlot({ component: SnippetsPage }, { subPath: "pick" }, { rpc: rpc(), context: { projectId: "proj_1", threadId: "thr_1" } });
     const search = await slot.findByLabelText("Search snippets");
     await waitFor(() => expect(within(slot.getByRole("listbox", { name: "Snippets" })).getAllByRole("option")).toHaveLength(3));
     fireEvent.change(search, { target: { value: "rev" } });
@@ -95,7 +96,7 @@ describe("picker", () => {
   });
 
   it("writes straight into the one composer on screen when no target was picked", async () => {
-    const slot = renderSlot({ component: SnippetsPage }, { subPath: "pick" }, { rpc: rpc(), composer: { text: "" } });
+    const slot = renderSlot({ component: SnippetsPage }, { subPath: "pick" }, { rpc: rpc(), composer: { text: "" }, context: { projectId: "proj_1", threadId: null } });
     const search = await slot.findByLabelText("Search snippets");
     await waitFor(() => expect(within(slot.getByRole("listbox", { name: "Snippets" })).getAllByRole("option")).toHaveLength(3));
     fireEvent.change(search, { target: { value: "bash" } });
@@ -153,6 +154,65 @@ describe("table", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]).toMatchObject({ scope: "global", id: "review-pr", expectedSha256: "sha-review-pr", title: "Review a PR", tags: ["review", "git"] });
+  });
+
+  it("keeps inline typing when the input itself is clicked", async () => {
+    const slot = renderSlot({ component: SnippetsPage }, { subPath: "" }, { rpc: rpc(), context: { projectId: "proj_1", threadId: null } });
+    fireEvent.click(await slot.findByText("Review this PR"));
+    const input = slot.getByLabelText("Title", { selector: "td input" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Review a PR" } });
+    fireEvent.click(input);
+    expect((slot.getByLabelText("Title", { selector: "td input" }) as HTMLInputElement).value).toBe("Review a PR");
+  });
+
+  it("drops the old project's rows at once when the project changes", async () => {
+    const slot = renderSlot(
+      { component: SnippetsPage },
+      { subPath: "" },
+      {
+        rpc: rpc({
+          list: ((input: { projectId: string | null }) => (input.projectId === "proj_2" ? new Promise(() => undefined) : LIST)) as never,
+          projects: () => [
+            { id: "proj_1", name: "cloudroom-plugins" },
+            { id: "proj_2", name: "other" },
+          ],
+        }),
+        context: { projectId: "proj_1", threadId: null },
+      },
+    );
+    await slot.findByLabelText("Delete Worker brief");
+    await waitFor(() => expect(slot.getAllByRole("option", { name: "other" })).toHaveLength(1));
+    fireEvent.change(slot.getByRole("combobox"), { target: { value: "proj_2" } });
+    expect(slot.queryByLabelText("Delete Worker brief")).toBeNull();
+    expect(slot.queryByLabelText("Delete Bash strict header")).toBeNull();
+  });
+
+  it("a save that starts while another is in flight sends the hash the first one wrote", async () => {
+    const sent: string[] = [];
+    let release!: () => void;
+    const slot = renderSlot(
+      { component: SnippetsPage },
+      { subPath: "" },
+      {
+        rpc: rpc({
+          save: (async (input: { expectedSha256: string; body: string }) => {
+            sent.push(input.expectedSha256);
+            if (sent.length === 1) await new Promise<void>((r) => (release = r));
+            return { outcome: "saved", snippet: { ...LIST.snippets[2]!, body: input.body, sha256: `sha-after-${sent.length}` } };
+          }) as never,
+        }),
+        context: { projectId: "proj_1", threadId: null },
+      },
+    );
+    fireEvent.click((await slot.findByText("Bash strict header")).closest("tr")!.querySelector(".snip-preview")!);
+    const body = slot.getByLabelText("Body") as HTMLTextAreaElement;
+    fireEvent.change(body, { target: { value: "one" } });
+    fireEvent.blur(body);
+    await waitFor(() => expect(sent).toHaveLength(1));
+    fireEvent.change(body, { target: { value: "two" } });
+    fireEvent.blur(body);
+    await act(async () => release());
+    await waitFor(() => expect(sent).toEqual(["sha-bash-header", "sha-after-1"]));
   });
 
   it("shows a save blocked by the secret scan and keeps the text", async () => {

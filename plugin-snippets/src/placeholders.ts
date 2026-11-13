@@ -28,8 +28,8 @@ export function parsePlaceholders(body: string): Placeholder[] {
 export function fillPlaceholders(body: string, values: Readonly<Record<string, string>>): string {
   return body.replace(TOKEN, (whole, name: string | undefined, def: string | undefined) => {
     if (name === undefined) return "{{";
-    const v = values[name];
-    if (v !== undefined && v !== "") return v;
+    const v = Object.hasOwn(values, name) ? values[name] : undefined;
+    if (typeof v === "string" && v !== "") return v;
     if (def !== undefined) return def;
     return `{{${name}}}`;
   });

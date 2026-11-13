@@ -30,6 +30,13 @@ describe("secret scan", () => {
     expect(scanSecrets(text)).toEqual([]);
   });
 
+  it("catches a token split by invisible characters, which insert would join", () => {
+    const token = fake("ghp_", 36);
+    const split = `${token.slice(0, 10)}\u200B${token.slice(10)}`;
+    expect(scanSecrets(split)).toEqual([]);
+    expect(findSecrets({ title: "ok", tags: [], body: split })).toEqual(["GitHub token on body line 1"]);
+  });
+
   it("describes where, never the value", () => {
     const token = fake("ghp_", 36);
     const out = findSecrets({ title: "ok", tags: [], body: `a\n${token}` });

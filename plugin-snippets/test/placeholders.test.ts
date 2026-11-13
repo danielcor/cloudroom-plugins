@@ -26,6 +26,10 @@ describe("placeholders", () => {
     expect(fillPlaceholders("{{a|one}} {{a|two}}", { a: "v" })).toBe("v v");
   });
 
+  it("ignores inherited properties of the values object", () => {
+    expect(fillPlaceholders("{{constructor|d}} {{tostring}} {{__proto__}}", {})).toBe("d {{tostring}} {{__proto__}}");
+  });
+
   it("does not re-expand a value that itself looks like a placeholder", () => {
     expect(fillPlaceholders("{{a}} {{b}}", { a: "{{b}}", b: "B" })).toBe("{{b}} B");
   });

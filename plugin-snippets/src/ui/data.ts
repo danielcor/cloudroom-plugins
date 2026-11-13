@@ -54,7 +54,9 @@ export function useSnippets(projectId: string | null): SnippetsData {
     }
   }, [rpc, projectId]);
 
+  // A project switch drops the old rows at once, so nothing stale can be acted on.
   useEffect(() => {
+    setData(null);
     void reload();
   }, [reload]);
 
@@ -69,6 +71,8 @@ export function useSnippets(projectId: string | null): SnippetsData {
     [reload],
   );
 
+  // Writes go to the project whose rows are on screen, never to a newly picked one still loading.
+  const loaded = data?.project?.id ?? null;
   return {
     data,
     error,
@@ -78,14 +82,14 @@ export function useSnippets(projectId: string | null): SnippetsData {
       after(
         rpc.call("create", {
           scope,
-          projectId,
+          projectId: loaded,
           ...fields,
           ...(restore ? { id: restore.id, ...(restore.order !== null ? { order: restore.order } : {}), ...(restore.created ? { created: restore.created } : {}) } : {}),
         }),
       ),
-    save: (s, fields, expectedSha256) => after(rpc.call("save", { scope: s.scope, projectId, id: s.id, expectedSha256: expectedSha256 ?? s.sha256, ...fields })),
-    duplicate: (s) => after(rpc.call("duplicate", { scope: s.scope, projectId, id: s.id })),
-    remove: (s) => after(rpc.call("remove", { scope: s.scope, projectId, id: s.id, expectedSha256: s.sha256 })),
-    move: (s, toIndex) => after(rpc.call("move", { scope: s.scope, projectId, id: s.id, toIndex })),
+    save: (s, fields, expectedSha256) => after(rpc.call("save", { scope: s.scope, projectId: loaded, id: s.id, expectedSha256: expectedSha256 ?? s.sha256, ...fields })),
+    duplicate: (s) => after(rpc.call("duplicate", { scope: s.scope, projectId: loaded, id: s.id })),
+    remove: (s) => after(rpc.call("remove", { scope: s.scope, projectId: loaded, id: s.id, expectedSha256: s.sha256 })),
+    move: (s, toIndex) => after(rpc.call("move", { scope: s.scope, projectId: loaded, id: s.id, toIndex })),
   };
 }

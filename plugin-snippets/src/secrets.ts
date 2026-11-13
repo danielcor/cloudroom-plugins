@@ -47,12 +47,17 @@ export function scanSecrets(text: string): SecretFinding[] {
   return findings;
 }
 
-/** Scan a snippet's parts and describe each hit in plain words (no values). */
+/**
+ * Scan a snippet's parts and describe each hit in plain words (no values).
+ * Scans with invisible characters removed: insert and the CLI strip them, so a
+ * token split by a zero-width space must still count.
+ */
 export function findSecrets(parts: { title: string; tags: readonly string[]; body: string }): string[] {
+  const scan = (t: string) => scanSecrets(stripInvisible(t));
   return [
-    ...scanSecrets(parts.title).map((f) => `${f.kind} in the title`),
-    ...scanSecrets(parts.tags.join(", ")).map((f) => `${f.kind} in the tags`),
-    ...scanSecrets(parts.body).map((f) => `${f.kind} on body line ${f.line}`),
+    ...scan(parts.title).map((f) => `${f.kind} in the title`),
+    ...scan(parts.tags.join(", ")).map((f) => `${f.kind} in the tags`),
+    ...scan(parts.body).map((f) => `${f.kind} on body line ${f.line}`),
   ];
 }
 

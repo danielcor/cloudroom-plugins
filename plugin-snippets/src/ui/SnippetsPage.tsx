@@ -243,6 +243,7 @@ function Table({ snippets, all, projectName, hasProject }: { snippets: SnippetsD
                     if (e.key === "Enter") void commitInline(s);
                     if (e.key === "Escape") setEditing(null);
                   }}
+                  onClick={(e) => e.stopPropagation()}
                   onBlur={() => setEditing(null)}
                 />
               );
@@ -365,7 +366,10 @@ function Editor({
   const fromView = (s: SnippetView) => ({ title: s.title, tags: s.tags.join(", "), body: s.body });
   const [draft, setDraft] = useState(() => fromView(snippet));
   const [saved, setSaved] = useState(() => fromView(snippet));
-  const [baseSha, setBaseSha] = useState(snippet.sha256);
+  // The hash of the file as last read or written here. A ref, so a save that
+  // starts while another is in flight sends the hash that one wrote.
+  const baseSha = useRef(snippet.sha256);
+  const inFlight = useRef<Promise<void> | null>(null);
   const [status, setStatus] = useState<EditorStatus>({ kind: "idle" });
   const titleRef = useRef<HTMLInputElement>(null);
   const dirty = draft.title !== saved.title || draft.tags !== saved.tags || draft.body !== saved.body;
@@ -377,27 +381,36 @@ function Editor({
   // A change made elsewhere (inline edit, reorder, a hand edit on disk) is
   // adopted while nothing here is unsaved; otherwise the next save reports a conflict.
   useEffect(() => {
-    if (snippet.sha256 === baseSha) return;
+    if (snippet.sha256 === baseSha.current || inFlight.current) return;
     if (!dirty) {
       setDraft(fromView(snippet));
       setSaved(fromView(snippet));
-      setBaseSha(snippet.sha256);
+      baseSha.current = snippet.sha256;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snippet.sha256]);
 
-  async function commit(expectedSha256 = baseSha): Promise<void> {
-    if (!dirty && expectedSha256 === baseSha) return;
-    const fields = { title: draft.title, tags: parseTags(draft.tags), body: draft.body };
-    setStatus({ kind: "saving" });
-    const r = await save(snippet, fields, expectedSha256);
-    if (r.outcome === "saved") {
-      const next = { ...draft };
-      setSaved(next);
-      setBaseSha(r.snippet.sha256);
-      setStatus({ kind: "saved" });
-    } else if (r.outcome === "blocked") setStatus({ kind: "blocked", reasons: r.reasons });
-    else setStatus({ kind: "conflict", message: r.message, current: r.current });
+  async function commit(overwriteSha?: string): Promise<void> {
+    // One save at a time: wait for the one in flight so this one sends the hash it wrote.
+    while (inFlight.current) await inFlight.current;
+    if (!dirty && overwriteSha === undefined) return;
+    const sent = { ...draft };
+    const run = (async () => {
+      setStatus({ kind: "saving" });
+      const r = await save(snippet, { title: sent.title, tags: parseTags(sent.tags), body: sent.body }, overwriteSha ?? baseSha.current);
+      if (r.outcome === "saved") {
+        baseSha.current = r.snippet.sha256;
+        setSaved(sent);
+        setStatus({ kind: "saved" });
+      } else if (r.outcome === "blocked") setStatus({ kind: "blocked", reasons: r.reasons });
+      else setStatus({ kind: "conflict", message: r.message, current: r.current });
+    })();
+    inFlight.current = run;
+    try {
+      await run;
+    } finally {
+      inFlight.current = null;
+    }
   }
 
   // Save after a short pause in typing, and on blur.
@@ -449,7 +462,7 @@ function Editor({
         const v = s ? fromView(s) : fromView(snippet);
         setDraft(v);
         setSaved(v);
-        if (s) setBaseSha(s.sha256);
+        if (s) baseSha.current = s.sha256;
         setStatus({ kind: "idle" });
       }} />
       <div className="snip-actions">

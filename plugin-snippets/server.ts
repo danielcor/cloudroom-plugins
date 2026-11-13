@@ -131,9 +131,12 @@ export default async function snippetsPlugin(bb: BbPluginApi): Promise<void> {
           options: { json: { type: "boolean", description: "Print JSON instead of a table." } },
           async run({ options }, ctx) {
             const result = await listAll(ctx.projectId ?? null);
-            const visible = result.snippets.filter((s) => !s.shadowed);
+            // A flagged snippet shows only its id: the secret may sit in its title, tags or a placeholder default.
+            const visible = result.snippets
+              .filter((s) => !s.shadowed)
+              .map((s) => (s.secrets.length ? { ...s, title: "(hidden: looks like a secret)", tags: [], placeholders: [] } : s));
             if (options.json) {
-              const rows = visible.map(({ id, scope, title, tags, placeholders }) => ({ id, scope, title, tags, placeholders }));
+              const rows = visible.map(({ id, scope, title, tags, placeholders, secrets }) => ({ id, scope, title, tags, placeholders, secretWarning: secrets.length > 0 }));
               return { exitCode: 0, stdout: `${JSON.stringify(rows, null, 2)}\n` };
             }
             const warn = [result.global.error && `global: ${result.global.error}`, result.project?.error && `project: ${result.project.error}`].filter(Boolean);

@@ -10,6 +10,8 @@ export default definePluginApp((app) => {
   app.slots.navPanel({ id: "snippets", title: "Snippets", icon: "file-text", path: "snippets", component: SnippetsPage });
   app.composer.customize({
     id: "snippets",
+    // A queued-message editor's key lasts one editing session, so a queued insert could never land there.
+    scopes: ["thread", "new-thread"],
     plusMenu: [
       {
         id: "insert-snippet",

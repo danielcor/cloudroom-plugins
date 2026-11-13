@@ -100,6 +100,16 @@ describe("snippets server", () => {
     expect(r.stdout + r.stderr).not.toContain(token);
   });
 
+  it("room-cli snip list hides a flagged snippet's title, tags and placeholder defaults", async () => {
+    const token = ["AKIA", "ABCDEFGHIJKLMNOP"].join("");
+    const { host } = await load({ "/g/leak.md": `---\ntitle: key ${token}\ntags: ${token.toLowerCase()}\n---\nuse {{key|${token}}}` });
+    const table = await host.harness.runCli(["list"], {});
+    expect(table.stdout).toBe("leak\tglobal\t(hidden: looks like a secret)\n");
+    const json = await host.harness.runCli(["list", "--json"], {});
+    expect(json.stdout).not.toContain(token);
+    expect(JSON.parse(json.stdout)).toEqual([{ id: "leak", scope: "global", title: "(hidden: looks like a secret)", tags: [], placeholders: [], secretWarning: true }]);
+  });
+
   it("expands ~ in the global folder", () => {
     expect(expandHome("~/skills/snippets", "/home/d")).toBe("/home/d/skills/snippets");
     expect(expandHome("~", "/home/d")).toBe("/home/d");
