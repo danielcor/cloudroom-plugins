@@ -67,6 +67,8 @@ describe("secret scan bypasses (round 4)", () => {
     ["S9 a random value with a space", `export TOKEN='${ALNUM.slice(0, 12)} ${ALNUM.slice(12, 25)}'`, 1],
     ["S10 short Basic credentials", "Authorization: Basic YTpi", 1],
     ["S10 non-ASCII Basic credentials", `Authorization: Basic ${Buffer.from("deploy:pássword123").toString("base64")}`, 1],
+    ["S11 a literal after a reference in an unquoted YAML value", `password: \${TOKEN};${ALNUM}`, 1],
+    ["S13 Latin-1 Basic credentials (as Requests sends them)", "Authorization: Basic ZGVwbG95OnDhc3N3b3Jk", 1],
   ])("delta: catches %s", (_why, text, line) => {
     expect(lines(text)).toContain(line);
   });
@@ -83,6 +85,8 @@ describe("secret scan bypasses (round 4)", () => {
     "token: 'Use the API key from your 1Password vault'",
     'password: "Do NOT reuse it across CI and prod"',
     "Authorization: Basic YWJj",
+    'password: "Do NOT COMMIT PASSWORDS"',
+    'token: "Use YOUR OWN API KEY from ENV"',
   ])("delta: keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
   });

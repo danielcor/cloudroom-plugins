@@ -98,6 +98,8 @@ describe("SnippetStore", () => {
       ["literal after a quoted reference", `export TOKEN="\${TOKEN};${ALNUM}"`],
       ["random value with a space", `export TOKEN='${ALNUM.slice(0, 12)} ${ALNUM.slice(12, 25)}'`],
       ["short Basic credentials", "Authorization: Basic YTpi"],
+      ["literal after a reference in YAML", `password: \${TOKEN};${ALNUM}`],
+      ["Latin-1 Basic credentials", "Authorization: Basic ZGVwbG95OnDhc3N3b3Jk"],
     ])("blocks create and save: %s", async (_why, body) => {
       const path = `${G.dir}/x.md`;
       const clean = "---\ntitle: X\n---\nok";
@@ -112,6 +114,8 @@ describe("SnippetStore", () => {
       "Explain Authorization: Basic authentication.",
       'password: "Choose a different password for each account"',
       "export DATABASE_PASSWORD=$DATABASE_PASSWORD_2026; echo done",
+      'password: "Do NOT COMMIT PASSWORDS"',
+      'token: "Use YOUR OWN API KEY from ENV"',
     ])("still saves guidance and references: %s", async (body) => {
       const { store } = setup();
       expect(await store.create(G, { title: "Guide", tags: [], body })).toMatchObject({ outcome: "saved" });

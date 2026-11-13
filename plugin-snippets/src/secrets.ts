@@ -29,7 +29,7 @@ const NAME = "([A-Za-z_][A-Za-z0-9_.-]*)";
 // `--NAME VALUE`, `-NAME "VALUE"`: a flag, whitespace, then the value.
 // Both are zero-width lookaheads, so every name is inspected: an earlier match
 // never consumes a later name (`--verbose --registry-password VALUE`).
-const ASSIGNED = new RegExp(`(?<![A-Za-z0-9_.-])(?=-*${NAME}["']?[ \\t]*[:=][ \\t]*${VALUE})`, "dgu");
+const ASSIGNED = new RegExp(`(?<![A-Za-z0-9_.-])(?=-*${NAME}["']?[ \\t]*([:=])[ \\t]*${VALUE})`, "dgu");
 const FLAG_SPACED = new RegExp(`(?<![A-Za-z0-9_.-])(?=--?${NAME}[ \\t]+${VALUE})`, "dgu");
 // scheme://user:password@host (the user name may be empty: https://:password@host)
 const URL_USERINFO = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]*:([^\s/?#@]+)@/dgiu;
@@ -104,8 +104,8 @@ export function literalOf(v: string, shellWord = false): string | null {
   return d ? d[1]! : t;
 }
 
-/** An ordinary word: letters, at most a leading capital, maybe trailing punctuation (`Choose`, `account.`). */
-const PROSE_WORD = /^[("'`]*[A-Za-z][a-z]+[.,;:!?'"`)]*$/u;
+/** An ordinary word, maybe with punctuation: `Choose`, `account.`, or all caps for emphasis and acronyms (`NOT`, `API`). */
+const PROSE_WORD = /^[("'`]*(?:[A-Za-z][a-z]+|[A-Z]{2,})[.,;:!?'"`)]*$/u;
 
 /**
  * Random-looking. A value with spaces is prose when at least half its words are
@@ -121,16 +121,25 @@ function isSecretValue(v: string | null): boolean {
   return prose * 2 < words.length && looksRandom(words.join(""));
 }
 
-/** Padded base64 that decodes (as UTF-8) to `user:password` with a non-empty password and no control characters. */
+/**
+ * Padded base64 that decodes to `user:password` with a non-empty password and
+ * no control characters, read as UTF-8 or as Latin-1 (what Requests sends).
+ */
 function isBasicCredentials(b64: string): boolean {
   if (b64.length % 4 !== 0) return false;
-  let decoded: string;
+  let latin1: string;
   try {
-    decoded = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+    latin1 = atob(b64);
   } catch {
     return false;
   }
-  return /^[^:\p{Cc}]*:[^\p{Cc}]+$/u.test(decoded);
+  const shape = /^[^:\p{Cc}]*:[^\p{Cc}]+$/u;
+  if (shape.test(latin1)) return true;
+  try {
+    return shape.test(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(latin1, (c) => c.charCodeAt(0))));
+  } catch {
+    return false;
+  }
 }
 
 /** A physical line joined with its shell `\` continuations, and a map back to line numbers. */
@@ -173,12 +182,16 @@ export function scanSecrets(text: string): SecretFinding[] {
   for (const l of logicalLines(physical)) {
     const at = (m: RegExpMatchArray, group: number) => lineAt(l, m.indices?.[group]?.[0] ?? m.index ?? 0);
     for (const { kind, re } of PATTERNS) for (const m of l.text.matchAll(re)) add(kind, at(m, 0));
-    for (const re of [ASSIGNED, FLAG_SPACED]) {
-      for (const m of l.text.matchAll(re)) {
-        const raw = m[2]!;
-        const quoted = raw.startsWith('"') || raw.startsWith("'");
-        if (isSecretName(m[1]!) && isSecretValue(literalOf(unquote(raw), !quoted))) add("secret-looking value", at(m, 2));
-      }
+    // [match, value group, shell word?]. Only an unquoted value after `=` (a shell
+    // assignment or `--flag=`) or after a flag is a shell word; `key: value` is YAML/JSON.
+    const named: [RegExpMatchArray, number, boolean][] = [
+      ...[...l.text.matchAll(ASSIGNED)].map((m): [RegExpMatchArray, number, boolean] => [m, 3, m[2] === "="]),
+      ...[...l.text.matchAll(FLAG_SPACED)].map((m): [RegExpMatchArray, number, boolean] => [m, 2, true]),
+    ];
+    for (const [m, group, shell] of named) {
+      const raw = m[group]!;
+      const quoted = raw.startsWith('"') || raw.startsWith("'");
+      if (isSecretName(m[1]!) && isSecretValue(literalOf(unquote(raw), shell && !quoted))) add("secret-looking value", at(m, group));
     }
     for (const m of l.text.matchAll(URL_USERINFO)) if (literalOf(m[1]!)) add("password in a URL", at(m, 1));
     for (const m of l.text.matchAll(BASIC_AUTH)) if (isBasicCredentials(m[1]!)) add("Basic auth credentials", at(m, 1));
