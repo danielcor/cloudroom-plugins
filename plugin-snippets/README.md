@@ -59,15 +59,25 @@ Focus on {{focus|correctness}}.
 ## Safety
 
 - The plugin never submits. Insert only appends visible, editable text.
-- **Secret scan.** It checks for private keys, AWS, GitHub, `sk-`, Slack and Google keys, JWTs, bearer tokens,
-  and long random values assigned to a name whose last word is secret-ish (`API_TOKEN=…`, `DATABASE_PASSWORD: …`,
-  `apiKey: …`, `APIToken=…`, `clientsecret: …`, `token=…`, and CLI flags like `--api-key=…` or `--token …`, quoted or not). Names are split on `_`, `.`, `-`, camelCase and
-  acronyms. The last word counts when it ends in token, secret, password, passwd, passphrase or
-  credential(s), or when it is `key`, `pwd`, `auth`, `pat`, or a compound like `apikey` or `accesskey`. On save, a hit blocks the save and names
-  the kind and the line, never the value. On load, a hit shows a warning badge. The picker then needs a
-  confirmation before it inserts. `room-cli snip show` refuses to print the snippet, and `room-cli snip list`
-  shows only its id. The scan runs with invisible characters removed, so a token split by a zero-width space
-  still counts.
+- **Secret scan.** It checks for:
+  - private keys, AWS, GitHub, `sk-`, Slack and Google keys, JWTs and bearer tokens (in any case);
+  - passwords in URLs (`postgres://user:pass@host`), `Authorization: Basic …`, and `curl -u`/`--user user:pass`;
+  - long random values assigned to a secret-ish name. That covers `API_TOKEN=…`, `DATABASE_PASSWORD: …`,
+    `"apiKey": "…"`, `APIToken=…`, `clientsecret: …`, and CLI flags such as `--api-key=…` or `--token …`.
+
+  Names are split on `_`, `.`, `-`, camelCase and acronyms. The last word counts when it ends in token, secret,
+  password, passwd, passphrase or credential(s), or when it is `key`, `pwd`, `auth`, `pat`, or a compound like
+  `apikey` or `accesskey`. The whole value is checked, quoted or not, punctuation included. So are values
+  continued onto the next line with a shell `\`, and YAML `key: |` or `>` blocks. Findings give the line the
+  value is on.
+
+  References are not values: `$VAR`, `${VAR}` and `{{placeholder}}` stay clean, and so does `user@host` with no
+  password. The body is also scanned with placeholder defaults filled in, so `--token {{token|…}}` counts.
+
+  On save, a hit blocks the save and names the kind and the line, never the value. On load, a hit shows a
+  warning badge, and the picker then needs a confirmation before it inserts. `room-cli snip show` refuses to
+  print the snippet, and `room-cli snip list` shows only its id. The scan runs with invisible characters
+  removed, so a token split by a zero-width space still counts.
 - **Invisible characters.** Zero-width, bidi (including U+061C ARABIC LETTER MARK) and Unicode tag characters
   are stripped on save and on insert.
   The preview shows them as `⟦U+XXXX⟧`.

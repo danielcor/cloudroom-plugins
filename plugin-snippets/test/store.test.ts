@@ -79,6 +79,35 @@ describe("SnippetStore", () => {
     expect(await store.create(G, { title: "Count", tags: [], body: "run --token-count 5 --password-file /etc/pw" })).toMatchObject({ outcome: "saved" });
   });
 
+  describe("save gate for the round-4 bypasses", () => {
+    const PUNCT = ["K7m!Q2s@", "T4v#W6x$", "Y8z%aB3d"].join("");
+    const ALNUM = ["aB3dE5gH7jK9mN1p", "Q2sT4vW6xY8zaB3d"].join("");
+    it.each([
+      ["punctuated export", `export DATABASE_PASSWORD='${PUNCT}'`],
+      ["YAML block", `api_token: |\n  ${PUNCT}\n`],
+      ["shell continuation", `deploy --token \\\n  ${PUNCT}`],
+      ["placeholder default", `run --token {{token|${PUNCT}}}`],
+      ["lowercase bearer", `authorization: bearer ${ALNUM}`],
+      ["URL userinfo", "psql postgres://app:pass@db/app"],
+      ["Basic auth", `Authorization: Basic ${Buffer.from("app:" + PUNCT).toString("base64")}`],
+      ["curl -u", "curl -u admin:hunter2 https://x"],
+    ])("blocks create and save: %s", async (_why, body) => {
+      const path = `${G.dir}/x.md`;
+      const clean = "---\ntitle: X\n---\nok";
+      const { store, files } = setup({ [path]: clean });
+      expect((await store.create(G, { title: "Y", tags: [], body })).outcome).toBe("blocked");
+      expect((await store.save(G, "x", { title: "X", tags: [], body }, sha(clean))).outcome).toBe("blocked");
+      expect(files.writes).toEqual([]);
+      expect(files.files.get(path)).toBe(clean);
+    });
+
+    it("flags a placeholder-default secret on load", async () => {
+      const { store } = setup({ [`${G.dir}/x.md`]: `---\ntitle: X\n---\nrun --token {{token|${PUNCT}}}` });
+      const [view] = await store.list(G);
+      expect(view!.secrets).toEqual(["secret-looking value on body line 1"]);
+    });
+  });
+
   it("blocks invalid fields", async () => {
     const r = await setup().store.create(G, { title: " ", tags: ["UPPER!"], body: "x".repeat(17 * 1024) });
     expect(r.outcome === "blocked" && r.reasons.length).toBe(3);

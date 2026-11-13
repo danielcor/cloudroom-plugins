@@ -1,3 +1,5 @@
+import { fillPlaceholders } from "./placeholders.js";
+
 // Secret-shape scan and invisible-character handling. A hit blocks a save;
 // findings name the kind and line only, never the matched value.
 
@@ -6,28 +8,38 @@ export interface SecretFinding {
   line: number;
 }
 
+// Known token shapes, matched anywhere (case-insensitive where the scheme is).
 const PATTERNS: readonly { kind: string; re: RegExp }[] = [
-  { kind: "private key block", re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/u },
-  { kind: "AWS access key id", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/u },
-  { kind: "GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/u },
-  { kind: "API key (sk-…)", re: /\bsk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}/u },
-  { kind: "Slack token", re: /\bxox[abposr]-[A-Za-z0-9-]{10,}/u },
-  { kind: "Google API key", re: /\bAIza[0-9A-Za-z_-]{35}\b/u },
-  { kind: "JSON Web Token", re: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/u },
-  { kind: "bearer token", re: /\bBearer\s+[A-Za-z0-9._~+/-]{24,}=*/u },
+  { kind: "private key block", re: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/dgu },
+  { kind: "AWS access key id", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/dgu },
+  { kind: "GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})/dgu },
+  { kind: "API key (sk-…)", re: /\bsk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}/dgu },
+  { kind: "Slack token", re: /\bxox[abposr]-[A-Za-z0-9-]{10,}/dgu },
+  { kind: "Google API key", re: /\bAIza[0-9A-Za-z_-]{35}\b/dgu },
+  { kind: "JSON Web Token", re: /\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/dgu },
+  { kind: "bearer token", re: /\bbearer\s+[A-Za-z0-9._~+/-]{24,}=*/dgiu },
 ];
 
-// `NAME = 7f9c…`: a long random-looking value assigned to a name whose last word is
-// secret-ish. The whole name is taken (`API_TOKEN`, `DATABASE_PASSWORD`, `apiKey`,
-// `stripe.secretKey`), so a `\b` before the secret word cannot hide it behind `_`.
-// Leading CLI hyphens are skipped: `--token=…`, `--api-key=…`, `-token=…`.
-const ASSIGNED = /(?<![A-Za-z0-9_.-])-*([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?([A-Za-z0-9/+_.=-]{16,})/gu;
-// `--token VALUE`, `-token "VALUE"`: a flag (one or two hyphens), whitespace, then
-// the value, quoted or not. Same name rule and entropy test as ASSIGNED, so
-// `--token-count 5` and `--password-file PATH` stay clean. The match is a zero-width
-// lookahead so every flag is inspected: in `--verbose --registry-password VALUE` the
-// second flag must not be consumed as the first one's value.
-const FLAG_SPACED = /(?<![A-Za-z0-9_.-])(?=--?([A-Za-z_][A-Za-z0-9_.-]*)\s+["']?([A-Za-z0-9/+_.=-]{16,}))/gu;
+// A whole value: a "double-quoted" or 'single-quoted' string (quotes kept, for
+// unquote()), or an unquoted run up to whitespace. Punctuation stays inside.
+const VALUE = `("(?:[^"\\\\\\n]|\\\\.)*"|'[^'\\n]*'|[^\\s"']+)`;
+const NAME = "([A-Za-z_][A-Za-z0-9_.-]*)";
+// `NAME = VALUE`, `NAME: VALUE`, `"NAME": "VALUE"`, `--NAME=VALUE`. The whole name is taken
+// (`API_TOKEN`, `DATABASE_PASSWORD`, `apiKey`), so a `\b` cannot hide it behind `_`.
+// `--NAME VALUE`, `-NAME "VALUE"`: a flag, whitespace, then the value.
+// Both are zero-width lookaheads, so every name is inspected: an earlier match
+// never consumes a later name (`--verbose --registry-password VALUE`).
+const ASSIGNED = new RegExp(`(?<![A-Za-z0-9_.-])(?=-*${NAME}["']?[ \\t]*[:=][ \\t]*${VALUE})`, "dgu");
+const FLAG_SPACED = new RegExp(`(?<![A-Za-z0-9_.-])(?=--?${NAME}[ \\t]+${VALUE})`, "dgu");
+// scheme://user:password@host
+const URL_USERINFO = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]+:([^\s/?#@]+)@/dgiu;
+// Authorization: Basic <base64 user:password>
+const BASIC_AUTH = /\bauthorization\s*:\s*basic\s+([A-Za-z0-9+/]{4,}={0,2})(?![A-Za-z0-9+/=])/dgiu;
+// curl -u user:password, --user user:password, --user=user:password
+const CURL_USER = new RegExp(`(?<![A-Za-z0-9_-])(?:-u|--user)(?:[ \\t]+|=)${VALUE}`, "dgu");
+// A YAML block scalar under a key: `api_token: |`, `>-`, `|2`.
+const YAML_BLOCK = /^([ \t]*)(?:-[ \t]+)?["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*:[ \t]*[|>][+-]?\d?[+-]?[ \t]*(?:#.*)?$/u;
+
 // A last word that ends in one of these is secret-ish (`dbpassword`, `clientsecret`, `authtoken`).
 const SECRET_ENDINGS = ["token", "secret", "password", "passwd", "passphrase", "credential", "credentials"];
 // These only as the whole last word: `monkey` must not count as a key.
@@ -61,33 +73,112 @@ function entropy(s: string): number {
 
 function looksRandom(v: string): boolean {
   const classes = [/[a-z]/u, /[A-Z]/u, /[0-9]/u].filter((r) => r.test(v)).length;
-  return classes >= 2 && entropy(v) >= 3.5;
+  return v.length >= 16 && classes >= 2 && entropy(v) >= 3.5;
+}
+
+function unquote(v: string): string {
+  if (v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) return v.slice(1, -1);
+  return v;
+}
+
+/** `$VAR`, `${VAR}`, `${{ expr }}` or `{{placeholder}}`: a reference, not a value. */
+export function isReference(v: string): boolean {
+  return /^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$\{[^}]*\}|\$?\{\{[^}]*\}\})$/u.test(v.trim());
+}
+
+/** A physical line joined with its shell `\` continuations, and a map back to line numbers. */
+interface LogicalLine {
+  text: string;
+  /** Start offset of each physical line in `text`, with its 1-based number. */
+  starts: { offset: number; line: number }[];
+}
+
+function logicalLines(physical: readonly string[]): LogicalLine[] {
+  const out: LogicalLine[] = [];
+  let current: LogicalLine | null = null;
+  physical.forEach((raw, i) => {
+    const continued = /(?:^|[^\\])(?:\\\\)*\\$/u.test(raw);
+    const piece = continued ? `${raw.slice(0, -1)} ` : raw;
+    if (current === null) current = { text: "", starts: [] };
+    current.starts.push({ offset: current.text.length, line: i + 1 });
+    current.text += piece;
+    if (!continued) {
+      out.push(current);
+      current = null;
+    }
+  });
+  if (current !== null) out.push(current);
+  return out;
+}
+
+function lineAt(l: LogicalLine, offset: number): number {
+  let line = l.starts[0]!.line;
+  for (const s of l.starts) if (s.offset <= offset) line = s.line;
+  return line;
 }
 
 export function scanSecrets(text: string): SecretFinding[] {
-  const findings: SecretFinding[] = [];
-  text.split("\n").forEach((line, i) => {
-    for (const { kind, re } of PATTERNS) if (re.test(line)) findings.push({ kind, line: i + 1 });
+  const found = new Map<string, SecretFinding>();
+  const add = (kind: string, line: number) => found.set(`${line}\u0000${kind}`, { kind, line });
+  const physical = text.split("\n");
+
+  for (const l of logicalLines(physical)) {
+    const at = (m: RegExpMatchArray, group: number) => lineAt(l, m.indices?.[group]?.[0] ?? m.index ?? 0);
+    for (const { kind, re } of PATTERNS) for (const m of l.text.matchAll(re)) add(kind, at(m, 0));
     for (const re of [ASSIGNED, FLAG_SPACED]) {
-      for (const m of line.matchAll(re)) {
-        if (isSecretName(m[1]!) && looksRandom(m[2]!)) findings.push({ kind: "secret-looking value", line: i + 1 });
+      for (const m of l.text.matchAll(re)) {
+        const value = unquote(m[2]!);
+        if (isSecretName(m[1]!) && !isReference(value) && looksRandom(value)) add("secret-looking value", at(m, 2));
       }
     }
+    for (const m of l.text.matchAll(URL_USERINFO)) if (!isReference(m[1]!)) add("password in a URL", at(m, 1));
+    for (const m of l.text.matchAll(BASIC_AUTH)) add("Basic auth credentials", at(m, 1));
+    for (const m of l.text.matchAll(CURL_USER)) {
+      const value = unquote(m[1]!);
+      const colon = value.indexOf(":");
+      const password = colon === -1 ? "" : value.slice(colon + 1);
+      if (password !== "" && !isReference(password)) add("password in -u/--user", at(m, 1));
+    }
+  }
+
+  // YAML block scalars under a secret-named key: the value sits on the indented lines below.
+  physical.forEach((raw, i) => {
+    const m = YAML_BLOCK.exec(raw);
+    if (!m || !isSecretName(m[2]!)) return;
+    const indent = m[1]!.length;
+    const block: { text: string; line: number }[] = [];
+    for (let j = i + 1; j < physical.length; j++) {
+      const next = physical[j]!;
+      if (next.trim() === "") continue;
+      if (next.length - next.trimStart().length <= indent) break;
+      block.push({ text: next.trim(), line: j + 1 });
+    }
+    if (block.length === 0) return;
+    const hit = block.find((b) => !isReference(b.text) && looksRandom(b.text));
+    // A value folded over several lines: join them when each line is one word.
+    const joined = block.every((b) => !/\s/u.test(b.text)) ? block.map((b) => b.text).join("") : "";
+    if (hit) add("secret-looking value", hit.line);
+    else if (joined && !isReference(joined) && looksRandom(joined)) add("secret-looking value", block[0]!.line);
   });
-  return findings;
+
+  return [...found.values()].sort((a, b) => a.line - b.line);
 }
 
 /**
  * Scan a snippet's parts and describe each hit in plain words (no values).
  * Scans with invisible characters removed: insert and the CLI strip them, so a
- * token split by a zero-width space must still count.
+ * token split by a zero-width space must still count. The body is also scanned
+ * with every placeholder default filled in, as Insert would leave it when the
+ * fields are empty (`--token {{token|VALUE}}`). Used on create, save and load.
  */
 export function findSecrets(parts: { title: string; tags: readonly string[]; body: string }): string[] {
   const scan = (t: string) => scanSecrets(stripInvisible(t));
+  const body = stripInvisible(parts.body);
+  const bodyHits = [...scanSecrets(body), ...scanSecrets(fillPlaceholders(body, {}))].map((f) => `${f.kind} on body line ${f.line}`);
   return [
     ...scan(parts.title).map((f) => `${f.kind} in the title`),
     ...scan(parts.tags.join(", ")).map((f) => `${f.kind} in the tags`),
-    ...scan(parts.body).map((f) => `${f.kind} on body line ${f.line}`),
+    ...new Set(bodyHits),
   ];
 }
 
