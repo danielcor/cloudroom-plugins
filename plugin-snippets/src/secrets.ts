@@ -24,8 +24,10 @@ const PATTERNS: readonly { kind: string; re: RegExp }[] = [
 const ASSIGNED = /(?<![A-Za-z0-9_.-])-*([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?([A-Za-z0-9/+_.=-]{16,})/gu;
 // `--token VALUE`, `-token "VALUE"`: a flag (one or two hyphens), whitespace, then
 // the value, quoted or not. Same name rule and entropy test as ASSIGNED, so
-// `--token-count 5` and `--password-file PATH` stay clean.
-const FLAG_SPACED = /(?<![A-Za-z0-9_.-])--?([A-Za-z_][A-Za-z0-9_.-]*)\s+["']?([A-Za-z0-9/+_.=-]{16,})/gu;
+// `--token-count 5` and `--password-file PATH` stay clean. The match is a zero-width
+// lookahead so every flag is inspected: in `--verbose --registry-password VALUE` the
+// second flag must not be consumed as the first one's value.
+const FLAG_SPACED = /(?<![A-Za-z0-9_.-])(?=--?([A-Za-z_][A-Za-z0-9_.-]*)\s+["']?([A-Za-z0-9/+_.=-]{16,}))/gu;
 // A last word that ends in one of these is secret-ish (`dbpassword`, `clientsecret`, `authtoken`).
 const SECRET_ENDINGS = ["token", "secret", "password", "passwd", "passphrase", "credential", "credentials"];
 // These only as the whole last word: `monkey` must not count as a key.

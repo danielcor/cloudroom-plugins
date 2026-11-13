@@ -71,7 +71,7 @@ describe("SnippetStore", () => {
   it("blocks a save with a secret after a flag and a space, quoted or not", async () => {
     const { store, files } = setup();
     const value = ["aB3dE5gH7jK9mN1p", "Q2sT4vW6xY8zaB3d"].join("");
-    for (const arg of [`--token ${value}`, `--api-key "${value}"`, `--password '${value}'`, `-token ${value}`]) {
+    for (const arg of [`--token ${value}`, `--api-key "${value}"`, `--password '${value}'`, `-token ${value}`, `--verbose --registry-password ${value}`, `--dry-run --token "${value}"`]) {
       const r = await store.create(G, { title: "Deploy", tags: [], body: `run ${arg}` });
       expect(r.outcome, arg).toBe("blocked");
     }

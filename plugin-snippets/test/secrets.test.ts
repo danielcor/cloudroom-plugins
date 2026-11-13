@@ -38,6 +38,10 @@ describe("secret scan", () => {
     ["secret-looking value", `--api-key '${fake("", 32)}'`],
     ["secret-looking value", `--password\t"${fake("", 32)}"`],
     ["secret-looking value", `run -token ${fake("", 32)}`],
+    // A boolean flag right before must not swallow the secret flag as its value.
+    ["secret-looking value", `deploy --verbose --registry-password ${fake("", 32)}`],
+    ["secret-looking value", `deploy --verbose --registry-password "${fake("", 32)}"`],
+    ["secret-looking value", `deploy -v --api-key '${fake("", 32)}'`],
   ])("flags %s: %s", (kind, text) => {
     expect(scanSecrets(`line one\n${text}`)).toContainEqual({ kind, line: 2 });
   });
