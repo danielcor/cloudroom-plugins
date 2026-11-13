@@ -32,6 +32,7 @@ export interface FilesPort {
     path: string;
     rootPath?: string;
     content: string;
+    contentEncoding?: "base64" | "utf8";
     createParents?: boolean;
     expectedSha256?: string | null;
   }): Promise<{ outcome: "written"; sha256: string } | { outcome: "conflict"; currentSha256: string | null }>;
@@ -184,28 +185,37 @@ export class SnippetStore {
     await this.files.move({ hostId: loc.hostId, sourcePath: current.path, destinationPath: trashPath, rootPath: loc.dir });
     const moved = await this.files.read({ hostId: loc.hostId, path: trashPath, rootPath: loc.dir });
     if (moved.sha256 === expectedSha256) return { outcome: "removed", trash };
-    try {
-      await this.files.move({ hostId: loc.hostId, sourcePath: trashPath, destinationPath: current.path, rootPath: loc.dir });
-    } catch {
+    if (!(await this.putBack(loc, trash, current.path))) {
       return { outcome: "conflict", current: null, message: `The file changed on disk while it was being deleted. That version is kept in ${posix.join(TRASH_DIR, trash)}.` };
     }
     const back = await this.read(loc, id);
     return { outcome: "conflict", current: back && toView(back), message: "The file changed on disk; it was not deleted." };
   }
 
-  /** Undo a delete: rename the trashed file back, byte for byte. No re-render and no scan: it was already on disk. */
+  /**
+   * Copy a trash entry's exact bytes back to `path` with a must-not-exist
+   * write (`expectedSha256: null`), not a rename: the host's move checks the
+   * destination and then renames, which would replace a file created in
+   * between. The trash entry is kept. Returns false when `path` exists.
+   */
+  private async putBack(loc: Location, trash: string, path: string): Promise<boolean> {
+    const raw = await this.files.read({ hostId: loc.hostId, path: posix.join(loc.dir, TRASH_DIR, trash), rootPath: loc.dir });
+    const w = await this.files.write({ hostId: loc.hostId, path, rootPath: loc.dir, content: raw.content, contentEncoding: raw.contentEncoding, expectedSha256: null });
+    return w.outcome === "written";
+  }
+
+  /** Undo a delete: put the trashed bytes back exactly. No re-render and no scan: they were already on disk. */
   async restore(loc: Location, id: string, trash: string): Promise<RestoreOutcome> {
     const m = TRASH_NAME.exec(trash);
     if (!m || m[1] !== id) throw new Error(`Invalid trash entry "${trash}".`);
     const path = pathOf(loc, id);
-    if ((await this.read(loc, id)) !== null) return { outcome: "conflict", current: null, message: `A snippet named ${id} exists again; the deleted one stays in ${posix.join(TRASH_DIR, trash)}.` };
+    const exists = { outcome: "conflict", current: null, message: `A snippet named ${id} exists again; the deleted one stays in ${posix.join(TRASH_DIR, trash)}.` } as const;
     try {
-      await this.files.move({ hostId: loc.hostId, sourcePath: posix.join(loc.dir, TRASH_DIR, trash), destinationPath: path, rootPath: loc.dir });
+      return (await this.putBack(loc, trash, path)) ? { outcome: "restored" } : exists;
     } catch (error) {
       if (isMissing(error)) return { outcome: "conflict", current: null, message: "The deleted file is no longer in the trash." };
       throw error;
     }
-    return { outcome: "restored" };
   }
 
   /** Move `id` to `toIndex` within its scope. Rewrites only the `order` key. */

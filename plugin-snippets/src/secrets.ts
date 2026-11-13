@@ -21,16 +21,24 @@ const PATTERNS: readonly { kind: string; re: RegExp }[] = [
 // secret-ish. The whole name is taken (`API_TOKEN`, `DATABASE_PASSWORD`, `apiKey`,
 // `stripe.secretKey`), so a `\b` before the secret word cannot hide it behind `_`.
 const ASSIGNED = /(?<![A-Za-z0-9_.-])([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?([A-Za-z0-9/+_.=-]{16,})/gu;
-const SECRET_WORDS = new Set(["token", "secret", "password", "passwd", "pwd", "passphrase", "key", "apikey", "credential", "credentials", "auth", "pat"]);
+// A last word that ends in one of these is secret-ish (`dbpassword`, `clientsecret`, `authtoken`).
+const SECRET_ENDINGS = ["token", "secret", "password", "passwd", "passphrase", "credential", "credentials"];
+// These only as the whole last word: `monkey` must not count as a key.
+const SECRET_WORDS = new Set(["key", "pwd", "auth", "pat", "apikey", "accesskey", "secretkey", "privatekey", "clientkey", "signingkey"]);
 
-/** The name's last word, splitting on `_`, `.`, `-` and camelCase, is a secret word. */
+/**
+ * The name's last word is secret-ish. Words split on `_`, `.`, `-`, camelCase
+ * and acronyms (`APIToken` → API Token, `DBPassword` → DB Password).
+ */
 export function isSecretName(name: string): boolean {
   const words = name
+    .replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
     .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
     .split(/[\s_.-]+/u)
     .filter(Boolean);
   const last = words.at(-1)?.toLowerCase();
-  return last !== undefined && SECRET_WORDS.has(last);
+  if (last === undefined) return false;
+  return SECRET_WORDS.has(last) || SECRET_ENDINGS.some((e) => last.endsWith(e));
 }
 
 function entropy(s: string): number {

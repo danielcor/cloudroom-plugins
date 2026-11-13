@@ -102,7 +102,9 @@ describe("SnippetStore", () => {
     expect((await store.list(G)).map((s) => s.id)).toEqual(["y"]);
     expect(await store.restore(G, "x", "x~20261113T100000000Z.md")).toEqual({ outcome: "restored" });
     expect(files.files.get(path)).toBe(content);
-    expect(files.files.has(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(false);
+    // The trash copy stays: Undo writes, it never renames or removes.
+    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(content);
+    expect((await store.list(G)).map((s) => s.id)).toEqual(["x", "y"]);
   });
 
   it("Undo restores a snippet the secret scan flags, without scanning it", async () => {
@@ -123,6 +125,19 @@ describe("SnippetStore", () => {
     files.files.set(path, "---\ntitle: X\n---\nnew");
     expect(await store.restore(G, "x", r.outcome === "removed" ? r.trash! : "")).toMatchObject({ outcome: "conflict" });
     expect(files.files.get(path)).toBe("---\ntitle: X\n---\nnew");
+    expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(content);
+  });
+
+  it("Undo never replaces a snippet created after its existence check", async () => {
+    const path = `${G.dir}/x.md`;
+    const content = "---\ntitle: X\n---\nold";
+    const { store, files } = setup({ [path]: content });
+    const r = await store.remove(G, "x", sha(content));
+    // Created after restore's check, right before it puts the bytes back.
+    files.hookWrites = true;
+    files.beforeNextChange = () => files.files.set(path, "created meanwhile");
+    expect(await store.restore(G, "x", r.outcome === "removed" ? r.trash! : "")).toMatchObject({ outcome: "conflict" });
+    expect(files.files.get(path)).toBe("created meanwhile");
     expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe(content);
   });
 
@@ -147,15 +162,15 @@ describe("SnippetStore", () => {
     const content = "---\ntitle: X\n---\nbody";
     const { store, files } = setup({ [path]: content });
     files.beforeNextChange = () => files.files.set(path, "---\ntitle: X\n---\nedited meanwhile");
-    const realMove = files.move.bind(files);
-    let moves = 0;
-    files.move = async (a) => {
-      // The rename back fails: someone created x.md again right after the delete.
-      if (++moves === 2) files.files.set(path, "recreated");
-      return realMove(a);
+    const realWrite = files.write.bind(files);
+    files.write = async (a) => {
+      // Putting it back fails: someone created x.md again right before that write.
+      if (a.path === path) files.files.set(path, "recreated");
+      return realWrite(a);
     };
     const r = await store.remove(G, "x", sha(content));
     expect(r).toMatchObject({ outcome: "conflict", message: expect.stringContaining(".trash/x~20261113T100000000Z.md") });
+    expect(files.files.get(path)).toBe("recreated");
     expect(files.files.get(`${G.dir}/.trash/x~20261113T100000000Z.md`)).toBe("---\ntitle: X\n---\nedited meanwhile");
   });
 

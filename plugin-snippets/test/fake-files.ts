@@ -18,6 +18,8 @@ export class FakeFiles implements FilesPort {
   readonly mkdirs: string[] = [];
   /** Runs once, just before the next remove or move: an edit that lands between a check and the act. */
   beforeNextChange: (() => void) | null = null;
+  /** Also run `beforeNextChange` before a write (off by default: most tests hook the delete). */
+  hookWrites = false;
 
   private changing(): void {
     const hook = this.beforeNextChange;
@@ -52,6 +54,7 @@ export class FakeFiles implements FilesPort {
 
   async write({ path, rootPath, content, expectedSha256, createParents }: Parameters<FilesPort["write"]>[0]) {
     this.root(path, rootPath);
+    if (this.hookWrites) this.changing();
     if (!this.dirs.has(posix.dirname(path))) {
       if (!createParents) throw notFound(posix.dirname(path));
       this.addDirs(posix.dirname(path));
@@ -81,15 +84,16 @@ export class FakeFiles implements FilesPort {
     return { ok: true as const };
   }
 
-  // host.move_path: rename(2) within an existing root; refuses an existing destination.
+  // host.move_path, step for step: lstat refuses an existing destination, then
+  // rename(2), which replaces a destination created in between (the hook runs there).
   async move({ sourcePath, destinationPath, rootPath }: { sourcePath: string; destinationPath: string; rootPath?: string }) {
     this.root(sourcePath, rootPath);
     this.root(destinationPath, rootPath);
-    this.changing();
-    const content = this.files.get(sourcePath);
-    if (content === undefined) throw notFound(sourcePath);
+    if (!this.files.has(sourcePath)) throw notFound(sourcePath);
     if (this.files.has(destinationPath)) throw new Error(`Destination already exists: ${destinationPath}`);
     if (!this.dirs.has(posix.dirname(destinationPath))) throw notFound(destinationPath);
+    this.changing();
+    const content = this.files.get(sourcePath)!;
     this.files.delete(sourcePath);
     this.files.set(destinationPath, content);
     return { ok: true as const };

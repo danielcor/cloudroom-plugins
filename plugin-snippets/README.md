@@ -44,9 +44,11 @@ Focus on {{focus|correctness}}.
   editor keeps your text and offers **Overwrite with mine** or **Discard mine**.
 - A delete never removes bytes. It checks the hash, then renames the file into `.trash/<id>~<time>.md` in the
   same folder. The rename is atomic on the host. It then compares the moved bytes with the hash it checked.
-  If an edit landed in between, it renames the file back and reports a conflict. If that rename fails, it names
-  the trash file that holds the edit. **Undo** renames the file back byte for byte: unknown keys and comments
-  survive, and the secret scan does not run on content that was already on disk. The table and
+  If an edit landed in between, it writes those bytes back and reports a conflict. If a new file already holds
+  that name, it names the trash file that has the edit. **Undo** writes the trashed bytes back exactly: unknown
+  keys and comments survive, and the secret scan does not run on content that was already on disk. Both write
+  with `expectedSha256: null`, so they never replace a file that appeared in the meantime. The host's
+  move checks the destination and then renames, which could replace one. The trash copy stays. The table and
   `room-cli snip` never list `.trash/`. The plugin writes a `.trash/.gitignore` containing `*` so deleted
   snippets stay out of Git. Nothing empties the trash yet: delete old files there by hand.
 - A move rewrites only the moved file's `order` key. The plugin renumbers the scope only when there is no gap left.
@@ -56,7 +58,9 @@ Focus on {{focus|correctness}}.
 - The plugin never submits. Insert only appends visible, editable text.
 - **Secret scan.** It checks for private keys, AWS, GitHub, `sk-`, Slack and Google keys, JWTs, bearer tokens,
   and long random values assigned to a name whose last word is secret-ish (`API_TOKEN=…`, `DATABASE_PASSWORD: …`,
-  `apiKey: …`, `token=…`). Names are split on `_`, `.`, `-` and camelCase. On save, a hit blocks the save and names
+  `apiKey: …`, `APIToken=…`, `clientsecret: …`, `token=…`). Names are split on `_`, `.`, `-`, camelCase and
+  acronyms. The last word counts when it ends in token, secret, password, passwd, passphrase or
+  credential(s), or when it is `key`, `pwd`, `auth`, `pat`, or a compound like `apikey` or `accesskey`. On save, a hit blocks the save and names
   the kind and the line, never the value. On load, a hit shows a warning badge. The picker then needs a
   confirmation before it inserts. `room-cli snip show` refuses to print the snippet, and `room-cli snip list`
   shows only its id. The scan runs with invisible characters removed, so a token split by a zero-width space
