@@ -240,10 +240,10 @@ Snippets are prompts. Whoever controls a snippet's text controls what an agent i
 ## Decisions (Daniel, 2026-11-12)
 
 1. **File format:** one Markdown file per snippet.
-2. **Global folder:** a Git-backed folder in `~/skills`, so global snippets can reach cloud sandboxes. This replaces the `~/.config/cloudroom/snippets/` default used elsewhere in this spec and in the mockup.
+2. **Global folder:** `~/skills/.snippets/`, a Git-backed folder, so global snippets can reach cloud sandboxes. It is a dot-folder because `distribute-skills` only picks up `~/skills/*/` folders that hold a `SKILL.md`, so it skips this one (revised 2026-11-13). This replaces the `~/.config/cloudroom/snippets/` default used elsewhere in this spec and in the mockup.
 3. **Experimental APIs:** use the popup, composer command and `insert` calls only if they pass the live spike; if a call fails live, fall back to the documented composer API for that feature. The spike failed all three on v152 (see "Spike results"), so the MVP uses the fallback for every one.
 4. **Secret scan:** block the save.
-5. **Project folder:** `.cloudroom/snippets/`, committed in each repo.
+5. **Project folder:** `.snippets/` at the repo root, committed in each repo (revised 2026-11-13). This replaces the `.cloudroom/snippets/` folder used elsewhere in this spec: Cloudroom puts a `.gitignore` containing `*` in `.cloudroom/`, which would keep snippets out of Git. The plugin never edits `.cloudroom/.gitignore`.
 6. **Default shortcut:** `Ctrl+Alt+S`.
 7. **Typed `~name` trigger:** not built. Every insert stays visible in the composer.
 

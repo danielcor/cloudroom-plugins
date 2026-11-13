@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { SnippetStore, type Location } from "../src/store.js";
 import { FakeFiles, sha } from "./fake-files.js";
 
-const G: Location = { scope: "global", dir: "/home/d/skills/snippets" };
-const P: Location = { scope: "project", hostId: "h1", dir: "/repo/.cloudroom/snippets", projectRoot: "/repo" };
+const G: Location = { scope: "global", dir: "/home/d/skills/.snippets" };
+const P: Location = { scope: "project", hostId: "h1", dir: "/repo/.snippets" };
 const now = () => new Date("2026-11-13T10:00:00Z");
 const file = (title: string, order: number | null, body = "body") => `---\ntitle: ${title}\n${order === null ? "" : `order: ${order}\n`}---\n${body}`;
 
@@ -114,19 +114,10 @@ describe("SnippetStore", () => {
     await expect(setup().store.read(G, "../etc/passwd")).rejects.toThrow("Invalid snippet id");
   });
 
-  it("re-includes snippets/*.md when .cloudroom/.gitignore ignores everything", async () => {
+  it("a project save writes only the snippet file, never a .gitignore", async () => {
     const { store, files } = setup({ "/repo/.cloudroom/.gitignore": "*\n" });
-    const r = await store.create(P, { title: "Worker brief", tags: [], body: "x" });
-    expect(r).toMatchObject({ outcome: "saved", note: expect.stringContaining("!snippets/") });
-    expect(files.files.get("/repo/.cloudroom/.gitignore")).toBe("*\n!snippets/\n!snippets/*.md\n");
-    await store.create(P, { title: "Second", tags: [], body: "x" });
-    expect(files.files.get("/repo/.cloudroom/.gitignore")).toBe("*\n!snippets/\n!snippets/*.md\n");
-  });
-
-  it("leaves a repo without .cloudroom/.gitignore alone", async () => {
-    const { store, files } = setup();
-    const r = await store.create(P, { title: "A", tags: [], body: "" });
-    expect(r).toEqual(expect.not.objectContaining({ note: expect.anything() }));
-    expect(files.files.has("/repo/.cloudroom/.gitignore")).toBe(false);
+    expect(await store.create(P, { title: "Worker brief", tags: [], body: "x" })).toMatchObject({ outcome: "saved", snippet: { path: "/repo/.snippets/worker-brief.md" } });
+    expect(files.writes).toEqual(["/repo/.snippets/worker-brief.md"]);
+    expect(files.files.get("/repo/.cloudroom/.gitignore")).toBe("*\n");
   });
 });

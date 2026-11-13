@@ -13,7 +13,7 @@ const view = (id: string, scope: "global" | "project", content: string) =>
 
 const LIST: ListResult = {
   global: { dir: "/g", error: null },
-  project: { id: "proj_1", name: "cloudroom-plugins", dir: "/repo/.cloudroom/snippets", error: null },
+  project: { id: "proj_1", name: "cloudroom-plugins", dir: "/repo/.snippets", error: null },
   snippets: [
     view("worker-brief", "project", "---\ntitle: Worker brief\ntags: delegate\norder: 10\n---\nWORKER BRIEF"),
     view("review-pr", "global", "---\ntitle: Review this PR\ntags: review, git\norder: 10\n---\nReview {{target}} for {{focus|correctness}}."),

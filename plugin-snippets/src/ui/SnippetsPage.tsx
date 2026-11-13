@@ -123,8 +123,7 @@ function Table({ snippets, all, projectName, hasProject }: { snippets: SnippetsD
     if (r.outcome === "blocked") setToast({ text: r.reasons.join(" ") });
     else if (r.outcome === "conflict") setToast({ text: `${r.message} Reloaded from disk.` });
     else {
-      const note = "note" in r && r.note ? ` ${r.note}` : "";
-      if (ok || note) setToast({ text: `${ok ?? ""}${note}`.trim() });
+      if (ok) setToast({ text: ok });
       return true;
     }
     return false;

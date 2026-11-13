@@ -7,8 +7,9 @@ import type { Scope, SnippetView } from "./src/model.js";
 import { stripInvisible } from "./src/secrets.js";
 import { SnippetStore, type FilesPort, type Location } from "./src/store.js";
 
-export const DEFAULT_GLOBAL_DIR = "~/skills/snippets";
-export const PROJECT_SUBDIR = ".cloudroom/snippets";
+// A dot-folder: distribute-skills only picks up ~/skills/*/ folders with a SKILL.md, and skips this one.
+export const DEFAULT_GLOBAL_DIR = "~/skills/.snippets";
+export const PROJECT_SUBDIR = ".snippets";
 
 export function expandHome(dir: string, home: string): string {
   const d = dir.trim();
@@ -23,7 +24,7 @@ export default async function snippetsPlugin(bb: BbPluginApi): Promise<void> {
       type: "string",
       label: "Global snippets folder",
       description:
-        "Absolute path, or ~/…, on the machine the Cloudroom server runs on. Point it at a Git checkout (for example ~/skills/snippets) to version the global set. Project snippets always live in <repo>/.cloudroom/snippets/.",
+        "Absolute path, or ~/…, on the machine the Cloudroom server runs on. Point it at a Git checkout (for example ~/skills/.snippets) to version the global set. Project snippets always live in <repo>/.snippets/.",
       default: DEFAULT_GLOBAL_DIR,
     },
   });
@@ -50,7 +51,6 @@ export default async function snippetsPlugin(bb: BbPluginApi): Promise<void> {
       scope: "project",
       hostId: source.hostId,
       dir: posix.join(source.path, PROJECT_SUBDIR),
-      projectRoot: source.path,
       name: project.name,
     };
   }

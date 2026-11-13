@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import snippetsPlugin, { expandHome } from "../server.js";
@@ -18,11 +19,11 @@ const project = {
   sources: [{ id: "src_1", projectId: "proj_1", hostId: "host_aipc", path: "/repo", isDefault: true, type: "local_path", createdAt: 0, updatedAt: 0 }],
 };
 
-async function load(seed: Record<string, string> = {}) {
+async function load(seed: Record<string, string> = {}, settings: Record<string, string> = { globalDir: "/g" }) {
   const files = new FakeFiles(seed);
   const host = createFakePluginHost({
     pluginId: "snippets",
-    settings: { globalDir: "/g" },
+    settings,
     sdk: {
       files: { read: (a) => files.read(a), write: (a) => files.write(a) as never, list: (a) => files.list(a), remove: (a) => files.remove(a) as never },
       projects: { get: async () => project as never, list: async () => [project] as never },
@@ -49,10 +50,10 @@ describe("snippets server", () => {
     const { host } = await load({
       "/g/review.md": md("Global review", 10, "g"),
       "/g/commit.md": md("Commit", 20, "c"),
-      "/repo/.cloudroom/snippets/review.md": md("Project review", 10, "p"),
+      "/repo/.snippets/review.md": md("Project review", 10, "p"),
     });
     const r = (await host.harness.callRpc("list", { projectId: "proj_1" })) as { snippets: { id: string; scope: string; shadowed: boolean }[]; project: { dir: string } };
-    expect(r.project.dir).toBe("/repo/.cloudroom/snippets");
+    expect(r.project.dir).toBe("/repo/.snippets");
     expect(r.snippets.map((s) => [s.scope, s.id, s.shadowed])).toEqual([
       ["project", "review", false],
       ["global", "review", true],
@@ -80,7 +81,7 @@ describe("snippets server", () => {
   it("room-cli snip list and show, with the project from the CLI context", async () => {
     const { host } = await load({
       "/g/commit.md": md("Commit message", 10, "Write a commit message.\n"),
-      "/repo/.cloudroom/snippets/brief.md": "---\ntitle: Worker brief\ntags: delegate\n---\nWORKER BRIEF for {{role}}​",
+      "/repo/.snippets/brief.md": "---\ntitle: Worker brief\ntags: delegate\n---\nWORKER BRIEF for {{role}}​",
     });
     const list = await host.harness.runCli(["list"], { projectId: "proj_1" });
     expect(list.exitCode).toBe(0);
@@ -110,8 +111,15 @@ describe("snippets server", () => {
     expect(JSON.parse(json.stdout)).toEqual([{ id: "leak", scope: "global", title: "(hidden: looks like a secret)", tags: [], placeholders: [], secretWarning: true }]);
   });
 
+  it("defaults the global folder to ~/skills/.snippets and project snippets to <repo>/.snippets", async () => {
+    const { host } = await load({}, {});
+    const r = (await host.harness.callRpc("list", { projectId: "proj_1" })) as { global: { dir: string }; project: { dir: string } };
+    expect(r.global.dir).toBe(`${homedir()}/skills/.snippets`);
+    expect(r.project.dir).toBe("/repo/.snippets");
+  });
+
   it("expands ~ in the global folder", () => {
-    expect(expandHome("~/skills/snippets", "/home/d")).toBe("/home/d/skills/snippets");
+    expect(expandHome("~/skills/.snippets", "/home/d")).toBe("/home/d/skills/.snippets");
     expect(expandHome("~", "/home/d")).toBe("/home/d");
     expect(expandHome("/abs", "/home/d")).toBe("/abs");
   });

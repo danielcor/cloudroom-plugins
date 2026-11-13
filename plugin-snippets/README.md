@@ -34,8 +34,8 @@ Focus on {{focus|correctness}}.
 
 | Scope | Folder |
 | --- | --- |
-| Project | `<repo>/.cloudroom/snippets/`, committed with the repo. |
-| Global | The `globalDir` setting. The default is `~/skills/snippets` on the Cloudroom server's machine. Change it with `room-cli plugin config snippets set globalDir <path>`. |
+| Project | `<repo>/.snippets/`, committed with the repo. |
+| Global | The `globalDir` setting. The default is `~/skills/.snippets` on the Cloudroom server's machine, a dot-folder that `distribute-skills` skips. Change it with `room-cli plugin config snippets set globalDir <path>`. |
 
 - The frontmatter is a flat subset: one `key: value` per line. Keys the plugin does not know are kept when it saves.
 - Every write carries the SHA-256 of the file as it was read. If the file changed on disk in the meantime, the
@@ -43,9 +43,6 @@ Focus on {{focus|correctness}}.
 - A delete checks the hash, then removes the file. `bb.sdk.files.remove` has no `expectedSha256`, so an edit
   made in the moment between those two calls would be lost.
 - A move rewrites only the moved file's `order` key. The plugin renumbers the scope only when there is no gap left.
-- Cloudroom puts a `.cloudroom/.gitignore` containing `*` in a checkout. That rule would keep project snippets
-  out of Git. So on the first project save, the plugin appends `!snippets/` and `!snippets/*.md` to that file
-  if it exists, and says so in the page's toast.
 
 ## Safety
 

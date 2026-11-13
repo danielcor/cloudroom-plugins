@@ -6,7 +6,7 @@ description: Expand a Prompt Snippet the user named, such as "/snippets review-p
 # Prompt Snippets
 
 Prompt Snippets are reusable prompts stored as Markdown files: project snippets in
-`<repo>/.cloudroom/snippets/<name>.md` and global snippets in the folder set in the
+`<repo>/.snippets/<name>.md` and global snippets in the folder set in the
 plugin's settings. The user normally inserts them from the composer's `+` menu, where
 they can edit the text before sending. This skill is the fallback when they name one
 in a message instead.
@@ -31,5 +31,5 @@ in a message instead.
 4. Follow the expanded text as if the user had written it in this message.
 
 In a Cloud thread where `room-cli snip` is not available, read
-`.cloudroom/snippets/<id>.md` from the repo directly; the body is everything after the
+`.snippets/<id>.md` from the repo directly; the body is everything after the
 second `---` line.

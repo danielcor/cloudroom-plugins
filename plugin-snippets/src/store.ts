@@ -49,12 +49,10 @@ export interface Location {
   hostId?: string;
   /** Absolute snippets folder. */
   dir: string;
-  /** Project checkout root, for the `.cloudroom/.gitignore` guard. */
-  projectRoot?: string;
 }
 
 export type WriteOutcome =
-  | { outcome: "saved"; snippet: SnippetView; note?: string }
+  | { outcome: "saved"; snippet: SnippetView }
   | { outcome: "blocked"; reasons: string[] }
   | { outcome: "conflict"; current: SnippetView | null; message: string };
 
@@ -187,31 +185,7 @@ export class SnippetStore {
       return { outcome: "conflict", current: current && toView(current), message: expectedSha256 === null ? `A snippet named ${id} already exists.` : "The file changed on disk." };
     }
     const snippet = toView({ id, scope: loc.scope, path, content, sha256: r.sha256, modifiedAtMs: this.now().getTime() });
-    const note = loc.projectRoot ? await this.ensureCommittable(loc) : undefined;
-    return note ? { outcome: "saved", snippet, note } : { outcome: "saved", snippet };
-  }
-
-  /**
-   * Cloudroom writes `.cloudroom/.gitignore` containing `*`, which would keep
-   * project snippets out of Git. Re-include `snippets/*.md` when that file
-   * exists and does not already do so. Best effort: a failure is reported, not thrown.
-   */
-  async ensureCommittable(loc: Location): Promise<string | undefined> {
-    if (!loc.projectRoot) return undefined;
-    const path = posix.join(loc.projectRoot, ".cloudroom", ".gitignore");
-    const rootPath = posix.join(loc.projectRoot, ".cloudroom");
-    try {
-      const r = await this.files.read({ hostId: loc.hostId, path, rootPath });
-      const text = r.contentEncoding === "base64" ? Buffer.from(r.content, "base64").toString("utf8") : r.content;
-      const lines = text.split(/\r?\n/u).map((l) => l.trim());
-      if (!lines.includes("*") || lines.includes("!snippets/")) return undefined;
-      const content = `${text}${text.endsWith("\n") || text === "" ? "" : "\n"}!snippets/\n!snippets/*.md\n`;
-      const w = await this.files.write({ hostId: loc.hostId, path, rootPath, content, expectedSha256: r.sha256 });
-      return w.outcome === "written" ? "Added !snippets/ to .cloudroom/.gitignore so project snippets can be committed." : undefined;
-    } catch (error) {
-      if (isMissing(error)) return undefined;
-      return `Could not check .cloudroom/.gitignore: ${error instanceof Error ? error.message : String(error)}`;
-    }
+    return { outcome: "saved", snippet };
   }
 }
 
