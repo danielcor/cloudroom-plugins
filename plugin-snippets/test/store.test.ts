@@ -201,6 +201,27 @@ describe("SnippetStore", () => {
     expect(files.files.get(`${G.dir}/.trash/.gitignore`)).toBe("# deleted snippets\n*\n");
   });
 
+  it.each([
+    ["a leading space (Git keeps it, so it is another pattern)", " *\n"],
+    ["a later negation that wins", "*\n!*.md\n"],
+    ["a trailing tab (Git keeps tabs, unlike spaces)", "*\t\n"],
+  ])("appends a final * when the existing rule has %s", async (_why, existing) => {
+    const path = `${G.dir}/x.md`;
+    const content = "---\ntitle: X\n---\nbody";
+    const { store, files } = setup({ [path]: content, [`${G.dir}/.trash/.gitignore`]: existing });
+    expect(await store.remove(G, "x", sha(content))).toMatchObject({ outcome: "removed" });
+    expect(files.files.get(`${G.dir}/.trash/.gitignore`)).toBe(`${existing}*\n`);
+  });
+
+  it("leaves a .trash/.gitignore alone when its last rule is already a bare *", async () => {
+    const path = `${G.dir}/x.md`;
+    const content = "---\ntitle: X\n---\nbody";
+    const existing = "!keep.md\n*  \n# trailing comment\n\n";
+    const { store, files } = setup({ [path]: content, [`${G.dir}/.trash/.gitignore`]: existing });
+    expect(await store.remove(G, "x", sha(content))).toMatchObject({ outcome: "removed" });
+    expect(files.files.get(`${G.dir}/.trash/.gitignore`)).toBe(existing);
+  });
+
   it("does not delete when it cannot make .trash ignored by Git", async () => {
     const path = `${G.dir}/x.md`;
     const content = "---\ntitle: X\n---\nbody";

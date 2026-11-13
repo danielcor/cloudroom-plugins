@@ -50,8 +50,9 @@ Focus on {{focus|correctness}}.
   with `expectedSha256: null`, so they never replace a file that appeared in the meantime. The host's
   move checks the destination and then renames, which could replace one. The trash copy stays. The table and
   `room-cli snip` never list `.trash/`. The random part keeps two deletes in the same millisecond from sharing
-  a name. Before it moves anything, the plugin makes sure `.trash/.gitignore` has a bare `*` line. It creates
-  the file, or appends the line to one that lacks it, with a compare-and-swap write. If that write conflicts,
+  a name. Before it moves anything, the plugin makes sure the last rule in `.trash/.gitignore` is a bare `*`.
+  A later rule wins, and ` *` or `*<tab>` are different patterns to Git. It creates the file, or appends `*`,
+  with a compare-and-swap write. If that write conflicts,
   nothing is deleted. Nothing empties the trash yet: delete old files there by hand.
 - A move rewrites only the moved file's `order` key. The plugin renumbers the scope only when there is no gap left.
 

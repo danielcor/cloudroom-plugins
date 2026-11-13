@@ -201,9 +201,11 @@ export class SnippetStore {
   }
 
   /**
-   * Make sure `.trash/.gitignore` holds a bare `*` line so trashed snippets stay
-   * out of Git: create it, or append the rule to an existing file, both with a
-   * compare-and-swap write. False when that write conflicts.
+   * Make sure the last rule in `.trash/.gitignore` is a bare `*`, so trashed
+   * snippets stay out of Git: a later rule wins (`!*.md` after `*` would
+   * re-include them), and Git keeps leading spaces (` *` is another pattern).
+   * Create the file, or append `*` to it, with a compare-and-swap write.
+   * False when that write conflicts.
    */
   private async ignoreTrash(loc: Location, trashDir: string): Promise<boolean> {
     const path = posix.join(trashDir, ".gitignore");
@@ -216,7 +218,15 @@ export class SnippetStore {
     } catch (error) {
       if (!isMissing(error)) throw error;
     }
-    if (text !== null && text.split(/\r?\n/u).some((l) => l.trim() === "*")) return true;
+    if (text !== null) {
+      // Git ignores blank lines, `#` comments and unescaped trailing spaces (not tabs:
+      // checked with `git check-ignore`, `*<tab>` leaves files visible).
+      const rules = text
+        .split(/\r?\n/u)
+        .map((l) => l.replace(/(?<!\\) +$/u, ""))
+        .filter((l) => l !== "" && !l.startsWith("#"));
+      if (rules.at(-1) === "*") return true;
+    }
     const content = text === null ? "*\n" : `${text}${text === "" || text.endsWith("\n") ? "" : "\n"}*\n`;
     const w = await this.files.write({ hostId: loc.hostId, path, rootPath: loc.dir, content, expectedSha256: sha });
     return w.outcome === "written";
