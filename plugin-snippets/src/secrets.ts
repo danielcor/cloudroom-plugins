@@ -81,40 +81,56 @@ function unquote(v: string): string {
   return v;
 }
 
-// Shell syntax that ends a word: `$VAR; echo`, `${VAR}&& deploy`.
+const REF = "(?:\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}|\\$?\\{\\{[^}]*\\}\\})";
+// An unquoted shell word ends at shell syntax: `$VAR; echo`, `${VAR}&& deploy`.
 const SHELL_END = "(?:[;&|<>)].*)?";
-const PLAIN_REF = new RegExp(`^(?:\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}|\\$?\\{\\{[^}]*\\}\\})${SHELL_END}$`, "su");
-const DEFAULT_REF = new RegExp(`^\\$\\{[A-Za-z_][A-Za-z0-9_]*:?[-=?+]([^}]*)\\}${SHELL_END}$`, "su");
+const PLAIN_REF = new RegExp(`^${REF}$`, "su");
+const PLAIN_REF_SHELL = new RegExp(`^${REF}${SHELL_END}$`, "su");
+const DEFAULT_REF = new RegExp(`^\\$\\{[A-Za-z_][A-Za-z0-9_]*:?[-=?+]([^}]*)\\}$`, "su");
+const DEFAULT_REF_SHELL = new RegExp(`^\\$\\{[A-Za-z_][A-Za-z0-9_]*:?[-=?+]([^}]*)\\}${SHELL_END}$`, "su");
 
 /**
  * The literal text a value stands for. A plain reference (`$VAR`, `${VAR}`,
- * `${{ expr }}`, `{{placeholder}}`), even followed by shell syntax (`$VAR;`),
- * stands for nothing: null. A shell default (`${VAR:-text}`) stands for its
- * text. Anything else stands for itself.
+ * `${{ expr }}`, `{{placeholder}}`) stands for nothing: null. A shell default
+ * (`${VAR:-text}`) stands for its text. Anything else stands for itself.
+ * `shellWord`: the value was an unquoted shell word, so shell syntax after the
+ * reference (`$VAR; echo`) ends it. Inside quotes or URL userinfo it does not:
+ * `"${TOKEN};literal"` is literal text.
  */
-export function literalOf(v: string): string | null {
+export function literalOf(v: string, shellWord = false): string | null {
   const t = v.trim();
-  if (PLAIN_REF.test(t)) return null;
-  const d = DEFAULT_REF.exec(t);
+  if ((shellWord ? PLAIN_REF_SHELL : PLAIN_REF).test(t)) return null;
+  const d = (shellWord ? DEFAULT_REF_SHELL : DEFAULT_REF).exec(t);
   return d ? d[1]! : t;
 }
 
-/** Random-looking; a value with spaces counts only when one of its words does, so quoted prose stays clean. */
+/** An ordinary word: letters, at most a leading capital, maybe trailing punctuation (`Choose`, `account.`). */
+const PROSE_WORD = /^[("'`]*[A-Za-z][a-z]+[.,;:!?'"`)]*$/u;
+
+/**
+ * Random-looking. A value with spaces is prose when at least half its words are
+ * ordinary words: then only a random word counts (`use <token> for staging`).
+ * Otherwise the whole value counts too, spaces removed (`aB3dE5gH7jK9 mN1pQ2sT4vW6x`).
+ */
 function isSecretValue(v: string | null): boolean {
   if (v === null) return false;
-  return /\s/u.test(v) ? v.split(/\s+/u).some((w) => looksRandom(w)) : looksRandom(v);
+  if (!/\s/u.test(v)) return looksRandom(v);
+  const words = v.split(/\s+/u).filter(Boolean);
+  if (words.some((w) => looksRandom(w))) return true;
+  const prose = words.filter((w) => PROSE_WORD.test(w)).length;
+  return prose * 2 < words.length && looksRandom(words.join(""));
 }
 
-/** Base64 that decodes to printable `user:password` with a non-empty password. */
+/** Padded base64 that decodes (as UTF-8) to `user:password` with a non-empty password and no control characters. */
 function isBasicCredentials(b64: string): boolean {
-  if (b64.length < 8 || b64.length % 4 !== 0) return false;
+  if (b64.length % 4 !== 0) return false;
   let decoded: string;
   try {
-    decoded = atob(b64);
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
   } catch {
     return false;
   }
-  return /^[\x20-\x7E]*:[\x20-\x7E]+$/u.test(decoded);
+  return /^[^:\p{Cc}]*:[^\p{Cc}]+$/u.test(decoded);
 }
 
 /** A physical line joined with its shell `\` continuations, and a map back to line numbers. */
@@ -159,15 +175,19 @@ export function scanSecrets(text: string): SecretFinding[] {
     for (const { kind, re } of PATTERNS) for (const m of l.text.matchAll(re)) add(kind, at(m, 0));
     for (const re of [ASSIGNED, FLAG_SPACED]) {
       for (const m of l.text.matchAll(re)) {
-        if (isSecretName(m[1]!) && isSecretValue(literalOf(unquote(m[2]!)))) add("secret-looking value", at(m, 2));
+        const raw = m[2]!;
+        const quoted = raw.startsWith('"') || raw.startsWith("'");
+        if (isSecretName(m[1]!) && isSecretValue(literalOf(unquote(raw), !quoted))) add("secret-looking value", at(m, 2));
       }
     }
     for (const m of l.text.matchAll(URL_USERINFO)) if (literalOf(m[1]!)) add("password in a URL", at(m, 1));
     for (const m of l.text.matchAll(BASIC_AUTH)) if (isBasicCredentials(m[1]!)) add("Basic auth credentials", at(m, 1));
     for (const m of l.text.matchAll(CURL_USER)) {
-      const value = unquote(m[1]!);
+      const raw = m[1]!;
+      const value = unquote(raw);
       const colon = value.indexOf(":");
-      if (colon !== -1 && literalOf(value.slice(colon + 1))) add("password in -u/--user", at(m, 1));
+      const shellWord = !(raw.startsWith('"') || raw.startsWith("'"));
+      if (colon !== -1 && literalOf(value.slice(colon + 1), shellWord)) add("password in -u/--user", at(m, 1));
     }
   }
 

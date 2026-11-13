@@ -72,10 +72,11 @@ Focus on {{focus|correctness}}.
   value is on.
 
   References are not values: `$VAR`, `${VAR}` and `{{placeholder}}` stay clean, also when shell syntax follows
-  (`$VAR; echo`). So does `user@host` with no password. A shell default is a value: `${VAR:-text}` is checked
-  as `text`. A quoted value with spaces counts only when one of its words looks random, so quoted guidance such
-  as `password: "Choose a different one"` stays clean. `Authorization: Basic …` counts only when it decodes to
-  `user:password`. URLs with an empty user name (`https://:pass@host`) and curl's attached `-uuser:pass` are
+  (`$VAR; echo`) in an unquoted shell word. Inside quotes or a URL, `${VAR};text` is checked as literal text.
+  `user@host` with no password stays clean. A shell default is a value: `${VAR:-text}` is checked as `text`.
+  A value with spaces counts as prose when at least half its words are ordinary words, so quoted guidance such
+  as `password: "Choose a different one"` stays clean. Otherwise it is checked whole as well as word by word.
+  `Authorization: Basic …` counts when it decodes, as UTF-8, to `user:password`. URLs with an empty user name (`https://:pass@host`) and curl's attached `-uuser:pass` are
   covered too. The body is also scanned with placeholder defaults filled in, so `--token {{token|…}}` counts.
 
   On save, a hit blocks the save and names the kind and the line, never the value. On load, a hit shows a

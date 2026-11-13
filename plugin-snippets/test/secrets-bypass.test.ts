@@ -62,6 +62,11 @@ describe("secret scan bypasses (round 4)", () => {
     ["S6 empty user name in a URL", "curl https://:hunter2@example.com/api", 1],
     ["S7 curl -u attached", "curl -uadmin:hunter2 https://example.com", 1],
     ["S3 a random word inside quoted text", `password: "use ${PUNCT} for staging"`, 1],
+    ["S8 a literal after a reference inside quotes", `export TOKEN="\${TOKEN};${ALNUM}"`, 1],
+    ["S8 a literal after a reference in URL userinfo", "git clone https://user:${TOKEN};hunter2@example.com/r.git", 1],
+    ["S9 a random value with a space", `export TOKEN='${ALNUM.slice(0, 12)} ${ALNUM.slice(12, 25)}'`, 1],
+    ["S10 short Basic credentials", "Authorization: Basic YTpi", 1],
+    ["S10 non-ASCII Basic credentials", `Authorization: Basic ${Buffer.from("deploy:pássword123").toString("base64")}`, 1],
   ])("delta: catches %s", (_why, text, line) => {
     expect(lines(text)).toContain(line);
   });
@@ -75,6 +80,9 @@ describe("secret scan bypasses (round 4)", () => {
     "export API_TOKEN=${API_TOKEN}&& deploy",
     "curl -u admin: https://example.com",
     "curl -uadmin https://example.com",
+    "token: 'Use the API key from your 1Password vault'",
+    'password: "Do NOT reuse it across CI and prod"',
+    "Authorization: Basic YWJj",
   ])("delta: keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
   });

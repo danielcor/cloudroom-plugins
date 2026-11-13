@@ -95,6 +95,9 @@ describe("SnippetStore", () => {
       ["shell default", `export API_TOKEN=\${API_TOKEN:-${ALNUM}}`],
       ["empty URL user", "curl https://:hunter2@example.com"],
       ["curl -u attached", "curl -uadmin:hunter2 https://x"],
+      ["literal after a quoted reference", `export TOKEN="\${TOKEN};${ALNUM}"`],
+      ["random value with a space", `export TOKEN='${ALNUM.slice(0, 12)} ${ALNUM.slice(12, 25)}'`],
+      ["short Basic credentials", "Authorization: Basic YTpi"],
     ])("blocks create and save: %s", async (_why, body) => {
       const path = `${G.dir}/x.md`;
       const clean = "---\ntitle: X\n---\nok";
