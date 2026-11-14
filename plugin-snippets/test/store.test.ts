@@ -91,6 +91,24 @@ describe("SnippetStore", () => {
       },
     );
 
+    it.each([
+      'curl -H "X-API-Key: aB3dE5gH7jK9mN1pQ2sT4vW6" https://x',
+      "X-Auth-Token: abc",
+      '{\n  "password":\n  "hunter2"\n}',
+      "password:\n  hunter2",
+    ])("final review: blocks %s", async (body) => {
+      const { store, files } = setup();
+      const r = await store.create(G, { title: "T", tags: [], body });
+      expect(r.outcome).toBe("blocked");
+      expect(r.outcome === "blocked" && r.reasons.join(" ")).toContain("use $PASSWORD or {{password}} instead of a literal value");
+      expect(files.writes).toEqual([]);
+    });
+
+    it.each(['curl -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" https://x', "password:\n  $PASSWORD"])("final review: saves %s", async (body) => {
+      const { store } = setup();
+      expect(await store.create(G, { title: "T", tags: [], body })).toMatchObject({ outcome: "saved" });
+    });
+
     it.each(["export PASSWORD=$PASSWORD", "password: {{password}}", "set PASSWORD=%PASSWORD%", "deploy --password-file /etc/pw --token-count 5", "Remember the password: it must be long.", '{"password":"$PASSWORD"}', '{"password":""}'])(
       "saves %s",
       async (body) => {

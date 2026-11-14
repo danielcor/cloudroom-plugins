@@ -55,6 +55,10 @@ const URL_USERINFO = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]*:([^\s/?#@]+)@/dgiu;
 const BASIC_AUTH = /\bauthorization\s*:\s*basic\s+([A-Za-z0-9+/]+={0,2})(?![A-Za-z0-9+/=])/dgiu;
 // curl -u user:password, -uuser:password, --user user:password, --user=user:password
 const CURL_USER = new RegExp(`(?<![A-Za-z0-9_-])(?:-u[ \\t]*|--user(?:[ \\t]+|=))${VALUE}`, "dgu");
+// curl -H "Name: value", -H"…", --header '…', --header=…: a secret-named header (X-API-Key,
+// X-Auth-Token, Private-Token) falls under the strict rule. Bare `Name: value` lines are
+// YAML-style `key: value` lines and are covered by ASSIGN_COLON_LINE.
+const CURL_HEADER = new RegExp(`(?<![A-Za-z0-9_-])(?:-H[ \\t]*|--header(?:[ \\t]+|=))${VALUE}`, "dgu");
 // A YAML block scalar under a key: `api_token: |`, `>-`, `|2`.
 const YAML_BLOCK = /^([ \t]*)(?:-[ \t]+)?["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*:[ \t]*[|>][+-]?\d?[+-]?[ \t]*(?:#.*)?$/u;
 
@@ -200,11 +204,41 @@ function scalarLiteral(raw: string): string | null {
  * `\:` is a colon too), keeping each later piece's provenance (curl `user:password`).
  */
 function afterFirstColon(segs: readonly Segment[]): Segment[] | null {
+  return splitFirstColon(segs)?.[1] ?? null;
+}
+
+/** [the text before the first `:`, the pieces after it]; null without a colon. */
+function splitFirstColon(segs: readonly Segment[]): [string, Segment[]] | null {
+  let before = "";
   for (let k = 0; k < segs.length; k++) {
     const idx = segs[k]!.text.indexOf(":");
-    if (idx !== -1) return [{ ...segs[k]!, text: segs[k]!.text.slice(idx + 1) }, ...segs.slice(k + 1)];
+    if (idx !== -1) return [before + segs[k]!.text.slice(0, idx), [{ ...segs[k]!, text: segs[k]!.text.slice(idx + 1) }, ...segs.slice(k + 1)]];
+    before += segs[k]!.text;
   }
   return null;
+}
+
+// A key whose value is on a later line: `password:` (YAML or a JSON line, at line
+// start) or `, "password":` / `{"password":` at the end of a line (JSON/flow).
+const KEY_ONLY = /^([ \t]*)(?:-[ \t]+)*["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*:[ \t]*(?:#.*)?$/u;
+const KEY_AT_END = /[{,][ \t]*["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*:[ \t]*$/u;
+const LEADING_QUOTED = new RegExp(`^(${YAML_QUOTED})`, "u");
+// The next line opens a nested mapping (`user: app`, `"user": "app"`), not a scalar.
+const MAPPING_KEY = new RegExp(`^(?:${YAML_QUOTED}|[A-Za-z_][A-Za-z0-9_.-]*)[ \\t]*:(?:[ \\t]|$)`, "u");
+
+/**
+ * The scalar a key with no value on its own line takes from the next non-blank
+ * line, or null when that line is not one: a nested mapping or list, or (YAML,
+ * plain) a line that is not indented deeper than the key. Quoted: the leading
+ * quoted string. Plain: up to ` # comment`, and in JSON/flow up to `,` `}` `]`.
+ */
+function continuedScalar(keyIndent: number, flow: boolean, next: string): string | null {
+  const t = next.trim();
+  if (t === "" || MAPPING_KEY.test(t) || t === "-" || t.startsWith("- ")) return null;
+  const q = LEADING_QUOTED.exec(t);
+  if (q) return q[1]!;
+  if (!flow && next.length - next.trimStart().length <= keyIndent) return null;
+  return flow ? t.replace(/[,}\]].*$/u, "") : t.replace(/[ \t]+#.*$/u, "");
 }
 
 /**
@@ -292,11 +326,30 @@ export function scanSecrets(text: string): SecretFinding[] {
     }
     for (const m of l.text.matchAll(URL_USERINFO)) if (referenceLiteral(m[1]!) !== null) add("password in a URL", at(m, 1));
     for (const m of l.text.matchAll(BASIC_AUTH)) if (isBasicCredentials(m[1]!)) add("Basic auth credentials", at(m, 1));
+    for (const m of l.text.matchAll(CURL_HEADER)) {
+      const split = splitFirstColon(segments(m[1]!));
+      if (!split || !isSecretName(split[0].trim())) continue;
+      const value = split[1].map((seg, k) => (k === 0 ? { ...seg, text: seg.text.replace(/^[ \t]+/u, "") } : seg));
+      if (literalText(value, true) !== null) add(LITERAL_KIND, at(m, 1));
+    }
     for (const m of l.text.matchAll(CURL_USER)) {
       const password = afterFirstColon(segments(m[1]!));
       if (password && literalText(password, false) !== null) add("password in -u/--user", at(m, 1));
     }
   }
+
+  // A secret-named key with no value on its line takes the scalar on the next non-blank line.
+  physical.forEach((raw, i) => {
+    const line = KEY_ONLY.exec(raw);
+    const end = line ? null : KEY_AT_END.exec(raw);
+    const name = line?.[2] ?? end?.[1];
+    if (name === undefined || !isSecretName(name)) return;
+    const j = physical.findIndex((p, k) => k > i && p.trim() !== "");
+    if (j === -1) return;
+    const keyIndent = line ? line[1]!.length : raw.length - raw.trimStart().length;
+    const value = continuedScalar(keyIndent, end !== null, physical[j]!);
+    if (value !== null && scalarLiteral(value) !== null) add(LITERAL_KIND, j + 1);
+  });
 
   // YAML block scalars under a secret-named key: the value sits on the indented lines below.
   physical.forEach((raw, i) => {
