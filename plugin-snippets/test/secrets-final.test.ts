@@ -18,6 +18,9 @@ describe("(1) secret-named HTTP headers", () => {
     // Delta review round 1 on 351de14.
     ["S1 a bare header line with a boolean word", "X-API-Key: true", 1],
     ["S1 a bare header line with null", "Private-Token: null", 1],
+    // Delta review round 2 on 8397141.
+    ["S1 a lowercase header name", "x-api-key: true", 1],
+    ["S1 a header value that looks like a YAML block indicator", "X-API-Key: |", 1],
   ])("blocks %s", (_why, text, line) => {
     expect(kinds(text)).toContain(`${line}:${LITERAL}`);
   });
@@ -32,6 +35,8 @@ describe("(1) secret-named HTTP headers", () => {
     "X-API-Key: $API_KEY",
     'curl -H "X-API-Key:"" $API_KEY" https://x',
     "require_password: true",
+    '{"X-API-Key":true}',
+    '{\n  "X-API-Key": true\n}',
   ])("keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
   });
@@ -47,6 +52,7 @@ describe("(2) a value on the line after its key", () => {
     ["YAML quoted scalar below", "token:\n  'abc def'", 2],
     ["S2 a comment line between key and value", "password:\n# set by hand\n  hunter2", 3],
     ["S3 a JSON number on the next line, not indented deeper", '{\n  "password":\n  123456\n}', 3],
+    ["S6 a quoted YAML key keeps YAML commas", '"password":\n  $PASSWORD,literal', 2],
   ])("blocks %s", (_why, text, line) => {
     expect(kinds(text)).toContain(`${line}:${LITERAL}`);
   });
@@ -67,6 +73,7 @@ describe("(2) a value on the line after its key", () => {
     "password:\n  {user: app}",
     "password:\n  [one, two]",
     "password:\n  {{password}}",
+    '"password":\n  $PASSWORD # comment',
   ])("keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
   });

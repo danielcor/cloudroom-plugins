@@ -66,7 +66,9 @@ Focus on {{focus|correctness}}.
   - **any literal value assigned to a secret-named key or flag**, whatever it looks like. This is the strict
     rule (Daniel, 2026-11-13). It covers `API_TOKEN=…`, `DATABASE_PASSWORD: …`, `"apiKey": "…"`,
     `clientsecret: …`, `--api-key=…` and `--token …`. The same goes for secret-named HTTP headers, in
-    `curl -H "X-API-Key: …"`, `--header 'X-Auth-Token: …'` or a bare `Private-Token: …` line. Guidance written as an assignment also blocks, for
+    `curl -H "X-API-Key: …"`, `--header 'X-Auth-Token: …'` or a bare `Private-Token: …` line. Header names match in any case. On a bare
+    header line the value is header text, so `X-API-Key: true` blocks. Inside JSON (`{"X-API-Key": true}`) the
+    YAML/JSON rules below apply. Guidance written as an assignment also blocks, for
     example `password: "choose a new one"`: reword it, or write a reference.
 
   A name is secret-named when its last word ends in token, secret, password, passwd, passphrase or
@@ -90,7 +92,7 @@ Focus on {{focus|correctness}}.
   - At line start the scalar runs to the end of the line, without a ` # comment`. A quoted scalar may be
     followed by `,`, as in a multi-line JSON object. A plain scalar keeps its comma, so
     `password: true hunter2` and `password: $PASSWORD,` are literal.
-  - A key with no value on its own line takes the scalar on the next non-blank line (`"password":` then
+  - A key with no value on its own line takes the scalar on the next line that is not blank or a `#` comment (`"password":` then
     `"…"`, or a YAML `password:` with the value indented below). A nested mapping or list is not a value.
   - Inside `{…}` it ends at `,` `}` or `]`. So `{"password":"$PASSWORD"}` and `{"password":""}` stay clean.
   - An unquoted `true`, `false` or `null` adds nothing; `password: "null"` and `PASSWORD=true` are literal.

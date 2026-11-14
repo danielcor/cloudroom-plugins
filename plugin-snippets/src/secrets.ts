@@ -93,9 +93,9 @@ const DEFAULT_EXACT = /^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=?+]([^}]*)\}$/su;
 const ATOMIC = /^(?:\$\([^)\n]*\)|`[^`\n]*`|\$?\{\{[^}\n]*\}\})/u;
 // Unquoted shell syntax ends a shell word: `$VAR; echo`, `${VAR}&& deploy`.
 const SHELL_DELIM = /[;&|<>)]/u;
-// An HTTP header name (`X-API-Key`, `Private-Token`): its value is header text, so a
-// bare `X-API-Key: true` line gets no boolean/null exemption.
-const HEADER_NAME = /^[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+$/u;
+// An HTTP header name, any case (`X-API-Key`, `x-api-key`, `Private-Token`). On a bare
+// header line (unquoted name at line start) the value is header text: no YAML exemptions.
+const HEADER_NAME = /^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+$/u;
 // Unquoted YAML/JSON booleans and null are not secrets (`require_password: true`).
 // Only for a plain YAML/JSON scalar: `PASSWORD=true` or `password: "null"` is literal.
 const SCALAR = /^(?:true|false|null|yes|no|on|off|~)$/iu;
@@ -194,11 +194,11 @@ function literalText(segs: readonly Segment[], runtime: boolean): string | null 
  * empty or a reference. Plain: also null for a block indicator (`|`, `>-`) or an
  * unquoted boolean or null. `$(cmd)` is not run in YAML/JSON, so it is literal.
  */
-function scalarLiteral(raw: string, scalarsAreSafe = true): string | null {
+function scalarLiteral(raw: string): string | null {
   const t = raw.trim();
   const quoted = t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")));
   if (quoted) return referenceLiteral(t.slice(1, -1));
-  if ((scalarsAreSafe && SCALAR.test(t)) || /^[|>][+-]?\d?[+-]?$/u.test(t)) return null;
+  if (SCALAR.test(t) || /^[|>][+-]?\d?[+-]?$/u.test(t)) return null;
   return referenceLiteral(t);
 }
 
@@ -233,10 +233,32 @@ const MAPPING_KEY = new RegExp(`^(?:${YAML_QUOTED}|[A-Za-z_][A-Za-z0-9_.-]*)[ \\
  * The scalar a key with no value on its own line takes from the next line that
  * is not blank or a `#` comment, or null when that line is not one: a nested
  * mapping or list, a flow collection, or (YAML, plain) a line that is not
- * indented deeper than the key. `flow`: JSON/flow context (a quoted key, or a
- * key after `{` or `,`), where indentation does not matter. Quoted: the leading
+ * indented deeper than the key. `flow`: JSON/flow context (inside an unclosed
+ * `{`, or a key after `{` or `,`), where indentation does not matter. Quoted: the leading
  * quoted string. Plain: up to ` # comment`, and in JSON/flow up to `,` `}` `]`.
  */
+/**
+ * Whether line `i` sits inside a `{` left open on earlier lines (JSON or a YAML
+ * flow mapping). Braces in double-quoted strings and `{{placeholders}}` do not count.
+ */
+function insideBraces(physical: readonly string[], i: number): boolean {
+  let depth = 0;
+  for (let k = 0; k < i; k++) {
+    const text = physical[k]!.replace(/\{\{[^}]*\}\}/gu, "");
+    let inString = false;
+    for (let c = 0; c < text.length; c++) {
+      const ch = text[c]!;
+      if (inString) {
+        if (ch === "\\") c++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}") depth = Math.max(0, depth - 1);
+    }
+  }
+  return depth > 0;
+}
+
 function continuedScalar(keyIndent: number, flow: boolean, next: string): string | null {
   const t = next.trim();
   if (t === "" || MAPPING_KEY.test(t) || t === "-" || t.startsWith("- ")) return null;
@@ -314,10 +336,10 @@ export function scanSecrets(text: string): SecretFinding[] {
     for (const { kind, re } of PATTERNS) for (const m of l.text.matchAll(re)) add(kind, at(m, 0));
     // Shell words after `=` and flags; YAML/JSON scalars after `:`.
     // [match, mode, value group].
-    type Named = [RegExpMatchArray, "shell" | "flag" | "scalar", number];
+    type Named = [RegExpMatchArray, "shell" | "flag" | "scalar" | "line", number];
     const named: Named[] = [
       ...[...l.text.matchAll(ASSIGN_EQ)].map((m): Named => [m, "shell", 2]),
-      ...[...l.text.matchAll(ASSIGN_COLON_LINE)].map((m): Named => [m, "scalar", m[2] !== undefined ? 2 : 3]),
+      ...[...l.text.matchAll(ASSIGN_COLON_LINE)].map((m): Named => [m, "line", m[2] !== undefined ? 2 : 3]),
       ...[...l.text.matchAll(ASSIGN_COLON_FLOW)].map((m): Named => [m, "scalar", 2]),
       ...[...l.text.matchAll(FLAG_SPACED)].map((m): Named => [m, "flag", 2]),
     ];
@@ -325,7 +347,10 @@ export function scanSecrets(text: string): SecretFinding[] {
       if (!isSecretName(m[1]!)) continue;
       const raw = m[group]!;
       let lit: string | null;
-      if (mode === "scalar") lit = scalarLiteral(raw, !HEADER_NAME.test(m[1]!));
+      if (mode === "line" && HEADER_NAME.test(m[1]!) && !/["']/u.test(l.text[(m.indices?.[1]?.[0] ?? 1) - 1] ?? "")) {
+        // A bare header line (`X-API-Key: value`): the value is header text.
+        lit = referenceLiteral(raw.trim());
+      } else if (mode === "scalar" || mode === "line") lit = scalarLiteral(raw);
       // After a spaced flag, another option or a shell operator is not its value.
       else if (mode === "flag" && /^[-<>|;&]/u.test(raw)) lit = null;
       else lit = literalText(segments(raw), true);
@@ -358,7 +383,7 @@ export function scanSecrets(text: string): SecretFinding[] {
     const j = physical.findIndex((p, k) => k > i && p.trim() !== "" && !p.trim().startsWith("#"));
     if (j === -1) return;
     const keyIndent = line ? line[1]!.length : raw.length - raw.trimStart().length;
-    const flow = end !== null || line?.[2] !== "";
+    const flow = end !== null || insideBraces(physical, i);
     const value = continuedScalar(keyIndent, flow, physical[j]!);
     if (value !== null && scalarLiteral(value) !== null) add(LITERAL_KIND, j + 1);
   });
