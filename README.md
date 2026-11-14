@@ -15,6 +15,9 @@ More agent harnesses for Cloudroom: Gemini 4 Argon (Google Antigravity, `agy`), 
   [`skills/muse/`](skills/muse/): the same three pieces for Muse. See [Muse](#muse).
 - [`plugin-qoder/`](plugin-qoder/): **provider-qoder**, the "Qoder" provider (id `qoder`) for local threads on
   aipc. It runs the Qoder CLI's own ACP mode through the SDK's generic ACP bridge. See [Qoder](#qoder).
+- [`plugin-snippets/`](plugin-snippets/): **Prompt Snippets** (`snippets`), a sidebar page and a composer `+`
+  menu row that keep reusable prompts as Markdown files and append the one you pick to the composer. See its
+  [README](plugin-snippets/README.md).
 
 For local threads, agy keeps its own Google login on each machine and the plugin never reads, copies or logs
 credentials. The `argon` command copies that login into Cloud sandboxes (below).
