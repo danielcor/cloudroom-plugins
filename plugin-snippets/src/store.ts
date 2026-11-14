@@ -4,7 +4,8 @@
 import { randomBytes } from "node:crypto";
 import { posix } from "node:path";
 import { compareOrder, nextOrder, planMove } from "./order.js";
-import { findSecrets, stripInvisible } from "./secrets.js";
+import { findSecrets } from "./find-secrets.js";
+import { stripInvisible } from "./secrets.js";
 import {
   LIMITS,
   isValidId,

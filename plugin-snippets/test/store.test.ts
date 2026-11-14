@@ -104,6 +104,21 @@ describe("SnippetStore", () => {
       expect(files.writes).toEqual([]);
     });
 
+    it.each(["note: 'first\n  {\n  last'\npassword:\n  $PASSWORD,literal", "note: {label: don't}\npassword:\n  $PASSWORD,literal"])(
+      "parser: blocks S8/S10 %s",
+      async (body) => {
+        const { store, files } = setup();
+        expect((await store.create(G, { title: "T", tags: [], body })).outcome).toBe("blocked");
+        expect(files.writes).toEqual([]);
+      },
+    );
+
+    it("parser: flags S10 on load", async () => {
+      const { store } = setup({ [`${G.dir}/x.md`]: "---\ntitle: X\n---\nnote: {label: don't}\npassword:\n  $PASSWORD,literal" });
+      const [view] = await store.list(G);
+      expect(view!.secrets).toEqual(["literal value for a secret-named key on body line 3"]);
+    });
+
     it.each(['curl -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" https://x', "password:\n  $PASSWORD"])("final review: saves %s", async (body) => {
       const { store } = setup();
       expect(await store.create(G, { title: "T", tags: [], body })).toMatchObject({ outcome: "saved" });

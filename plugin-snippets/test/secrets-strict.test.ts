@@ -2,6 +2,7 @@
 // assigned to a secret-named key or flag blocks the save, whatever its entropy,
 // unless it is a reference ($VAR, ${VAR}, %VAR%, {{x}}) or empty.
 import { describe, expect, it } from "vitest";
+import { findSecrets } from "../src/find-secrets.js";
 import { scanSecrets } from "../src/secrets.js";
 
 const LITERAL = "literal value for a secret-named key";
@@ -95,5 +96,6 @@ describe("strict rule for secret-named keys", () => {
     "curl -u admin\\: https://example.com",
   ])("keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
+    expect(findSecrets({ title: "t", tags: [], body: text })).toEqual([]);
   });
 });

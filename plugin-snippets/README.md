@@ -103,6 +103,14 @@ Focus on {{focus|correctness}}.
   - URL and curl passwords get no command exemption. curl keeps the quoting rules above, and an escaped `\:`
     separates user and password too.
 
+  A YAML/JSON parse adds coverage (Daniel, 2026-11-14; the `yaml` package). The parse covers the whole body,
+  each fenced code block and each indented block. JSON is a YAML subset, so every map in them counts, including
+  anchors and aliases, several documents, flow maps and values on a later line. A secret-named key whose value is
+  a scalar falls under the same rule. An unquoted `null` or boolean is not literal, and a block scalar is checked
+  without its final newline. Findings carry the body line of the value. The parse only adds findings: the line
+  scanner above still runs over everything, including text that does not parse and the shell, header, URL and
+  curl rules.
+
   Values are taken whole, quoted or not, punctuation included. So are values continued onto the next line with a
   shell `\`, and YAML `key: |` or `>` blocks. The body is also scanned with placeholder defaults filled in, so
   `--token {{token|…}}` counts. Findings give the line the value is on.
@@ -116,6 +124,13 @@ Focus on {{focus|correctness}}.
   are stripped on save and on insert.
   The preview shows them as `⟦U+XXXX⟧`.
 - Bodies are always rendered as plain text, never as HTML or Markdown.
+
+## Dependencies
+
+- `@get-bb/plugin-sdk` 0.6.49.
+- `yaml` 2.9.1, pinned exactly (eemeli/yaml, no dependencies of its own). It is used only by the server-side
+  secret scan (`src/find-secrets.ts`). The app bundle does not include it: the app imports only React and
+  `@get-bb/plugin-sdk/app`.
 
 ## Install (on the Cloudroom server, aipc)
 

@@ -1,6 +1,10 @@
 import { getField, parseFile, serializeFile, setField, type FrontmatterLine } from "./frontmatter.js";
 import { parsePlaceholders, type Placeholder } from "./placeholders.js";
-import { countInvisible, findSecrets } from "./secrets.js";
+import { findSecrets } from "./find-secrets.js";
+import { countInvisible } from "./secrets.js";
+import { parseTags } from "./tags.js";
+
+export { parseTags };
 
 export type Scope = "global" | "project";
 
@@ -66,16 +70,6 @@ export function uniqueId(base: string, taken: ReadonlySet<string>): string {
     const id = `${base.slice(0, 64 - suffix.length).replace(/-+$/u, "")}${suffix}`;
     if (!taken.has(id)) return id;
   }
-}
-
-export function parseTags(raw: string): string[] {
-  const inner = raw.trim().replace(/^\[(.*)\]$/su, "$1");
-  const tags: string[] = [];
-  for (const part of inner.split(",")) {
-    const t = part.trim().replace(/^["']|["']$/gu, "").toLowerCase();
-    if (t !== "" && !tags.includes(t)) tags.push(t);
-  }
-  return tags;
 }
 
 /** Problems that block a save, in plain words. Empty means valid. */

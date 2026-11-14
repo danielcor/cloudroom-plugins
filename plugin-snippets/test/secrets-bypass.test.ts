@@ -2,7 +2,8 @@
 // punctuation, as real passwords do. Built at runtime so the file holds no
 // literal that a provider's scanner would take for a live key.
 import { describe, expect, it } from "vitest";
-import { findSecrets, scanSecrets } from "../src/secrets.js";
+import { findSecrets } from "../src/find-secrets.js";
+import { scanSecrets } from "../src/secrets.js";
 
 const PUNCT = ["K7m!Q2s@", "T4v#W6x$", "Y8z%aB3d"].join(""); // 24 chars
 const ALNUM = ["aB3dE5gH7jK9mN1p", "Q2sT4vW6xY8zaB3d"].join("");
@@ -96,6 +97,7 @@ describe("secret scan bypasses (round 4)", () => {
     "Authorization: Basic YWJj",
   ])("delta: keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
+    expect(findSecrets({ title: "t", tags: [], body: text })).toEqual([]);
   });
 
   it.each([
@@ -119,5 +121,6 @@ describe("secret scan bypasses (round 4)", () => {
     "Note: the token budget is about 128000 for this model.",
   ])("keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
+    expect(findSecrets({ title: "t", tags: [], body: text })).toEqual([]);
   });
 });

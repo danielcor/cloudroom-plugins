@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { countInvisible, findSecrets, markInvisible, scanSecrets, stripInvisible } from "../src/secrets.js";
+import { findSecrets } from "../src/find-secrets.js";
+import { countInvisible, markInvisible, scanSecrets, stripInvisible } from "../src/secrets.js";
 
 // Built at runtime so this file holds no secret-shaped literal.
 const fake = (prefix: string, n: number, alphabet = "aB3dE5gH7jK9mN1pQ2sT4vW6xY8z") =>
@@ -60,6 +61,7 @@ describe("secret scan", () => {
     "Review {{target}} as a strict senior reviewer.",
   ])("does not flag %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
+    expect(findSecrets({ title: "t", tags: [], body: text })).toEqual([]);
   });
 
   it("catches a token split by invisible characters, which insert would join", () => {

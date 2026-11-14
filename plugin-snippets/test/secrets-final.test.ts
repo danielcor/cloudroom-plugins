@@ -1,5 +1,6 @@
 // Final independent review of 118a3ae: two strict-rule bypasses.
 import { describe, expect, it } from "vitest";
+import { findSecrets } from "../src/find-secrets.js";
 import { scanSecrets } from "../src/secrets.js";
 
 const LITERAL = "literal value for a secret-named key";
@@ -44,6 +45,7 @@ describe("(1) secret-named HTTP headers", () => {
     "apiKey: true",
   ])("keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
+    expect(findSecrets({ title: "t", tags: [], body: text })).toEqual([]);
   });
 });
 
@@ -83,5 +85,6 @@ describe("(2) a value on the line after its key", () => {
     '"password":\n  $PASSWORD # comment',
   ])("keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
+    expect(findSecrets({ title: "t", tags: [], body: text })).toEqual([]);
   });
 });

@@ -3,7 +3,8 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import { useBbContext, useBbNavigate, useRpc, type PluginNavPanelProps } from "@get-bb/plugin-sdk/app";
 import type { SnippetsContract } from "../contract.js";
 import { rank } from "../fuzzy.js";
-import { parseTags, type Scope, type SnippetFields, type SnippetView } from "../model.js";
+import type { Scope, SnippetFields, SnippetView } from "../model.js";
+import { parseTags } from "../tags.js";
 import { parsePlaceholders } from "../placeholders.js";
 import { markInvisible } from "../secrets.js";
 import type { WriteOutcome } from "../store.js";

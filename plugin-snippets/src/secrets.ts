@@ -1,5 +1,3 @@
-import { fillPlaceholders } from "./placeholders.js";
-
 // Secret-shape scan and invisible-character handling. A hit blocks a save;
 // findings name the kind and line only, never the matched value.
 
@@ -169,7 +167,7 @@ function segments(word: string): Segment[] {
 }
 
 /** Text that is empty or a reference stands for nothing (null); a shell default for its text. */
-function referenceLiteral(text: string): string | null {
+export function referenceLiteral(text: string): string | null {
   if (text === "" || REF_EXACT.test(text)) return null;
   const d = DEFAULT_EXACT.exec(text);
   if (d) return d[1] === "" ? null : d[1]!;
@@ -428,24 +426,6 @@ export function scanSecrets(text: string): SecretFinding[] {
   });
 
   return [...found.values()].sort((a, b) => a.line - b.line);
-}
-
-/**
- * Scan a snippet's parts and describe each hit in plain words (no values).
- * Scans with invisible characters removed: insert and the CLI strip them, so a
- * token split by a zero-width space must still count. The body is also scanned
- * with every placeholder default filled in, as Insert would leave it when the
- * fields are empty (`--token {{token|VALUE}}`). Used on create, save and load.
- */
-export function findSecrets(parts: { title: string; tags: readonly string[]; body: string }): string[] {
-  const scan = (t: string) => scanSecrets(stripInvisible(t));
-  const body = stripInvisible(parts.body);
-  const bodyHits = [...scanSecrets(body), ...scanSecrets(fillPlaceholders(body, {}))].map((f) => `${f.kind} on body line ${f.line}`);
-  return [
-    ...scan(parts.title).map((f) => `${f.kind} in the title`),
-    ...scan(parts.tags.join(", ")).map((f) => `${f.kind} in the tags`),
-    ...new Set(bodyHits),
-  ];
 }
 
 // Zero-width and joiner characters, bidi marks (including U+061C ARABIC LETTER
