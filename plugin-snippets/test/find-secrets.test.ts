@@ -33,6 +33,9 @@ describe("YAML/JSON parse", () => {
     ["S1 a fence on a nested list item's marker line", '- - ```json\n    {"pass\\u0077ord":"hunter2"}\n    ```', 2],
     ["S1 a fence on a list item inside a quote", "> - ```yaml\n>   password: hunter2\n>   ```", 2],
     ["S1 a fence in a quote inside a list item", "- > ```yaml\n  > password: hunter2\n  > ```", 2],
+    // Delta review round 3 on 3ad0a77.
+    ["S1 alternating quote/list/quote containers", "> - > ```yaml\n>   > password: hunter2\n>   > ```", 2],
+    ["S1 deeper alternation", "> - > - > ```yaml\n>   >   > password: hunter2\n>   >   > ```", 2],
     ["S2 a tab-indented block mixed with spaces", 'Example:\n\n\tnote: x\n    "pass\\u0077ord": hunter2', 4],
   ])("blocks %s", (_why, body, line) => {
     expect(find(body)).toContain(at(line));

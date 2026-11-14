@@ -116,6 +116,7 @@ describe("SnippetStore", () => {
     it.each([
       ["a fence in a blockquote", "> ```yaml\n> password: hunter2\n> ```"],
       ["a fence in nine nested quotes", ["```yaml", "password: hunter2", "```"].map((l) => "> ".repeat(9) + l).join("\n")],
+      ["alternating quote/list/quote containers", "> - > ```yaml\n>   > password: hunter2\n>   > ```"],
       ["a fence on a nested list item", '- - ```json\n    {"pass\\u0077ord":"hunter2"}\n    ```'],
       ["too deeply nested to parse", "[".repeat(7000) + '{"pass\\u0077ord":"hunter2"}' + "]".repeat(7000)],
     ])("parser: blocks %s", async (_why, body) => {
