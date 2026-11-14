@@ -93,6 +93,9 @@ const DEFAULT_EXACT = /^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=?+]([^}]*)\}$/su;
 const ATOMIC = /^(?:\$\([^)\n]*\)|`[^`\n]*`|\$?\{\{[^}\n]*\}\})/u;
 // Unquoted shell syntax ends a shell word: `$VAR; echo`, `${VAR}&& deploy`.
 const SHELL_DELIM = /[;&|<>)]/u;
+// An HTTP header name (`X-API-Key`, `Private-Token`): its value is header text, so a
+// bare `X-API-Key: true` line gets no boolean/null exemption.
+const HEADER_NAME = /^[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+$/u;
 // Unquoted YAML/JSON booleans and null are not secrets (`require_password: true`).
 // Only for a plain YAML/JSON scalar: `PASSWORD=true` or `password: "null"` is literal.
 const SCALAR = /^(?:true|false|null|yes|no|on|off|~)$/iu;
@@ -191,11 +194,11 @@ function literalText(segs: readonly Segment[], runtime: boolean): string | null 
  * empty or a reference. Plain: also null for a block indicator (`|`, `>-`) or an
  * unquoted boolean or null. `$(cmd)` is not run in YAML/JSON, so it is literal.
  */
-function scalarLiteral(raw: string): string | null {
+function scalarLiteral(raw: string, scalarsAreSafe = true): string | null {
   const t = raw.trim();
   const quoted = t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")));
   if (quoted) return referenceLiteral(t.slice(1, -1));
-  if (SCALAR.test(t) || /^[|>][+-]?\d?[+-]?$/u.test(t)) return null;
+  if ((scalarsAreSafe && SCALAR.test(t)) || /^[|>][+-]?\d?[+-]?$/u.test(t)) return null;
   return referenceLiteral(t);
 }
 
@@ -220,21 +223,25 @@ function splitFirstColon(segs: readonly Segment[]): [string, Segment[]] | null {
 
 // A key whose value is on a later line: `password:` (YAML or a JSON line, at line
 // start) or `, "password":` / `{"password":` at the end of a line (JSON/flow).
-const KEY_ONLY = /^([ \t]*)(?:-[ \t]+)*["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*:[ \t]*(?:#.*)?$/u;
+const KEY_ONLY = /^([ \t]*)(?:-[ \t]+)*(["']?)([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*:[ \t]*(?:#.*)?$/u;
 const KEY_AT_END = /[{,][ \t]*["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?[ \t]*:[ \t]*$/u;
 const LEADING_QUOTED = new RegExp(`^(${YAML_QUOTED})`, "u");
 // The next line opens a nested mapping (`user: app`, `"user": "app"`), not a scalar.
 const MAPPING_KEY = new RegExp(`^(?:${YAML_QUOTED}|[A-Za-z_][A-Za-z0-9_.-]*)[ \\t]*:(?:[ \\t]|$)`, "u");
 
 /**
- * The scalar a key with no value on its own line takes from the next non-blank
- * line, or null when that line is not one: a nested mapping or list, or (YAML,
- * plain) a line that is not indented deeper than the key. Quoted: the leading
+ * The scalar a key with no value on its own line takes from the next line that
+ * is not blank or a `#` comment, or null when that line is not one: a nested
+ * mapping or list, a flow collection, or (YAML, plain) a line that is not
+ * indented deeper than the key. `flow`: JSON/flow context (a quoted key, or a
+ * key after `{` or `,`), where indentation does not matter. Quoted: the leading
  * quoted string. Plain: up to ` # comment`, and in JSON/flow up to `,` `}` `]`.
  */
 function continuedScalar(keyIndent: number, flow: boolean, next: string): string | null {
   const t = next.trim();
   if (t === "" || MAPPING_KEY.test(t) || t === "-" || t.startsWith("- ")) return null;
+  // A flow mapping or list (`{user: app}`, `[one, two]`), not a `{{placeholder}}`, is not a scalar.
+  if (t.startsWith("[") || (t.startsWith("{") && !t.startsWith("{{"))) return null;
   const q = LEADING_QUOTED.exec(t);
   if (q) return q[1]!;
   if (!flow && next.length - next.trimStart().length <= keyIndent) return null;
@@ -318,7 +325,7 @@ export function scanSecrets(text: string): SecretFinding[] {
       if (!isSecretName(m[1]!)) continue;
       const raw = m[group]!;
       let lit: string | null;
-      if (mode === "scalar") lit = scalarLiteral(raw);
+      if (mode === "scalar") lit = scalarLiteral(raw, !HEADER_NAME.test(m[1]!));
       // After a spaced flag, another option or a shell operator is not its value.
       else if (mode === "flag" && /^[-<>|;&]/u.test(raw)) lit = null;
       else lit = literalText(segments(raw), true);
@@ -329,7 +336,10 @@ export function scanSecrets(text: string): SecretFinding[] {
     for (const m of l.text.matchAll(CURL_HEADER)) {
       const split = splitFirstColon(segments(m[1]!));
       if (!split || !isSecretName(split[0].trim())) continue;
-      const value = split[1].map((seg, k) => (k === 0 ? { ...seg, text: seg.text.replace(/^[ \t]+/u, "") } : seg));
+      // curl drops the spaces before a header value, across quoted pieces (`"X-API-Key:"" $KEY"`).
+      const value = [...split[1]];
+      while (value.length > 0 && /^[ \t]*$/u.test(value[0]!.text)) value.shift();
+      if (value.length > 0) value[0] = { ...value[0]!, text: value[0]!.text.replace(/^[ \t]+/u, "") };
       if (literalText(value, true) !== null) add(LITERAL_KIND, at(m, 1));
     }
     for (const m of l.text.matchAll(CURL_USER)) {
@@ -342,12 +352,14 @@ export function scanSecrets(text: string): SecretFinding[] {
   physical.forEach((raw, i) => {
     const line = KEY_ONLY.exec(raw);
     const end = line ? null : KEY_AT_END.exec(raw);
-    const name = line?.[2] ?? end?.[1];
+    const name = line?.[3] ?? end?.[1];
     if (name === undefined || !isSecretName(name)) return;
-    const j = physical.findIndex((p, k) => k > i && p.trim() !== "");
+    // Skip blank lines and YAML `#` comment lines.
+    const j = physical.findIndex((p, k) => k > i && p.trim() !== "" && !p.trim().startsWith("#"));
     if (j === -1) return;
     const keyIndent = line ? line[1]!.length : raw.length - raw.trimStart().length;
-    const value = continuedScalar(keyIndent, end !== null, physical[j]!);
+    const flow = end !== null || line?.[2] !== "";
+    const value = continuedScalar(keyIndent, flow, physical[j]!);
     if (value !== null && scalarLiteral(value) !== null) add(LITERAL_KIND, j + 1);
   });
 
