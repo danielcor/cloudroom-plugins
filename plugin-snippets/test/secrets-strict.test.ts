@@ -9,6 +9,13 @@ const kinds = (text: string) => scanSecrets(text).map((f) => `${f.line}:${f.kind
 
 describe("strict rule for secret-named keys", () => {
   it.each([
+    ["URL userinfo with a command substitution", "git clone https://user:$(hunter2)@example.com/r.git"],
+    ["curl credentials with a command substitution", "curl -u 'user:$(hunter2)' https://example.com"],
+  ])("S2 keeps URL and curl checks without a runtime exemption: %s", (_why, text) => {
+    expect(scanSecrets(text)).not.toEqual([]);
+  });
+
+  it.each([
     ["S14: random all-caps word plus a mixed word", "export PASSWORD='DQLXMFRTVZNP aB3dE5gH7jK9'", 1],
     ["guidance written as an assignment (expected under this rule)", 'password: "choose a new one"', 1],
     ["a short password", "password: hunter2", 1],
@@ -21,6 +28,17 @@ describe("strict rule for secret-named keys", () => {
     ["a YAML block of words", "api_token: |\n  plain words here\n", 2],
     ["a shell default", "export API_TOKEN=${API_TOKEN:-dev}", 1],
     ["a quoted reference with a literal suffix", 'export TOKEN="${TOKEN}x"', 1],
+    // Delta review round 1 on 82c5a84.
+    ["S1 a boolean word after = is a literal string", "PASSWORD=true", 1],
+    ["S1 a boolean word after a flag", "deploy --password no", 1],
+    ["S1 a quoted null", 'password: "null"', 1],
+    ["S1 block text that says true", "api_token: |\n  true\n", 2],
+    ["S2 a literal after a command substitution", 'TOKEN="$(echo)hunter2"', 1],
+    ["S2 a literal after a placeholder", 'password: "{{x}}hunter2"', 1],
+    ["S3 a nested YAML sequence", "- - password: aB3dE5gH7jK9mN1pQ2sT4vW6x", 1],
+    ["S4 a literal after an empty quoted segment", 'PASSWORD=""hunter2', 1],
+    ["S4 a literal after a quoted reference", 'PASSWORD="$PASSWORD"hunter2', 1],
+    ["S5 quoted whitespace", 'password: "   "', 1],
   ])("blocks %s", (_why, text, line) => {
     expect(kinds(text)).toContain(`${line}:${LITERAL}`);
   });
@@ -48,6 +66,12 @@ describe("strict rule for secret-named keys", () => {
     "gh auth login --with-token < token.txt",
     "deploy --token --verbose",
     "Note: the token budget is about 128000.",
+    "TOKEN=$(gh auth token) deploy",
+    'TOKEN="$(gh auth token)"',
+    "password: ${{ secrets.DB_PASSWORD }} # from CI",
+    "- - password: $PASSWORD",
+    'PASSWORD="$PASSWORD"',
+    "PASSWORD=$PASSWORD;echo ok",
   ])("keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
   });

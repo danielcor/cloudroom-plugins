@@ -72,15 +72,22 @@ Focus on {{focus|correctness}}.
   credential(s), or is `key`, `pwd`, `auth`, `pat`, or a compound like `apikey` or `accesskey`. Names are split
   on `_`, `.`, `-`, camelCase and acronyms. So `--password-file` and `--token-count` are not secret-named.
 
-  These are **not** literal values:
-  - references: `$VAR`, `${VAR}`, `%VAR%`, `{{placeholder}}`;
-  - run-time values: `$(cmd)`, backticks, `${{ secrets.X }}`;
-  - the empty string, and `true`, `false` or `null`;
+  A value is the whole shell word, so `""hunter2`, `"$PASSWORD"hunter2` and `"   "` are literal. These parts of
+  a word are **not** literal:
+  - references: `$VAR`, `${VAR}`, `%VAR%`, `{{placeholder}}`, `${{ secrets.X }}`;
+  - a whole `$(cmd)` or backtick command, for a secret-named key or flag only (`"$(echo)hunter2"` is literal, and
+    URL and curl passwords get no such exemption);
+  - the empty string.
+
+  Also not values:
+  - unquoted `true`, `false` or `null` as a YAML or JSON value (`PASSWORD=true` and `password: "null"` are
+    literal);
   - for a spaced flag, a following option or shell operator (`--with-token < file`).
 
-  In an unquoted shell word, shell syntax after a reference ends it (`$VAR; echo`). Inside quotes, a URL or a
-  YAML value, `${VAR}text` is literal. A shell default `${VAR:-text}` counts as `text`. `key: value` counts only
-  where a YAML or JSON key can start, so prose like "the password: it must be long" stays clean.
+  In a shell word (after `=` or a flag), an unquoted `;&|<>)` ends it (`$VAR; echo`). Inside quotes, a URL or a
+  YAML value, `${VAR};text` is literal. A shell default `${VAR:-text}` counts as `text`. `key: value` counts
+  only where a YAML or JSON key can start (line start, after one or more `- `, `{`, `,` or `[`), so prose like
+  "the password: it must be long" stays clean.
 
   Values are taken whole, quoted or not, punctuation included. So are values continued onto the next line with a
   shell `\`, and YAML `key: |` or `>` blocks. The body is also scanned with placeholder defaults filled in, so
