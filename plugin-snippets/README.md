@@ -61,29 +61,36 @@ Focus on {{focus|correctness}}.
 - The plugin never submits. Insert only appends visible, editable text.
 - **Secret scan.** It checks for:
   - private keys, AWS, GitHub, `sk-`, Slack and Google keys, JWTs and bearer tokens (in any case);
-  - passwords in URLs (`postgres://user:pass@host`), `Authorization: Basic …`, and `curl -u`/`--user user:pass`;
-  - long random values assigned to a secret-ish name. That covers `API_TOKEN=…`, `DATABASE_PASSWORD: …`,
-    `"apiKey": "…"`, `APIToken=…`, `clientsecret: …`, and CLI flags such as `--api-key=…` or `--token …`.
+  - passwords in URLs (`postgres://user:pass@host`, also `https://:pass@host`), `Authorization: Basic …` that
+    decodes (UTF-8 or Latin-1) to `user:password`, and `curl -u`/`-uuser:pass`/`--user user:pass`;
+  - **any literal value assigned to a secret-named key or flag**, whatever it looks like. This is the strict
+    rule (Daniel, 2026-11-13). It covers `API_TOKEN=…`, `DATABASE_PASSWORD: …`, `"apiKey": "…"`,
+    `clientsecret: …`, `--api-key=…` and `--token …`. Guidance written as an assignment also blocks, for
+    example `password: "choose a new one"`: reword it, or write a reference.
 
-  Names are split on `_`, `.`, `-`, camelCase and acronyms. The last word counts when it ends in token, secret,
-  password, passwd, passphrase or credential(s), or when it is `key`, `pwd`, `auth`, `pat`, or a compound like
-  `apikey` or `accesskey`. The whole value is checked, quoted or not, punctuation included. So are values
-  continued onto the next line with a shell `\`, and YAML `key: |` or `>` blocks. Findings give the line the
-  value is on.
+  A name is secret-named when its last word ends in token, secret, password, passwd, passphrase or
+  credential(s), or is `key`, `pwd`, `auth`, `pat`, or a compound like `apikey` or `accesskey`. Names are split
+  on `_`, `.`, `-`, camelCase and acronyms. So `--password-file` and `--token-count` are not secret-named.
 
-  References are not values: `$VAR`, `${VAR}` and `{{placeholder}}` stay clean, also when shell syntax follows
-  (`$VAR; echo`) in an unquoted shell word (after `=` or a flag). Inside quotes, a URL or a YAML `key: value`,
-  `${VAR};text` is checked as literal text.
-  `user@host` with no password stays clean. A shell default is a value: `${VAR:-text}` is checked as `text`.
-  A value with spaces counts as prose when at least half its words are ordinary words or all-caps words, so
-  quoted guidance such as `password: "Choose a different one"` or `"Do NOT COMMIT PASSWORDS"` stays clean. Otherwise it is checked whole as well as word by word.
-  `Authorization: Basic …` counts when it decodes, as UTF-8 or Latin-1, to `user:password`. URLs with an empty user name (`https://:pass@host`) and curl's attached `-uuser:pass` are
-  covered too. The body is also scanned with placeholder defaults filled in, so `--token {{token|…}}` counts.
+  These are **not** literal values:
+  - references: `$VAR`, `${VAR}`, `%VAR%`, `{{placeholder}}`;
+  - run-time values: `$(cmd)`, backticks, `${{ secrets.X }}`;
+  - the empty string, and `true`, `false` or `null`;
+  - for a spaced flag, a following option or shell operator (`--with-token < file`).
 
-  On save, a hit blocks the save and names the kind and the line, never the value. On load, a hit shows a
-  warning badge, and the picker then needs a confirmation before it inserts. `room-cli snip show` refuses to
-  print the snippet, and `room-cli snip list` shows only its id. The scan runs with invisible characters
-  removed, so a token split by a zero-width space still counts.
+  In an unquoted shell word, shell syntax after a reference ends it (`$VAR; echo`). Inside quotes, a URL or a
+  YAML value, `${VAR}text` is literal. A shell default `${VAR:-text}` counts as `text`. `key: value` counts only
+  where a YAML or JSON key can start, so prose like "the password: it must be long" stays clean.
+
+  Values are taken whole, quoted or not, punctuation included. So are values continued onto the next line with a
+  shell `\`, and YAML `key: |` or `>` blocks. The body is also scanned with placeholder defaults filled in, so
+  `--token {{token|…}}` counts. Findings give the line the value is on.
+
+  On save, a hit blocks the save. The message names the kind and the line, never the value, and says to use
+  `$PASSWORD` or `{{password}}` instead of a literal value. On load, a hit shows a warning badge, and the
+  picker then needs a confirmation before it inserts. `room-cli snip show` refuses to print the snippet, and
+  `room-cli snip list` shows only its id. The scan runs with invisible characters removed, so a token split by
+  a zero-width space still counts.
 - **Invisible characters.** Zero-width, bidi (including U+061C ARABIC LETTER MARK) and Unicode tag characters
   are stripped on save and on insert.
   The preview shows them as `⟦U+XXXX⟧`.

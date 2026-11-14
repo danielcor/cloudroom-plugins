@@ -303,7 +303,8 @@ function check(f: SnippetFields): Extract<WriteOutcome, { outcome: "blocked" }> 
   if (secrets.length) {
     reasons.push(
       `Looks like a secret (${secrets.join("; ")}). ` +
-        "Name the environment variable instead of pasting its value; use `room-cli secret request` for real credentials.",
+        "For a secret-named key or flag, use $PASSWORD or {{password}} instead of a literal value; " +
+        "use `room-cli secret request` for real credentials.",
     );
   }
   return reasons.length ? { outcome: "blocked", reasons } : null;

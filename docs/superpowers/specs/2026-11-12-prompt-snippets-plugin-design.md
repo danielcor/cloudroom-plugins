@@ -246,6 +246,7 @@ Snippets are prompts. Whoever controls a snippet's text controls what an agent i
 5. **Project folder:** `.snippets/` at the repo root, committed in each repo (revised 2026-11-13). This replaces the `.cloudroom/snippets/` folder used elsewhere in this spec: Cloudroom puts a `.gitignore` containing `*` in `.cloudroom/`, which would keep snippets out of Git. The plugin never edits `.cloudroom/.gitignore`.
 6. **Default shortcut:** `Ctrl+Alt+S`.
 7. **Typed `~name` trigger:** not built. Every insert stays visible in the composer.
+8. **Secret scan: strict rule for secret-named keys (Daniel, 2026-11-13).** Any literal value assigned to a secret-named key or flag blocks the save, whatever its entropy, unless it is a reference (`$VAR`, `${VAR}`, `%VAR%`, `{{x}}`) or empty. The entropy and prose heuristics are removed for secret-named keys only. The known token shapes, the URL userinfo, Basic and curl rules, the multiline handling and the placeholder-default expansion stay. The blocked message tells the user to use `$PASSWORD` or `{{password}}` instead of a literal value. Guidance written as an assignment (`password: "choose a new one"`) is blocked too, as accepted.
 
 ## Spike results (2026-11-13, Cloudroom v152, host SDK 0.6.51)
 

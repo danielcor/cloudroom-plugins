@@ -24,12 +24,17 @@ const PATTERNS: readonly { kind: string; re: RegExp }[] = [
 // unquote()), or an unquoted run up to whitespace. Punctuation stays inside.
 const VALUE = `("(?:[^"\\\\\\n]|\\\\.)*"|'[^'\\n]*'|[^\\s"']+)`;
 const NAME = "([A-Za-z_][A-Za-z0-9_.-]*)";
-// `NAME = VALUE`, `NAME: VALUE`, `"NAME": "VALUE"`, `--NAME=VALUE`. The whole name is taken
-// (`API_TOKEN`, `DATABASE_PASSWORD`, `apiKey`), so a `\b` cannot hide it behind `_`.
+// Strict rule (Daniel, 2026-11-13): a literal value assigned to a secret-named key
+// or flag is a finding, whatever its entropy; see literalOf() for what is not literal.
+// The whole name is taken (`API_TOKEN`, `DATABASE_PASSWORD`, `apiKey`), so a `\b`
+// cannot hide it behind `_`. All three are zero-width lookaheads, so every name is
+// inspected: an earlier match never consumes a later name.
+// `NAME=VALUE`, `--NAME=VALUE`, `export NAME="VALUE"`: anywhere on the line.
+const ASSIGN_EQ = new RegExp(`(?<![A-Za-z0-9_.-])(?=-*${NAME}["']?[ \\t]*=[ \\t]*${VALUE})`, "dgu");
+// `NAME: VALUE`, `"NAME": "VALUE"`: only where a YAML or JSON key can start (line
+// start, `- `, `{`, `,`, `[`), so prose such as `the password: it must be long` is not one.
+const ASSIGN_COLON = new RegExp(`(?<=^[ \\t]*(?:-[ \\t]+)?["']?|[{,[][ \\t]*["']?)(?=${NAME}["']?[ \\t]*:[ \\t]*${VALUE})`, "dgu");
 // `--NAME VALUE`, `-NAME "VALUE"`: a flag, whitespace, then the value.
-// Both are zero-width lookaheads, so every name is inspected: an earlier match
-// never consumes a later name (`--verbose --registry-password VALUE`).
-const ASSIGNED = new RegExp(`(?<![A-Za-z0-9_.-])(?=-*${NAME}["']?[ \\t]*([:=])[ \\t]*${VALUE})`, "dgu");
 const FLAG_SPACED = new RegExp(`(?<![A-Za-z0-9_.-])(?=--?${NAME}[ \\t]+${VALUE})`, "dgu");
 // scheme://user:password@host (the user name may be empty: https://:password@host)
 const URL_USERINFO = /\b[a-z][a-z0-9+.-]*:\/\/[^\s/?#@:]*:([^\s/?#@]+)@/dgiu;
@@ -60,28 +65,15 @@ export function isSecretName(name: string): boolean {
   return SECRET_WORDS.has(last) || SECRET_ENDINGS.some((e) => last.endsWith(e));
 }
 
-function entropy(s: string): number {
-  const counts = new Map<string, number>();
-  for (const c of s) counts.set(c, (counts.get(c) ?? 0) + 1);
-  let h = 0;
-  for (const n of counts.values()) {
-    const p = n / s.length;
-    h -= p * Math.log2(p);
-  }
-  return h;
-}
-
-function looksRandom(v: string): boolean {
-  const classes = [/[a-z]/u, /[A-Z]/u, /[0-9]/u].filter((r) => r.test(v)).length;
-  return v.length >= 16 && classes >= 2 && entropy(v) >= 3.5;
-}
-
 function unquote(v: string): string {
   if (v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) return v.slice(1, -1);
   return v;
 }
 
-const REF = "(?:\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}|\\$?\\{\\{[^}]*\\}\\})";
+const REF = "(?:\\$[A-Za-z_][A-Za-z0-9_]*|\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}|%[A-Za-z_][A-Za-z0-9_]*%|\\$?\\{\\{[^}]*\\}\\})";
+// Read from elsewhere at run time: `$(cmd)`, `` `cmd` ``, or a template that an
+// unquoted value cuts at its first space (`${{ secrets.X }}`, `{{ x }}`).
+const RUNTIME_START = /^(?:\$\(|`|\$?\{\{)/u;
 // An unquoted shell word ends at shell syntax: `$VAR; echo`, `${VAR}&& deploy`.
 const SHELL_END = "(?:[;&|<>)].*)?";
 const PLAIN_REF = new RegExp(`^${REF}$`, "su");
@@ -91,7 +83,8 @@ const DEFAULT_REF_SHELL = new RegExp(`^\\$\\{[A-Za-z_][A-Za-z0-9_]*:?[-=?+]([^}]
 
 /**
  * The literal text a value stands for. A plain reference (`$VAR`, `${VAR}`,
- * `${{ expr }}`, `{{placeholder}}`) stands for nothing: null. A shell default
+ * `%VAR%`, `{{placeholder}}`) or a run-time value (`$(cmd)`, backticks,
+ * `${{ expr }}`) stands for nothing: null. A shell default
  * (`${VAR:-text}`) stands for its text. Anything else stands for itself.
  * `shellWord`: the value was an unquoted shell word, so shell syntax after the
  * reference (`$VAR; echo`) ends it. Inside quotes or URL userinfo it does not:
@@ -99,26 +92,23 @@ const DEFAULT_REF_SHELL = new RegExp(`^\\$\\{[A-Za-z_][A-Za-z0-9_]*:?[-=?+]([^}]
  */
 export function literalOf(v: string, shellWord = false): string | null {
   const t = v.trim();
-  if ((shellWord ? PLAIN_REF_SHELL : PLAIN_REF).test(t)) return null;
+  if ((shellWord ? PLAIN_REF_SHELL : PLAIN_REF).test(t) || RUNTIME_START.test(t)) return null;
   const d = (shellWord ? DEFAULT_REF_SHELL : DEFAULT_REF).exec(t);
   return d ? d[1]! : t;
 }
 
-/** An ordinary word, maybe with punctuation: `Choose`, `account.`, or all caps for emphasis and acronyms (`NOT`, `API`). */
-const PROSE_WORD = /^[("'`]*(?:[A-Za-z][a-z]+|[A-Z]{2,})[.,;:!?'"`)]*$/u;
+// YAML/JSON booleans and null are not secrets (`require_password: true`).
+const SCALAR = /^(?:true|false|null|yes|no|on|off|~)$/iu;
 
 /**
- * Random-looking. A value with spaces is prose when at least half its words are
- * ordinary words: then only a random word counts (`use <token> for staging`).
- * Otherwise the whole value counts too, spaces removed (`aB3dE5gH7jK9 mN1pQ2sT4vW6x`).
+ * A literal value under the strict rule: not empty, not a reference (see
+ * literalOf), not a YAML/JSON boolean or null. `flagValue`: the value follows a
+ * flag after a space, so another option (`--verbose`) or a shell operator
+ * (`< token.txt`) is not its value.
  */
-function isSecretValue(v: string | null): boolean {
-  if (v === null) return false;
-  if (!/\s/u.test(v)) return looksRandom(v);
-  const words = v.split(/\s+/u).filter(Boolean);
-  if (words.some((w) => looksRandom(w))) return true;
-  const prose = words.filter((w) => PROSE_WORD.test(w)).length;
-  return prose * 2 < words.length && looksRandom(words.join(""));
+function isLiteral(v: string | null, flagValue = false): boolean {
+  if (v === null || v.trim() === "" || SCALAR.test(v.trim())) return false;
+  return !(flagValue && /^[-<>|;&]/u.test(v));
 }
 
 /**
@@ -174,6 +164,9 @@ function lineAt(l: LogicalLine, offset: number): number {
   return line;
 }
 
+/** The finding for the strict rule; the save gate tells the user how to reword it. */
+export const LITERAL_KIND = "literal value for a secret-named key";
+
 export function scanSecrets(text: string): SecretFinding[] {
   const found = new Map<string, SecretFinding>();
   const add = (kind: string, line: number) => found.set(`${line}\u0000${kind}`, { kind, line });
@@ -182,16 +175,19 @@ export function scanSecrets(text: string): SecretFinding[] {
   for (const l of logicalLines(physical)) {
     const at = (m: RegExpMatchArray, group: number) => lineAt(l, m.indices?.[group]?.[0] ?? m.index ?? 0);
     for (const { kind, re } of PATTERNS) for (const m of l.text.matchAll(re)) add(kind, at(m, 0));
-    // [match, value group, shell word?]. Only an unquoted value after `=` (a shell
-    // assignment or `--flag=`) or after a flag is a shell word; `key: value` is YAML/JSON.
-    const named: [RegExpMatchArray, number, boolean][] = [
-      ...[...l.text.matchAll(ASSIGNED)].map((m): [RegExpMatchArray, number, boolean] => [m, 3, m[2] === "="]),
-      ...[...l.text.matchAll(FLAG_SPACED)].map((m): [RegExpMatchArray, number, boolean] => [m, 2, true]),
+    // [match, value group, shell word?, flag value?]. Only an unquoted value after `=`
+    // (a shell assignment or `--flag=`) or after a flag is a shell word; `key: value` is YAML/JSON.
+    type Named = [RegExpMatchArray, number, boolean, boolean];
+    const named: Named[] = [
+      ...[...l.text.matchAll(ASSIGN_EQ)].map((m): Named => [m, 2, true, false]),
+      // `key: |` / `key: >-` opens a YAML block: its lines are checked below, not the indicator.
+      ...[...l.text.matchAll(ASSIGN_COLON)].filter((m) => !/^[|>][+-]?\d?[+-]?$/u.test(m[2]!)).map((m): Named => [m, 2, false, false]),
+      ...[...l.text.matchAll(FLAG_SPACED)].map((m): Named => [m, 2, true, true]),
     ];
-    for (const [m, group, shell] of named) {
+    for (const [m, group, shell, flagValue] of named) {
       const raw = m[group]!;
       const quoted = raw.startsWith('"') || raw.startsWith("'");
-      if (isSecretName(m[1]!) && isSecretValue(literalOf(unquote(raw), shell && !quoted))) add("secret-looking value", at(m, group));
+      if (isSecretName(m[1]!) && isLiteral(literalOf(unquote(raw), shell && !quoted), flagValue && !quoted)) add(LITERAL_KIND, at(m, group));
     }
     for (const m of l.text.matchAll(URL_USERINFO)) if (literalOf(m[1]!)) add("password in a URL", at(m, 1));
     for (const m of l.text.matchAll(BASIC_AUTH)) if (isBasicCredentials(m[1]!)) add("Basic auth credentials", at(m, 1));
@@ -217,11 +213,9 @@ export function scanSecrets(text: string): SecretFinding[] {
       block.push({ text: next.trim(), line: j + 1 });
     }
     if (block.length === 0) return;
-    const hit = block.find((b) => isSecretValue(literalOf(b.text)));
-    // A value folded over several lines: join them when each line is one word.
-    const joined = block.every((b) => !/\s/u.test(b.text)) ? block.map((b) => b.text).join("") : "";
-    if (hit) add("secret-looking value", hit.line);
-    else if (joined && isSecretValue(literalOf(joined))) add("secret-looking value", block[0]!.line);
+    // Any literal line in the block is the value.
+    const hit = block.find((b) => isLiteral(literalOf(b.text)));
+    if (hit) add(LITERAL_KIND, hit.line);
   });
 
   return [...found.values()].sort((a, b) => a.line - b.line);

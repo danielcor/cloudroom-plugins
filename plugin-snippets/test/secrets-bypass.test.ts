@@ -11,6 +11,19 @@ const B64 = Buffer.from(`deploy:${PUNCT}`).toString("base64");
 const lines = (text: string) => scanSecrets(text).map((f) => f.line);
 
 describe("secret scan bypasses (round 4)", () => {
+  // Guidance written as a `key: value` assignment was clean under the entropy
+  // heuristic; under the strict rule (Daniel, 2026-11-13) it blocks, as decided.
+  it.each([
+    'password: "Choose a different password for each account"',
+    "token: 'Use the API key from your 1Password vault'",
+    'password: "Do NOT reuse it across CI and prod"',
+    'password: "Do NOT COMMIT PASSWORDS"',
+    'token: "Use YOUR OWN API KEY from ENV"',
+    "token: 'Paste the token from the dashboard here'",
+  ])("strict rule: blocks guidance written as an assignment: %s", (text) => {
+    expect(scanSecrets(text).map((f) => f.kind)).toEqual(["literal value for a secret-named key"]);
+  });
+
   it.each([
     ["shell export, single quotes", `export DATABASE_PASSWORD='${PUNCT}'`],
     ["shell export, double quotes", `export DATABASE_PASSWORD="${PUNCT}"`],
@@ -33,8 +46,8 @@ describe("secret scan bypasses (round 4)", () => {
   });
 
   it("(3) catches a secret hidden in a placeholder default", () => {
-    expect(findSecrets({ title: "t", tags: [], body: `intro\nrun --token {{token|${PUNCT}}}` })).toEqual(["secret-looking value on body line 2"]);
-    expect(findSecrets({ title: "t", tags: [], body: `export API_KEY={{key|${ALNUM}}}` })).toEqual(["secret-looking value on body line 1"]);
+    expect(findSecrets({ title: "t", tags: [], body: `intro\nrun --token {{token|${PUNCT}}}` })).toEqual(["literal value for a secret-named key on body line 2"]);
+    expect(findSecrets({ title: "t", tags: [], body: `export API_KEY={{key|${ALNUM}}}` })).toEqual(["literal value for a secret-named key on body line 1"]);
   });
 
   it.each([`authorization: bearer ${ALNUM}`, `AUTHORIZATION: BEARER ${ALNUM}`, `-H "Authorization: Bearer ${ALNUM}"`])("(4) bearer in any case: %s", (text) => {
@@ -76,17 +89,11 @@ describe("secret scan bypasses (round 4)", () => {
   it.each([
     "Explain Authorization: Basic authentication.",
     "Authorization: Basic auth is weaker than tokens.",
-    'password: "Choose a different password for each account"',
-    "token: 'Paste the token from the dashboard here'",
     "export DATABASE_PASSWORD=$DATABASE_PASSWORD_2026; echo done",
     "export API_TOKEN=${API_TOKEN}&& deploy",
     "curl -u admin: https://example.com",
     "curl -uadmin https://example.com",
-    "token: 'Use the API key from your 1Password vault'",
-    'password: "Do NOT reuse it across CI and prod"',
     "Authorization: Basic YWJj",
-    'password: "Do NOT COMMIT PASSWORDS"',
-    'token: "Use YOUR OWN API KEY from ENV"',
   ])("delta: keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
   });

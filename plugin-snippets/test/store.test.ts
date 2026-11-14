@@ -79,6 +79,27 @@ describe("SnippetStore", () => {
     expect(await store.create(G, { title: "Count", tags: [], body: "run --token-count 5 --password-file /etc/pw" })).toMatchObject({ outcome: "saved" });
   });
 
+  describe("save gate, strict rule for secret-named keys", () => {
+    it.each(["export PASSWORD='DQLXMFRTVZNP aB3dE5gH7jK9'", 'password: "choose a new one"', "deploy --token aaaaaaaaaaaaaaaaaaaa"])(
+      "blocks %s and says how to reword it",
+      async (body) => {
+        const { store, files } = setup();
+        const r = await store.create(G, { title: "T", tags: [], body });
+        expect(r.outcome).toBe("blocked");
+        expect(r.outcome === "blocked" && r.reasons.join(" ")).toContain("use $PASSWORD or {{password}} instead of a literal value");
+        expect(files.writes).toEqual([]);
+      },
+    );
+
+    it.each(["export PASSWORD=$PASSWORD", "password: {{password}}", "set PASSWORD=%PASSWORD%", "deploy --password-file /etc/pw --token-count 5", "Remember the password: it must be long."])(
+      "saves %s",
+      async (body) => {
+        const { store } = setup();
+        expect(await store.create(G, { title: "T", tags: [], body })).toMatchObject({ outcome: "saved" });
+      },
+    );
+  });
+
   describe("save gate for the round-4 bypasses", () => {
     const PUNCT = ["K7m!Q2s@", "T4v#W6x$", "Y8z%aB3d"].join("");
     const ALNUM = ["aB3dE5gH7jK9mN1p", "Q2sT4vW6xY8zaB3d"].join("");
@@ -112,10 +133,7 @@ describe("SnippetStore", () => {
 
     it.each([
       "Explain Authorization: Basic authentication.",
-      'password: "Choose a different password for each account"',
       "export DATABASE_PASSWORD=$DATABASE_PASSWORD_2026; echo done",
-      'password: "Do NOT COMMIT PASSWORDS"',
-      'token: "Use YOUR OWN API KEY from ENV"',
     ])("still saves guidance and references: %s", async (body) => {
       const { store } = setup();
       expect(await store.create(G, { title: "Guide", tags: [], body })).toMatchObject({ outcome: "saved" });
@@ -124,7 +142,7 @@ describe("SnippetStore", () => {
     it("flags a placeholder-default secret on load", async () => {
       const { store } = setup({ [`${G.dir}/x.md`]: `---\ntitle: X\n---\nrun --token {{token|${PUNCT}}}` });
       const [view] = await store.list(G);
-      expect(view!.secrets).toEqual(["secret-looking value on body line 1"]);
+      expect(view!.secrets).toEqual(["literal value for a secret-named key on body line 1"]);
     });
   });
 
