@@ -93,9 +93,13 @@ const DEFAULT_EXACT = /^\$\{[A-Za-z_][A-Za-z0-9_]*:?[-=?+]([^}]*)\}$/su;
 const ATOMIC = /^(?:\$\([^)\n]*\)|`[^`\n]*`|\$?\{\{[^}\n]*\}\})/u;
 // Unquoted shell syntax ends a shell word: `$VAR; echo`, `${VAR}&& deploy`.
 const SHELL_DELIM = /[;&|<>)]/u;
-// An HTTP header name, any case (`X-API-Key`, `x-api-key`, `Private-Token`). On a bare
-// header line (unquoted name at line start) the value is header text: no YAML exemptions.
-const HEADER_NAME = /^[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+$/u;
+// An HTTP header name: capitalized (`ApiKey`, `X-API-Key`, `Private-Token`) or lowercase
+// with hyphens (`x-api-key`). A `Name: value` line is the same text in YAML and HTTP, so a
+// line counts as a header only when it is unindented, its name is unquoted and
+// header-shaped, and its value does not open a YAML block (`api-token: |` + indented
+// lines). Then the value is header text, with no YAML exemptions. `apiKey: true`,
+// `require_password: true` and any indented key stay YAML.
+const HEADER_NAME = /^(?:[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*|[a-z][a-z0-9]*(?:-[a-z0-9]+)+)$/u;
 // Unquoted YAML/JSON booleans and null are not secrets (`require_password: true`).
 // Only for a plain YAML/JSON scalar: `PASSWORD=true` or `password: "null"` is literal.
 const SCALAR = /^(?:true|false|null|yes|no|on|off|~)$/iu;
@@ -237,21 +241,32 @@ const MAPPING_KEY = new RegExp(`^(?:${YAML_QUOTED}|[A-Za-z_][A-Za-z0-9_.-]*)[ \\
  * `{`, or a key after `{` or `,`), where indentation does not matter. Quoted: the leading
  * quoted string. Plain: up to ` # comment`, and in JSON/flow up to `,` `}` `]`.
  */
+/** Whether the line after 1-based line `lineNo` (skipping blanks) is indented: a YAML block follows. */
+function opensIndentedBlock(physical: readonly string[], lineNo: number): boolean {
+  const next = physical.slice(lineNo).find((p) => p.trim() !== "");
+  return next !== undefined && next.length - next.trimStart().length > 0;
+}
+
 /**
  * Whether line `i` sits inside a `{` left open on earlier lines (JSON or a YAML
- * flow mapping). Braces in double-quoted strings and `{{placeholders}}` do not count.
+ * flow mapping). Braces in quoted strings ("…" with `\` escapes, '…' with
+ * `''`), in `#` comments and in `{{placeholders}}` do not count.
  */
 function insideBraces(physical: readonly string[], i: number): boolean {
   let depth = 0;
   for (let k = 0; k < i; k++) {
     const text = physical[k]!.replace(/\{\{[^}]*\}\}/gu, "");
-    let inString = false;
+    let quote = "";
     for (let c = 0; c < text.length; c++) {
       const ch = text[c]!;
-      if (inString) {
+      if (quote === '"') {
         if (ch === "\\") c++;
-        else if (ch === '"') inString = false;
-      } else if (ch === '"') inString = true;
+        else if (ch === '"') quote = "";
+      } else if (quote === "'") {
+        if (ch === "'" && text[c + 1] === "'") c++;
+        else if (ch === "'") quote = "";
+      } else if (ch === "#" && (c === 0 || /\s/u.test(text[c - 1]!))) break;
+      else if (ch === '"' || ch === "'") quote = ch;
       else if (ch === "{") depth++;
       else if (ch === "}") depth = Math.max(0, depth - 1);
     }
@@ -347,7 +362,12 @@ export function scanSecrets(text: string): SecretFinding[] {
       if (!isSecretName(m[1]!)) continue;
       const raw = m[group]!;
       let lit: string | null;
-      if (mode === "line" && HEADER_NAME.test(m[1]!) && !/["']/u.test(l.text[(m.indices?.[1]?.[0] ?? 1) - 1] ?? "")) {
+      const headerLine =
+        mode === "line" &&
+        m.indices?.[1]?.[0] === 0 &&
+        HEADER_NAME.test(m[1]!) &&
+        !(/^[|>][+-]?\d?[+-]?$/u.test(raw.trim()) && opensIndentedBlock(physical, lineAt(l, 0)));
+      if (headerLine) {
         // A bare header line (`X-API-Key: value`): the value is header text.
         lit = referenceLiteral(raw.trim());
       } else if (mode === "scalar" || mode === "line") lit = scalarLiteral(raw);

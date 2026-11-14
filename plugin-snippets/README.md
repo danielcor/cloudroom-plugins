@@ -66,9 +66,12 @@ Focus on {{focus|correctness}}.
   - **any literal value assigned to a secret-named key or flag**, whatever it looks like. This is the strict
     rule (Daniel, 2026-11-13). It covers `API_TOKEN=…`, `DATABASE_PASSWORD: …`, `"apiKey": "…"`,
     `clientsecret: …`, `--api-key=…` and `--token …`. The same goes for secret-named HTTP headers, in
-    `curl -H "X-API-Key: …"`, `--header 'X-Auth-Token: …'` or a bare `Private-Token: …` line. Header names match in any case. On a bare
-    header line the value is header text, so `X-API-Key: true` blocks. Inside JSON (`{"X-API-Key": true}`) the
-    YAML/JSON rules below apply. Guidance written as an assignment also blocks, for
+    `curl -H "X-API-Key: …"`, `--header 'X-Auth-Token: …'` or a bare `Private-Token: …` line. A bare `Name: value` line is the same text in
+    YAML and HTTP. So a line counts as a header only when it is unindented, its name is unquoted and
+    header-shaped (capitalized like `ApiKey` or `X-API-Key`, or lowercase with hyphens like `x-api-key`), and it
+    does not open a YAML block. Then its value is header text, so `X-API-Key: true` blocks. An unindented
+    hyphenated key such as `require-password: true` therefore counts as a header too. `apiKey: true`, indented
+    keys and JSON (`{"X-API-Key": true}`) follow the YAML/JSON rules below. Guidance written as an assignment also blocks, for
     example `password: "choose a new one"`: reword it, or write a reference.
 
   A name is secret-named when its last word ends in token, secret, password, passwd, passphrase or
