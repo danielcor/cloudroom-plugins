@@ -104,7 +104,9 @@ Focus on {{focus|correctness}}.
     separates user and password too.
 
   A YAML/JSON parse adds coverage (Daniel, 2026-11-14; the `yaml` package). The parse covers the whole body,
-  each fenced code block and each indented block. JSON is a YAML subset, so every map in them counts, including
+  each fenced code block (also in a list item), each indented block (tabs count to 4-column stops) and each
+  blockquote with its `>` removed, including fences and quotes nested in a quote. Input nested too deeply for
+  the parser blocks the save as "nested too deeply to check for secrets": it is never passed unchecked. JSON is a YAML subset, so every map in them counts, including
   anchors and aliases, several documents, flow maps and values on a later line. A secret-named key whose value is
   a scalar falls under the same rule. An unquoted `null` or boolean is not literal, and a block scalar is checked
   without its final newline. Findings carry the body line of the value. The parse only adds findings: the line

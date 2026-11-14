@@ -23,6 +23,31 @@ describe("YAML/JSON parse", () => {
     expect(find(body)).toContain(at(line));
   });
 
+  // Delta review round 1 on d4d4898.
+  it.each([
+    ["S1 a fence in a blockquote", "> ```yaml\n> password: hunter2\n> ```", 2],
+    ["S1 a fence in a nested blockquote", "> > ```\n> > password: hunter2\n> > ```", 2],
+    ["S1 a fence on a list item's marker line", "1. ```yaml\n   password: hunter2\n   ```", 2],
+    ["S2 a tab-indented block mixed with spaces", 'Example:\n\n\tnote: x\n    "pass\\u0077ord": hunter2', 4],
+  ])("blocks %s", (_why, body, line) => {
+    expect(find(body)).toContain(at(line));
+  });
+
+  it("S3 blocks input too deeply nested to parse, instead of passing it", () => {
+    const body = "[".repeat(7000) + '{"pass\\u0077ord":"hunter2"}' + "]".repeat(7000);
+    expect(body.length).toBeLessThan(16 * 1024);
+    expect(find(body).join(" ")).toContain("nested too deeply to check for secrets");
+  });
+
+  it("S4 resolves many aliases without re-walking the document each time", () => {
+    const body = "base: &p x\n" + "password: *p\n".repeat(1200);
+    const t0 = performance.now();
+    const hits = find(body);
+    expect(performance.now() - t0).toBeLessThan(400);
+    expect(hits).toContain(at(2));
+    expect(hits).toContain(at(1201));
+  });
+
   it("reports the body line of a secret inside a multi-line placeholder default", () => {
     // Filling the default keeps every line in place: `password` is on body line 3.
     expect(find("intro\n{{cfg|note: x\npassword: hunter2}}\nend")).toEqual([at(3)]);

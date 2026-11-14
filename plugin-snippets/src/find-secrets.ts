@@ -5,7 +5,7 @@
 // whose value is a scalar. The parse only adds findings; the line scanner keeps
 // all of its own (shell, header, URL, curl, text that does not parse).
 // Not imported by the app, so `yaml` stays out of the app bundle.
-import { isAlias, isPair, isScalar, parseAllDocuments, visit, type Document, type Node } from "yaml";
+import { isAlias, isNode, isPair, isScalar, parseAllDocuments, visit, type Alias, type Document, type Node } from "yaml";
 import { fillPlaceholders } from "./placeholders.js";
 import { isSecretName, LITERAL_KIND, referenceLiteral, scanSecrets, stripInvisible, type SecretFinding } from "./secrets.js";
 
@@ -17,30 +17,60 @@ interface Region {
 
 // A key the strict rule applies to: a plain name, as in the line scanner (not prose with spaces).
 const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/u;
-const FENCE = /^[ \t]*(`{3,}|~{3,})/u;
+// A fence, also on a list item's marker line (`1. ```yaml`).
+const FENCE = /^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(`{3,}|~{3,})/u;
+const QUOTE = /^[ \t]*>[ \t]?/u;
+const MAX_QUOTE_DEPTH = 8;
+export const UNSCANNABLE_KIND = "content nested too deeply to check for secrets";
 
-/** The whole text, each fenced code block's content, and each indented (4+ spaces or tab) block, dedented. */
-export function regions(text: string): Region[] {
-  const lines = text.split("\n");
-  const out: Region[] = [{ text, startLine: 1 }];
+/** Leading tabs as spaces, to Markdown's 4-column tab stops (YAML does not allow tab indentation). */
+function expandLeadingTabs(line: string): string {
+  const lead = /^[ \t]*/u.exec(line)![0];
+  let col = 0;
+  for (const ch of lead) col = ch === "\t" ? col + 4 - (col % 4) : col + 1;
+  return " ".repeat(col) + line.slice(lead.length);
+}
+
+/** Remove the common indentation (in columns) of the non-blank lines. */
+function dedent(lines: readonly string[]): string {
+  const width = (l: string) => l.length - l.trimStart().length;
+  const cut = Math.min(...lines.filter((l) => l.trim() !== "").map(width));
+  return lines.map((l) => l.slice(Math.min(cut, width(l)))).join("\n");
+}
+
+/**
+ * The regions to parse: the whole text, each fenced code block, each indented
+ * (4+ columns) block, and each blockquote with one `>` level removed (searched
+ * again, so fences and quotes inside quotes count). Leading tabs are expanded.
+ */
+export function regions(text: string, startLine = 1, depth = 0): Region[] {
+  const lines = text.split("\n").map(expandLeadingTabs);
+  const out: Region[] = [{ text: lines.join("\n"), startLine }];
   for (let i = 0; i < lines.length; i++) {
     const open = FENCE.exec(lines[i]!);
     if (!open) continue;
     const marker = open[1]!;
     let j = i + 1;
     while (j < lines.length && !lines[j]!.trimStart().startsWith(marker)) j++;
-    out.push({ text: lines.slice(i + 1, j).join("\n"), startLine: i + 2 });
+    out.push({ text: dedent(lines.slice(i + 1, j)), startLine: startLine + i + 1 });
     i = j;
   }
-  const indented = (l: string) => /^(?: {4}|\t)/u.test(l);
+  const indented = (l: string) => /^ {4}/u.test(l);
   for (let i = 0; i < lines.length; i++) {
     if (!indented(lines[i]!) || lines[i]!.trim() === "" || (i > 0 && lines[i - 1]!.trim() !== "")) continue;
     let j = i;
     while (j < lines.length && (indented(lines[j]!) || lines[j]!.trim() === "")) j++;
-    const block = lines.slice(i, j);
-    const cut = Math.min(...block.filter((l) => l.trim() !== "").map((l) => l.length - l.trimStart().length));
-    out.push({ text: block.map((l) => l.slice(Math.min(cut, l.length - l.trimStart().length))).join("\n"), startLine: i + 1 });
+    out.push({ text: dedent(lines.slice(i, j)), startLine: startLine + i });
     i = j - 1;
+  }
+  if (depth < MAX_QUOTE_DEPTH) {
+    for (let i = 0; i < lines.length; i++) {
+      if (!QUOTE.test(lines[i]!)) continue;
+      let j = i;
+      while (j < lines.length && QUOTE.test(lines[j]!)) j++;
+      out.push(...regions(lines.slice(i, j).map((l) => l.replace(QUOTE, "")).join("\n"), startLine + i, depth + 1));
+      i = j - 1;
+    }
   }
   return out;
 }
@@ -55,6 +85,39 @@ function scalarIsLiteral(node: Node): boolean {
   return referenceLiteral(text) !== null;
 }
 
+/**
+ * The node an alias stands for: the nearest anchor of that name before it. The
+ * anchors are indexed once per document (yaml's own `resolve()` walks the whole
+ * document for every alias).
+ */
+function anchorIndex(doc: Document.Parsed): (alias: Alias) => Node | undefined {
+  const byName = new Map<string, { at: number; node: Node }[]>();
+  visit(doc, {
+    Node(_key, node) {
+      if (isNode(node) && !isAlias(node) && node.anchor && node.range) {
+        const list = byName.get(node.anchor) ?? [];
+        list.push({ at: node.range[0], node });
+        byName.set(node.anchor, list);
+      }
+    },
+  });
+  return (alias) => {
+    const list = byName.get(alias.source);
+    if (!list || !alias.range) return undefined;
+    let lo = 0;
+    let hi = list.length - 1;
+    let found: Node | undefined;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid]!.at < alias.range[0]) {
+        found = list[mid]!.node;
+        lo = mid + 1;
+      } else hi = mid - 1;
+    }
+    return found;
+  };
+}
+
 /** Findings from a YAML/JSON parse of one region, with body line numbers. */
 export function scanParsed(region: Region): SecretFinding[] {
   const out: SecretFinding[] = [];
@@ -63,17 +126,20 @@ export function scanParsed(region: Region): SecretFinding[] {
     const parsed = parseAllDocuments(region.text, { strict: false, uniqueKeys: false, prettyErrors: false });
     docs = Array.isArray(parsed) ? parsed : [];
   } catch {
-    return out;
+    return [{ kind: UNSCANNABLE_KIND, line: region.startLine }];
   }
   const lineOfOffset = (offset: number) => region.startLine + (region.text.slice(0, offset).match(/\n/gu)?.length ?? 0);
   for (const doc of docs) {
+    // The parser gave up on a part (nesting too deep): that part was not checked, so it may not pass.
+    if (doc.errors.some((e) => e.code === "RESOURCE_EXHAUSTION")) out.push({ kind: UNSCANNABLE_KIND, line: region.startLine });
+    const resolve = anchorIndex(doc);
     visit(doc, {
       Pair(_key, pair) {
         if (!isPair(pair) || !isScalar(pair.key) || pair.value === null) return;
         const name = String(pair.key.value);
         if (!KEY_NAME.test(name) || !isSecretName(name)) return;
         const at = pair.value as Node;
-        const value = isAlias(at) ? at.resolve(doc) : at;
+        const value = isAlias(at) ? resolve(at) : at;
         if (value && scalarIsLiteral(value) && at.range) out.push({ kind: LITERAL_KIND, line: lineOfOffset(at.range[0]) });
       },
     });

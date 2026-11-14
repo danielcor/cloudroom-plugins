@@ -113,6 +113,15 @@ describe("SnippetStore", () => {
       },
     );
 
+    it.each([
+      ["a fence in a blockquote", "> ```yaml\n> password: hunter2\n> ```"],
+      ["too deeply nested to parse", "[".repeat(7000) + '{"pass\\u0077ord":"hunter2"}' + "]".repeat(7000)],
+    ])("parser: blocks %s", async (_why, body) => {
+      const { store, files } = setup();
+      expect((await store.create(G, { title: "T", tags: [], body })).outcome).toBe("blocked");
+      expect(files.writes).toEqual([]);
+    });
+
     it("parser: flags S10 on load", async () => {
       const { store } = setup({ [`${G.dir}/x.md`]: "---\ntitle: X\n---\nnote: {label: don't}\npassword:\n  $PASSWORD,literal" });
       const [view] = await store.list(G);
