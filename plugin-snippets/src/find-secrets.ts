@@ -17,10 +17,11 @@ interface Region {
 
 // A key the strict rule applies to: a plain name, as in the line scanner (not prose with spaces).
 const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_.-]*$/u;
-// A fence, also on a list item's marker line (`1. ```yaml`).
-const FENCE = /^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(`{3,}|~{3,})/u;
-const QUOTE = /^[ \t]*>[ \t]?/u;
-const MAX_QUOTE_DEPTH = 8;
+// A fence, also on a (nested) list item's marker line (`1. ```yaml`, `- - ```json`).
+const FENCE = /^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)*(`{3,}|~{3,})/u;
+// All the `>` markers at the start of a quoted line, however deep: one pass removes
+// every level, so no quote depth is left unchecked.
+const QUOTES = /^(?:[ \t]*>[ \t]?)+/u;
 export const UNSCANNABLE_KIND = "content nested too deeply to check for secrets";
 
 /** Leading tabs as spaces, to Markdown's 4-column tab stops (YAML does not allow tab indentation). */
@@ -40,10 +41,11 @@ function dedent(lines: readonly string[]): string {
 
 /**
  * The regions to parse: the whole text, each fenced code block, each indented
- * (4+ columns) block, and each blockquote with one `>` level removed (searched
- * again, so fences and quotes inside quotes count). Leading tabs are expanded.
+ * (4+ columns) block, and each blockquote with all its `>` markers removed
+ * (searched again, so fences inside quotes count, at any quote depth). Leading
+ * tabs are expanded.
  */
-export function regions(text: string, startLine = 1, depth = 0): Region[] {
+export function regions(text: string, startLine = 1): Region[] {
   const lines = text.split("\n").map(expandLeadingTabs);
   const out: Region[] = [{ text: lines.join("\n"), startLine }];
   for (let i = 0; i < lines.length; i++) {
@@ -63,14 +65,13 @@ export function regions(text: string, startLine = 1, depth = 0): Region[] {
     out.push({ text: dedent(lines.slice(i, j)), startLine: startLine + i });
     i = j - 1;
   }
-  if (depth < MAX_QUOTE_DEPTH) {
-    for (let i = 0; i < lines.length; i++) {
-      if (!QUOTE.test(lines[i]!)) continue;
-      let j = i;
-      while (j < lines.length && QUOTE.test(lines[j]!)) j++;
-      out.push(...regions(lines.slice(i, j).map((l) => l.replace(QUOTE, "")).join("\n"), startLine + i, depth + 1));
-      i = j - 1;
-    }
+  for (let i = 0; i < lines.length; i++) {
+    if (!QUOTES.test(lines[i]!)) continue;
+    let j = i;
+    while (j < lines.length && QUOTES.test(lines[j]!)) j++;
+    // The stripped lines start with no `>`, so this recursion is one level deep.
+    out.push(...regions(lines.slice(i, j).map((l) => l.replace(QUOTES, "")).join("\n"), startLine + i));
+    i = j - 1;
   }
   return out;
 }
