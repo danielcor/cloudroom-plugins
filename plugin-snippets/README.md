@@ -72,22 +72,26 @@ Focus on {{focus|correctness}}.
   credential(s), or is `key`, `pwd`, `auth`, `pat`, or a compound like `apikey` or `accesskey`. Names are split
   on `_`, `.`, `-`, camelCase and acronyms. So `--password-file` and `--token-count` are not secret-named.
 
-  A value is the whole shell word, so `""hunter2`, `"$PASSWORD"hunter2` and `"   "` are literal. These parts of
-  a word are **not** literal:
+  After `=` or a flag, the value is the whole shell word, so `""hunter2`, `"$PASSWORD"hunter2` and `"   "` are
+  literal. Single-quoted text and backslash-escaped characters are always literal, because the shell does not
+  expand them: `'$PASSWORD'`, `'$(echo x)'` and `"\$x"` all count. In plain or double-quoted text, these add
+  nothing:
   - references: `$VAR`, `${VAR}`, `%VAR%`, `{{placeholder}}`, `${{ secrets.X }}`;
-  - a whole `$(cmd)` or backtick command, for a secret-named key or flag only (`"$(echo)hunter2"` is literal, and
-    URL and curl passwords get no such exemption);
+  - a whole `$(cmd)` or backtick command (`"$(echo)hunter2"` is literal);
   - the empty string.
 
-  Also not values:
-  - unquoted `true`, `false` or `null` as a YAML or JSON value (`PASSWORD=true` and `password: "null"` are
-    literal);
-  - for a spaced flag, a following option or shell operator (`--with-token < file`).
+  An unquoted `;&|<>)` ends a shell word (`$VAR; echo`). A shell default `${VAR:-text}` counts as `text`. After
+  a spaced flag, a following option or shell operator (`--with-token < file`) is not its value.
 
-  In a shell word (after `=` or a flag), an unquoted `;&|<>)` ends it (`$VAR; echo`). Inside quotes, a URL or a
-  YAML value, `${VAR};text` is literal. A shell default `${VAR:-text}` counts as `text`. `key: value` counts
-  only where a YAML or JSON key can start (line start, after one or more `- `, `{`, `,` or `[`), so prose like
-  "the password: it must be long" stays clean.
+  After `:` (YAML or JSON), the value is a scalar. `key: value` counts only where a key can start: at line
+  start, after one or more `- `, or after `{`, `,` or `[`. So prose like "the password: it must be long"
+  stays clean.
+  - At line start the scalar runs to the end of the line, without a ` # comment` or a trailing `,`. So
+    `password: true hunter2` is literal.
+  - Inside `{…}` it ends at `,` `}` or `]`. So `{"password":"$PASSWORD"}` and `{"password":""}` stay clean.
+  - An unquoted `true`, `false` or `null` adds nothing; `password: "null"` and `PASSWORD=true` are literal.
+  - `$(cmd)` is literal there, because YAML does not run it.
+  - URL and curl passwords get no command exemption, and curl keeps the quoting rules above.
 
   Values are taken whole, quoted or not, punctuation included. So are values continued onto the next line with a
   shell `\`, and YAML `key: |` or `>` blocks. The body is also scanned with placeholder defaults filled in, so

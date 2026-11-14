@@ -33,9 +33,18 @@ const NAME = "([A-Za-z_][A-Za-z0-9_.-]*)";
 // inspected: an earlier match never consumes a later name.
 // `NAME=VALUE`, `--NAME=VALUE`, `export NAME="VALUE"`: anywhere on the line.
 const ASSIGN_EQ = new RegExp(`(?<![A-Za-z0-9_.-])(?=-*${NAME}["']?[ \\t]*=[ \\t]*${VALUE})`, "dgu");
-// `NAME: VALUE`, `"NAME": "VALUE"`: only where a YAML or JSON key can start (line
-// start, one or more `- `, `{`, `,`, `[`), so prose such as `the password: it must be long` is not one.
-const ASSIGN_COLON = new RegExp(`(?<=^[ \\t]*(?:-[ \\t]+)*["']?|[{,[][ \\t]*["']?)(?=${NAME}["']?[ \\t]*:[ \\t]*${VALUE})`, "dgu");
+// `NAME: VALUE`, `"NAME": "VALUE"` (YAML/JSON): only where a key can start, so prose such
+// as `the password: it must be long` is not one. The value is a YAML/JSON scalar, not a
+// shell word: a "double-quoted" or 'single-quoted' string, or plain text.
+const YAML_QUOTED = String.raw`"(?:[^"\\\n]|\\.)*"|'(?:[^'\n]|'')*'`;
+// At line start (after one or more `- `): the scalar runs to the end of the line, without
+// a ` # comment` or a trailing `,` (a line of a multi-line JSON object).
+const ASSIGN_COLON_LINE = new RegExp(
+  String.raw`(?<=^[ \t]*(?:-[ \t]+)*["']?)(?=${NAME}["']?[ \t]*:[ \t]*(${YAML_QUOTED}|[^\n]*?)[ \t]*,?(?:[ \t]+#.*)?[ \t]*$)`,
+  "dgu",
+);
+// Inside a flow mapping or JSON object (after `{`, `,`, `[`): the scalar ends at `,` `}` `]`.
+const ASSIGN_COLON_FLOW = new RegExp(String.raw`(?<=[{,[][ \t]*["']?)(?=${NAME}["']?[ \t]*:[ \t]*(${YAML_QUOTED}|[^,}\]\n]*))`, "dgu");
 // `--NAME VALUE`, `-NAME "VALUE"`: a flag, whitespace, then the value.
 const FLAG_SPACED = new RegExp(`(?<![A-Za-z0-9_.-])(?=--?${NAME}[ \\t]+${VALUE})`, "dgu");
 // scheme://user:password@host (the user name may be empty: https://:password@host)
@@ -79,19 +88,27 @@ const ATOMIC = /^(?:\$\([^)\n]*\)|`[^`\n]*`|\$?\{\{[^}\n]*\}\})/u;
 // Unquoted shell syntax ends a shell word: `$VAR; echo`, `${VAR}&& deploy`.
 const SHELL_DELIM = /[;&|<>)]/u;
 // Unquoted YAML/JSON booleans and null are not secrets (`require_password: true`).
+// Only for a plain YAML/JSON scalar: `PASSWORD=true` or `password: "null"` is literal.
 const SCALAR = /^(?:true|false|null|yes|no|on|off|~)$/iu;
 
+/**
+ * Where a piece of a shell word came from. Single-quoted text and a
+ * backslash-escaped character are never expanded by the shell, so they are
+ * always literal (`'$PASSWORD'`, `"\$x"`); plain and double-quoted text may be
+ * a reference or a command substitution.
+ */
+type SegmentKind = "plain" | "double" | "single" | "escaped";
 interface Segment {
   text: string;
-  quoted: boolean;
+  kind: SegmentKind;
 }
 
-/** Split a captured word into quoted and unquoted segments. In a shell word, an unquoted `;&|<>)` ends it. */
-function segments(word: string, shell: boolean): Segment[] {
+/** Split a captured shell word into segments. An unquoted `;&|<>)` ends it. */
+function segments(word: string): Segment[] {
   const out: Segment[] = [];
   let plain = "";
   const flush = () => {
-    if (plain !== "") out.push({ text: plain, quoted: false });
+    if (plain !== "") out.push({ text: plain, kind: "plain" });
     plain = "";
   };
   let i = 0;
@@ -100,21 +117,34 @@ function segments(word: string, shell: boolean): Segment[] {
     const atomic = ATOMIC.exec(word.slice(i));
     if (atomic) {
       flush();
-      out.push({ text: atomic[0], quoted: false });
+      out.push({ text: atomic[0], kind: "plain" });
       i += atomic[0].length;
-    } else if (c === '"' || c === "'") {
+    } else if (c === "\\" && i + 1 < word.length) {
+      flush();
+      out.push({ text: word[i + 1]!, kind: "escaped" });
+      i += 2;
+    } else if (c === "'") {
+      flush();
+      const end = word.indexOf("'", i + 1);
+      const stop = end === -1 ? word.length : end;
+      out.push({ text: word.slice(i + 1, stop), kind: "single" });
+      i = stop + 1;
+    } else if (c === '"') {
       flush();
       let j = i + 1;
       let text = "";
-      while (j < word.length && word[j] !== c) {
-        if (c === '"' && word[j] === "\\" && j + 1 < word.length) {
-          text += word[j + 1];
+      while (j < word.length && word[j] !== '"') {
+        // In double quotes, `\` escapes only $ ` " \ ; the escaped character stays literal.
+        if (word[j] === "\\" && j + 1 < word.length && '$`"\\'.includes(word[j + 1]!)) {
+          out.push({ text, kind: "double" });
+          out.push({ text: word[j + 1]!, kind: "escaped" });
+          text = "";
           j += 2;
         } else text += word[j++];
       }
-      out.push({ text, quoted: true });
+      out.push({ text, kind: "double" });
       i = j + 1;
-    } else if (shell && SHELL_DELIM.test(c)) {
+    } else if (SHELL_DELIM.test(c)) {
       break;
     } else {
       plain += c;
@@ -125,24 +155,52 @@ function segments(word: string, shell: boolean): Segment[] {
   return out;
 }
 
+/** Text that is empty or a reference stands for nothing (null); a shell default for its text. */
+function referenceLiteral(text: string): string | null {
+  if (text === "" || REF_EXACT.test(text)) return null;
+  const d = DEFAULT_EXACT.exec(text);
+  if (d) return d[1] === "" ? null : d[1]!;
+  return text;
+}
+
 /**
- * The literal text a value stands for, or null when it holds none. A segment
- * that is empty, a reference, or (with `runtime`) a whole `$(cmd)` or backtick
- * command adds nothing; a shell default adds its text; any other segment adds
- * itself, so `""hunter2`, `"$PASSWORD"hunter2` and `"   "` are literal.
+ * The literal text of a shell word, or null when it holds none. Single-quoted
+ * and escaped pieces are literal. A plain or double-quoted piece that is empty,
+ * a reference, or (with `runtime`) a whole `$(cmd)` or backtick command adds
+ * nothing; a shell default adds its text; anything else adds itself. So
+ * `""hunter2`, `"$PASSWORD"hunter2`, `'$(echo x)'` and `"   "` are literal.
  */
 function literalText(segs: readonly Segment[], runtime: boolean): string | null {
   let lit = "";
   for (const s of segs) {
-    if (s.text === "" || REF_EXACT.test(s.text) || (runtime && RUNTIME_EXACT.test(s.text))) continue;
-    const d = DEFAULT_EXACT.exec(s.text);
-    lit += d ? d[1]! : s.text;
+    if (s.text === "") continue;
+    if (s.kind === "single" || s.kind === "escaped") lit += s.text;
+    else if (!(runtime && RUNTIME_EXACT.test(s.text))) lit += referenceLiteral(s.text) ?? "";
   }
   return lit === "" ? null : lit;
 }
 
-/** The literal text of a password or other plain text: no runtime exemption (URLs, curl). */
-const literalOfText = (text: string) => literalText([{ text, quoted: false }], false);
+/**
+ * The literal text of a YAML/JSON scalar, or null. Quoted: its content, unless
+ * empty or a reference. Plain: also null for a block indicator (`|`, `>-`) or an
+ * unquoted boolean or null. `$(cmd)` is not run in YAML/JSON, so it is literal.
+ */
+function scalarLiteral(raw: string): string | null {
+  const t = raw.trim();
+  const quoted = t.length >= 2 && ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'")));
+  if (quoted) return referenceLiteral(t.slice(1, -1));
+  if (SCALAR.test(t) || /^[|>][+-]?\d?[+-]?$/u.test(t)) return null;
+  return referenceLiteral(t);
+}
+
+/** The part of a word after its first `:`, keeping each piece's provenance (curl `user:password`). */
+function afterFirstColon(segs: readonly Segment[]): Segment[] | null {
+  for (let k = 0; k < segs.length; k++) {
+    const idx = segs[k]!.kind === "escaped" ? -1 : segs[k]!.text.indexOf(":");
+    if (idx !== -1) return [{ ...segs[k]!, text: segs[k]!.text.slice(idx + 1) }, ...segs.slice(k + 1)];
+  }
+  return null;
+}
 
 /**
  * Padded base64 that decodes to `user:password` with a non-empty password and
@@ -208,30 +266,29 @@ export function scanSecrets(text: string): SecretFinding[] {
   for (const l of logicalLines(physical)) {
     const at = (m: RegExpMatchArray, group: number) => lineAt(l, m.indices?.[group]?.[0] ?? m.index ?? 0);
     for (const { kind, re } of PATTERNS) for (const m of l.text.matchAll(re)) add(kind, at(m, 0));
-    // [match, shell word?, flag value?, YAML/JSON key?]. `=` and flags take shell words.
-    type Named = [RegExpMatchArray, boolean, boolean, boolean];
+    // Shell words after `=` and flags; YAML/JSON scalars after `:`.
+    type Named = [RegExpMatchArray, "shell" | "flag" | "scalar"];
     const named: Named[] = [
-      ...[...l.text.matchAll(ASSIGN_EQ)].map((m): Named => [m, true, false, false]),
-      // `key: |` / `key: >-` opens a YAML block: its lines are checked below, not the indicator.
-      ...[...l.text.matchAll(ASSIGN_COLON)].filter((m) => !/^[|>][+-]?\d?[+-]?$/u.test(m[2]!)).map((m): Named => [m, false, false, true]),
-      ...[...l.text.matchAll(FLAG_SPACED)].map((m): Named => [m, true, true, false]),
+      ...[...l.text.matchAll(ASSIGN_EQ)].map((m): Named => [m, "shell"]),
+      ...[...l.text.matchAll(ASSIGN_COLON_LINE)].map((m): Named => [m, "scalar"]),
+      ...[...l.text.matchAll(ASSIGN_COLON_FLOW)].map((m): Named => [m, "scalar"]),
+      ...[...l.text.matchAll(FLAG_SPACED)].map((m): Named => [m, "flag"]),
     ];
-    for (const [m, shell, flagValue, yamlKey] of named) {
-      const raw = m[2]!;
+    for (const [m, mode] of named) {
       if (!isSecretName(m[1]!)) continue;
+      const raw = m[2]!;
+      let lit: string | null;
+      if (mode === "scalar") lit = scalarLiteral(raw);
       // After a spaced flag, another option or a shell operator is not its value.
-      if (flagValue && /^[-<>|;&]/u.test(raw)) continue;
-      if (yamlKey && SCALAR.test(raw)) continue;
-      if (literalText(segments(raw, shell), true) !== null) add(LITERAL_KIND, at(m, 2));
+      else if (mode === "flag" && /^[-<>|;&]/u.test(raw)) lit = null;
+      else lit = literalText(segments(raw), true);
+      if (lit !== null) add(LITERAL_KIND, at(m, 2));
     }
-    for (const m of l.text.matchAll(URL_USERINFO)) if (literalOfText(m[1]!) !== null) add("password in a URL", at(m, 1));
+    for (const m of l.text.matchAll(URL_USERINFO)) if (referenceLiteral(m[1]!) !== null) add("password in a URL", at(m, 1));
     for (const m of l.text.matchAll(BASIC_AUTH)) if (isBasicCredentials(m[1]!)) add("Basic auth credentials", at(m, 1));
     for (const m of l.text.matchAll(CURL_USER)) {
-      const value = segments(m[1]!, true)
-        .map((seg) => seg.text)
-        .join("");
-      const colon = value.indexOf(":");
-      if (colon !== -1 && literalOfText(value.slice(colon + 1)) !== null) add("password in -u/--user", at(m, 1));
+      const password = afterFirstColon(segments(m[1]!));
+      if (password && literalText(password, false) !== null) add("password in -u/--user", at(m, 1));
     }
   }
 
@@ -249,7 +306,8 @@ export function scanSecrets(text: string): SecretFinding[] {
     }
     if (block.length === 0) return;
     // Any literal line in the block is the value.
-    const hit = block.find((b) => literalText([{ text: b.text, quoted: false }], true) !== null);
+    // Block text is literal as written: `true` there is a string.
+    const hit = block.find((b) => referenceLiteral(b.text) !== null);
     if (hit) add(LITERAL_KIND, hit.line);
   });
 

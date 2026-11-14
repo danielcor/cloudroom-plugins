@@ -11,6 +11,7 @@ describe("strict rule for secret-named keys", () => {
   it.each([
     ["URL userinfo with a command substitution", "git clone https://user:$(hunter2)@example.com/r.git"],
     ["curl credentials with a command substitution", "curl -u 'user:$(hunter2)' https://example.com"],
+    ["S6 curl credentials with an escaped dollar", 'curl -u "admin:\\$hunter2" https://example.com'],
   ])("S2 keeps URL and curl checks without a runtime exemption: %s", (_why, text) => {
     expect(scanSecrets(text)).not.toEqual([]);
   });
@@ -39,6 +40,14 @@ describe("strict rule for secret-named keys", () => {
     ["S4 a literal after an empty quoted segment", 'PASSWORD=""hunter2', 1],
     ["S4 a literal after a quoted reference", 'PASSWORD="$PASSWORD"hunter2', 1],
     ["S5 quoted whitespace", 'password: "   "', 1],
+    // Delta review round 2 on 483e5c1.
+    ["S1 a YAML scalar that only starts with true", "password: true hunter2", 1],
+    ["S1 a JSON-ish line value with a comment", 'password: "x" # set by hand', 1],
+    ["S2 single quotes: command text is literal", "PASSWORD='$(echo hunter2)'", 1],
+    ["S2 single quotes: a reference is literal text in the shell", "PASSWORD='$PASSWORD'", 1],
+    ["S2 a command in a YAML value is not run", "password: $(cat pw)", 1],
+    ["S6 an escaped dollar in double quotes", 'PASSWORD="\\$hunter2"', 1],
+    ["S6 an escaped dollar unquoted", "PASSWORD=\\$hunter2", 1],
   ])("blocks %s", (_why, text, line) => {
     expect(kinds(text)).toContain(`${line}:${LITERAL}`);
   });
@@ -72,6 +81,12 @@ describe("strict rule for secret-named keys", () => {
     "- - password: $PASSWORD",
     'PASSWORD="$PASSWORD"',
     "PASSWORD=$PASSWORD;echo ok",
+    '{"password":"$PASSWORD"}',
+    '{"password":""}',
+    '{"user": "app", "password": "${DB_PASSWORD}"}',
+    '  "password": "$PASSWORD",',
+    "password: true # set below",
+    'PASSWORD="$(echo $PASSWORD)"',
   ])("keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
   });
