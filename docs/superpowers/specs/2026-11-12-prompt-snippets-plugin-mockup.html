@@ -1,0 +1,196 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{width:1600px;background:#0b0d10;color:#d7dce2;font:13px/1.45 Inter,"Segoe UI",system-ui,sans-serif;padding:28px}
+.cap{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#7d8794;margin:0 0 10px 2px}
+.cap b{color:#e6b450;font-weight:600}
+.win{border:1px solid #232830;border-radius:12px;overflow:hidden;background:#111418;display:flex;margin-bottom:30px}
+.side{width:210px;background:#0e1114;border-right:1px solid #232830;padding:14px 10px;flex:none}
+.side .logo{font-weight:700;color:#fff;margin:2px 8px 16px}
+.nav{padding:7px 10px;border-radius:7px;color:#9aa4b0;display:flex;gap:9px;align-items:center}
+.nav.on{background:#1b2028;color:#fff}
+.nav i{width:14px;height:14px;border-radius:3px;background:#39424e;display:inline-block}
+.nav.on i{background:#e6b450}
+.sep{height:1px;background:#232830;margin:10px 4px}
+.thr{padding:6px 10px;color:#7d8794;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.hdr{height:50px;border-bottom:1px solid #232830;display:flex;align-items:center;padding:0 18px;gap:10px}
+.hdr h1{font-size:15px;color:#fff;font-weight:600}
+.hdr .sp{flex:1}
+.btn{border:1px solid #2c333d;background:#171b21;color:#d7dce2;padding:6px 11px;border-radius:7px;font-size:12.5px}
+.btn.pri{background:#e6b450;border-color:#e6b450;color:#1a1405;font-weight:600}
+.btn.ghost{background:transparent}
+.btn.dan{color:#f0787a;border-color:#4a2a2c}
+.body{display:flex;flex:1;min-height:0}
+.tbl{flex:1;min-width:0;padding:14px 18px}
+.tools{display:flex;gap:10px;align-items:center;margin-bottom:12px}
+.inp{border:1px solid #2c333d;background:#0d1013;border-radius:7px;padding:7px 10px;color:#d7dce2;font-size:12.5px}
+.seg{display:flex;border:1px solid #2c333d;border-radius:7px;overflow:hidden}
+.seg span{padding:6px 11px;color:#9aa4b0;font-size:12.5px}
+.seg span.on{background:#232a33;color:#fff}
+table{width:100%;border-collapse:collapse;table-layout:fixed}
+th{text-align:left;font-weight:500;color:#7d8794;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;padding:8px 8px;border-bottom:1px solid #232830}
+td{padding:9px 8px;border-bottom:1px solid #1b2027;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+tr.sel td{background:#182029}
+tr.sel td:first-child{box-shadow:inset 2px 0 0 #e6b450}
+.grip{color:#4d5763;letter-spacing:-2px}
+.tag{display:inline-block;padding:1px 7px;border-radius:10px;background:#1f2630;color:#9fb3c8;font-size:11.5px;margin-right:4px}
+.sc{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11.5px;border:1px solid}
+.sc.g{color:#8fb8ff;border-color:#2a3b57;background:#131b28}
+.sc.p{color:#7fd6a4;border-color:#234a36;background:#111f18}
+.warn{color:#e6b450;font-size:11.5px;margin-left:6px}
+.mono{font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;font-size:12px}
+.dim{color:#7d8794}
+.edit{border:1px solid #e6b450;background:#0d1013;border-radius:5px;padding:3px 6px;color:#fff;display:inline-block;min-width:170px}
+.caret{display:inline-block;width:1px;height:14px;background:#e6b450;vertical-align:-2px;margin-left:1px}
+.ico{color:#7d8794;margin-left:9px}
+.hint{margin-top:12px;color:#66707c;font-size:12px}
+kbd{border:1px solid #2c333d;border-bottom-width:2px;background:#171b21;border-radius:4px;padding:0 5px;font:11px ui-monospace,Menlo,monospace;color:#b9c2cc}
+.ed{width:440px;flex:none;border-left:1px solid #232830;padding:16px 18px;background:#0f1216}
+.ed label{display:block;color:#7d8794;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;margin:12px 0 5px}
+.ed label:first-child{margin-top:0}
+.ed .inp{width:100%}
+.row2{display:flex;gap:10px}.row2>div{flex:1}
+.ta{border:1px solid #2c333d;background:#0d1013;border-radius:7px;padding:10px 12px;height:150px;white-space:pre-wrap;color:#cfd6dd}
+.ph{background:#3a2f12;color:#f2c866;border-radius:3px;padding:0 3px}
+.phl{display:flex;gap:8px;align-items:center;margin-top:6px}
+.phl .inp{flex:1;padding:5px 8px}
+.foot{display:flex;gap:8px;align-items:center;margin-top:14px}
+.ok{color:#7fd6a4;font-size:12px}
+.path{color:#7d8794;font-size:11.5px;margin-top:5px}
+.chat{flex:1;display:flex;flex-direction:column;padding:18px 26px 22px;min-height:600px;position:relative}
+.msg{max-width:760px;color:#aab3bd;margin-bottom:12px}
+.msg.u{align-self:flex-end;background:#1b2028;border-radius:10px;padding:8px 12px;color:#d7dce2}
+.pop{position:absolute;left:26px;right:26px;bottom:128px;border:1px solid #333b46;border-radius:12px;background:#151920;box-shadow:0 18px 50px rgba(0,0,0,.6);display:flex;overflow:hidden;height:340px}
+.pl{width:580px;flex:none;border-right:1px solid #232830;display:flex;flex-direction:column}
+.q{padding:11px 14px;border-bottom:1px solid #232830;display:flex;gap:9px;align-items:center;color:#fff;font-size:14px}
+.q .dim{font-size:12px;margin-left:auto}
+.it{padding:8px 14px;display:flex;align-items:center;gap:10px;border-bottom:1px solid #1a1f26}
+.it.on{background:#1d2732}
+.it .t{color:#e8ecf0;min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.it .t small{display:block;color:#7d8794;font-size:11.5px;overflow:hidden;text-overflow:ellipsis}
+.it u{text-decoration:none;color:#f2c866;font-weight:600}
+.pr{flex:1;min-width:0;padding:14px 16px;display:flex;flex-direction:column}
+.pv{border:1px solid #232830;background:#0d1013;border-radius:8px;padding:10px 12px;white-space:pre-wrap;color:#c3cbd4;flex:1;overflow:hidden}
+.flds{display:flex;gap:10px;margin-top:10px}
+.flds>div{flex:1}.flds span.l{display:block;color:#7d8794;font-size:11.5px;margin-bottom:4px}
+.flds .inp{width:100%}
+.flds .inp.f{border-color:#e6b450}
+.keys{border-top:1px solid #232830;padding:8px 14px;color:#7d8794;font-size:12px;display:flex;gap:16px;margin-top:auto}
+.comp{margin-top:auto;border:1px solid #2c333d;border-radius:12px;background:#0d1013;padding:12px 14px}
+.comp .tx{min-height:44px;color:#d7dce2}
+.comp .bar{display:flex;align-items:center;gap:10px;margin-top:8px;color:#7d8794}
+.plus{width:26px;height:26px;border-radius:7px;border:1px solid #e6b450;color:#e6b450;display:inline-flex;align-items:center;justify-content:center;font-size:16px}
+.send{margin-left:auto;width:28px;height:28px;border-radius:50%;background:#e6b450;color:#1a1405;display:inline-flex;align-items:center;justify-content:center;font-weight:700}
+.note{position:absolute;right:30px;top:16px;border:1px dashed #3a4350;border-radius:8px;padding:8px 11px;color:#8b95a1;font-size:12px;max-width:330px;background:#0f1216}
+</style></head><body>
+
+<p class="cap"><b>1</b> · Table and editor — sidebar page (<span class="mono">navPanel</span>)</p>
+<div class="win">
+  <div class="side">
+    <div class="logo">Cloudroom</div>
+    <div class="nav"><i></i>New thread</div>
+    <div class="nav"><i></i>Loops</div>
+    <div class="nav on"><i></i>Snippets</div>
+    <div class="sep"></div>
+    <div class="thr">cloudroom-plugins</div>
+    <div class="thr">&nbsp;&nbsp;Qoder provider review</div>
+    <div class="thr">&nbsp;&nbsp;Prompt Snippets design</div>
+    <div class="thr">AiTradingBot</div>
+    <div class="thr">&nbsp;&nbsp;Tier 3 entry audit</div>
+  </div>
+  <div class="main">
+    <div class="hdr"><h1>Snippets</h1><span class="dim">7 snippets · 5 global · 2 in cloudroom-plugins</span><span class="sp"></span>
+      <span class="btn ghost">Import…</span><span class="btn ghost">Export</span><span class="btn pri">+ New snippet</span></div>
+    <div class="body">
+      <div class="tbl">
+        <div class="tools">
+          <span class="inp" style="width:230px;color:#66707c">Filter snippets…</span>
+          <div class="seg"><span class="on">All</span><span>Global</span><span>cloudroom-plugins</span></div>
+          <span class="tag">review</span><span class="tag">test</span><span class="tag">git</span><span class="tag">code</span>
+          <span style="flex:1"></span><span class="dim">Order: manual</span>
+        </div>
+        <table>
+          <colgroup><col style="width:30px"><col style="width:215px"><col style="width:128px"><col style="width:132px"><col><col style="width:52px"><col style="width:84px"><col style="width:66px"></colgroup>
+          <tr><th></th><th>Title</th><th>Tags</th><th>Scope</th><th>Body</th><th>Used</th><th>Last used</th><th></th></tr>
+          <tr class="sel"><td class="grip">⠿</td><td><span class="edit">Review this PR<span class="caret"></span></span></td><td><span class="tag">review</span><span class="tag">git</span></td><td><span class="sc g">global</span></td><td class="mono dim">Review {{target}} as a strict senior reviewer. Focus on {{focus|correctness}}…</td><td>41</td><td class="dim">today</td><td><span class="ico">⧉</span><span class="ico">✕</span></td></tr>
+          <tr><td class="grip">⠿</td><td>Failing test first</td><td><span class="tag">test</span></td><td><span class="sc g">global</span></td><td class="mono dim">Before changing code, write one failing test that reproduces {{bug}}. Show…</td><td>27</td><td class="dim">yesterday</td><td><span class="ico">⧉</span><span class="ico">✕</span></td></tr>
+          <tr><td class="grip">⠿</td><td>Worker brief</td><td><span class="tag">delegate</span></td><td><span class="sc p">cloudroom-plugins</span></td><td class="mono dim">WORKER BRIEF from Director {{thread}} · Role: {{role}} · Goal: {{goal}}…</td><td>19</td><td class="dim">today</td><td><span class="ico">⧉</span><span class="ico">✕</span></td></tr>
+          <tr><td class="grip">⠿</td><td>Commit message</td><td><span class="tag">git</span></td><td><span class="sc g">global</span></td><td class="mono dim">Write a commit message for the staged diff. Subject ≤ 60 chars, body says…</td><td>14</td><td class="dim">3 days ago</td><td><span class="ico">⧉</span><span class="ico">✕</span></td></tr>
+          <tr><td class="grip">⠿</td><td>Bash strict header</td><td><span class="tag">code</span></td><td><span class="sc g">global</span></td><td class="mono dim">#!/usr/bin/env bash ↵ set -euo pipefail ↵ IFS=$'\n\t'</td><td>9</td><td class="dim">last week</td><td><span class="ico">⧉</span><span class="ico">✕</span></td></tr>
+          <tr><td class="grip">⠿</td><td>Provider conformance run</td><td><span class="tag">test</span></td><td><span class="sc p">cloudroom-plugins</span></td><td class="mono dim">Run the conformance suite for {{plugin|plugin-muse}} and report pass/fail…</td><td>6</td><td class="dim">2 days ago</td><td><span class="ico">⧉</span><span class="ico">✕</span></td></tr>
+          <tr><td class="grip">⠿</td><td>Handoff summary<span class="warn">⚠ imported · unreviewed</span></td><td><span class="tag">handoff</span></td><td><span class="sc g">global</span></td><td class="mono dim">Summarise this thread for the next agent: goal, state, open decisions, next…</td><td>0</td><td class="dim">never</td><td><span class="ico">⧉</span><span class="ico">✕</span></td></tr>
+        </table>
+        <p class="hint">Click a cell to edit in place · drag <span class="grip">⠿</span> or <kbd>Alt</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd> to reorder · <kbd>Ctrl</kbd>+<kbd>D</kbd> duplicate · <kbd>Del</kbd> delete, with undo in the toast</p>
+      </div>
+      <div class="ed">
+        <label>Title</label><div class="inp">Review this PR</div>
+        <div class="row2">
+          <div><label>Scope</label><div class="inp">Global ▾</div></div>
+          <div><label>Tags</label><div class="inp"><span class="tag">review</span><span class="tag">git</span></div></div>
+        </div>
+        <label>Body</label>
+        <div class="ta mono">Review <span class="ph">{{target}}</span> as a strict senior reviewer.
+Focus on <span class="ph">{{focus|correctness}}</span>.
+
+Report findings as a table: severity, file:line,
+what breaks, the smallest fix. Do not edit files.
+If you find nothing, say so plainly.</div>
+        <label>Placeholders found</label>
+        <div class="phl"><span class="mono ph">target</span><span class="inp dim">asked at insert</span></div>
+        <div class="phl"><span class="mono ph">focus</span><span class="inp">default: correctness</span></div>
+        <div class="foot"><span class="ok">✓ Saved · no secrets found</span><span style="flex:1"></span><span class="btn ghost">Open file</span><span class="btn">Duplicate</span><span class="btn dan">Delete</span></div>
+        <div class="path mono">~/.config/cloudroom/snippets/review-pr.md</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<p class="cap"><b>2</b> · Picker — composer popup, opened with <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>S</kbd> or the <b>+</b> menu</p>
+<div class="win">
+  <div class="side">
+    <div class="logo">Cloudroom</div>
+    <div class="nav"><i></i>New thread</div>
+    <div class="nav"><i></i>Loops</div>
+    <div class="nav"><i></i>Snippets</div>
+    <div class="sep"></div>
+    <div class="thr">cloudroom-plugins</div>
+    <div class="thr" style="color:#fff">&nbsp;&nbsp;Qoder provider review</div>
+    <div class="thr">&nbsp;&nbsp;Prompt Snippets design</div>
+  </div>
+  <div class="main">
+    <div class="hdr"><h1>Qoder provider review</h1><span class="dim">claude-code · local</span></div>
+    <div class="chat">
+      <div class="msg u">The conformance suite is green on plugin-qoder now.</div>
+      <div class="msg">All 14 conformance cases pass. The branch is pushed as <span class="mono">feat/qoder-provider</span> and PR #128 is open.</div>
+      <div class="note">Insert only writes text into the composer. Nothing is sent until you press Enter.</div>
+      <div class="pop">
+        <div class="pl">
+          <div class="q"><span class="dim">⌕</span><span>rev<span class="caret"></span></span><span class="dim">3 of 7</span></div>
+          <div class="it on"><div class="t"><u>Rev</u>iew this PR<small>Review {{target}} as a strict senior reviewer. Focus on…</small></div><span class="tag">review</span><span class="sc g">global</span></div>
+          <div class="it"><div class="t">P<u>r</u>ovid<u>e</u>r conformance run<small>Run the conformance suite for {{plugin|plugin-muse}} and…</small></div><span class="tag">test</span><span class="sc p">cloudroom-plugins</span></div>
+          <div class="it"><div class="t">Wo<u>r</u>k<u>e</u>r brief<small>WORKER BRIEF from Director {{thread}} · Role: {{role}}…</small></div><span class="tag">delegate</span><span class="sc p">cloudroom-plugins</span></div>
+          <div class="keys"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Tab</kbd> fill placeholders</span><span><kbd>Enter</kbd> insert at cursor</span><span><kbd>Esc</kbd> close</span></div>
+        </div>
+        <div class="pr">
+          <div class="pv mono">Review <span class="ph">PR #128</span> as a strict senior reviewer.
+Focus on <span class="ph">correctness</span>.
+
+Report findings as a table: severity, file:line,
+what breaks, the smallest fix. Do not edit files.
+If you find nothing, say so plainly.</div>
+          <div class="flds">
+            <div><span class="l">target</span><div class="inp f">PR #128<span class="caret"></span></div></div>
+            <div><span class="l">focus</span><div class="inp dim">correctness</div></div>
+          </div>
+        </div>
+      </div>
+      <div class="comp">
+        <div class="tx">Before we merge: <span class="caret"></span></div>
+        <div class="bar"><span class="plus">+</span><span>Fable 5.2 · high</span><span class="send">↑</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>
