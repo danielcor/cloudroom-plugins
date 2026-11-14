@@ -86,12 +86,14 @@ Focus on {{focus|correctness}}.
   After `:` (YAML or JSON), the value is a scalar. `key: value` counts only where a key can start: at line
   start, after one or more `- `, or after `{`, `,` or `[`. So prose like "the password: it must be long"
   stays clean.
-  - At line start the scalar runs to the end of the line, without a ` # comment` or a trailing `,`. So
-    `password: true hunter2` is literal.
+  - At line start the scalar runs to the end of the line, without a ` # comment`. A quoted scalar may be
+    followed by `,`, as in a multi-line JSON object. A plain scalar keeps its comma, so
+    `password: true hunter2` and `password: $PASSWORD,` are literal.
   - Inside `{…}` it ends at `,` `}` or `]`. So `{"password":"$PASSWORD"}` and `{"password":""}` stay clean.
   - An unquoted `true`, `false` or `null` adds nothing; `password: "null"` and `PASSWORD=true` are literal.
   - `$(cmd)` is literal there, because YAML does not run it.
-  - URL and curl passwords get no command exemption, and curl keeps the quoting rules above.
+  - URL and curl passwords get no command exemption. curl keeps the quoting rules above, and an escaped `\:`
+    separates user and password too.
 
   Values are taken whole, quoted or not, punctuation included. So are values continued onto the next line with a
   shell `\`, and YAML `key: |` or `>` blocks. The body is also scanned with placeholder defaults filled in, so

@@ -80,7 +80,7 @@ describe("SnippetStore", () => {
   });
 
   describe("save gate, strict rule for secret-named keys", () => {
-    it.each(["export PASSWORD='DQLXMFRTVZNP aB3dE5gH7jK9'", 'password: "choose a new one"', "deploy --token aaaaaaaaaaaaaaaaaaaa", "PASSWORD=true", 'TOKEN="$(echo)hunter2"', "- - password: x", 'PASSWORD=""hunter2', 'password: "   "', "password: true hunter2", "PASSWORD='$(echo hunter2)'", 'PASSWORD="\\$hunter2"'])(
+    it.each(["export PASSWORD='DQLXMFRTVZNP aB3dE5gH7jK9'", 'password: "choose a new one"', "deploy --token aaaaaaaaaaaaaaaaaaaa", "PASSWORD=true", 'TOKEN="$(echo)hunter2"', "- - password: x", 'PASSWORD=""hunter2', 'password: "   "', "password: true hunter2", "PASSWORD='$(echo hunter2)'", 'PASSWORD="\\$hunter2"', "password: $PASSWORD,", "curl -u admin\\:hunter2 https://x"])(
       "blocks %s and says how to reword it",
       async (body) => {
         const { store, files } = setup();

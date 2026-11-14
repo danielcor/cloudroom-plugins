@@ -38,9 +38,11 @@ const ASSIGN_EQ = new RegExp(`(?<![A-Za-z0-9_.-])(?=-*${NAME}["']?[ \\t]*=[ \\t]
 // shell word: a "double-quoted" or 'single-quoted' string, or plain text.
 const YAML_QUOTED = String.raw`"(?:[^"\\\n]|\\.)*"|'(?:[^'\n]|'')*'`;
 // At line start (after one or more `- `): the scalar runs to the end of the line, without
-// a ` # comment` or a trailing `,` (a line of a multi-line JSON object).
+// a ` # comment`. A quoted scalar may be followed by `,` (a line of a multi-line JSON
+// object); a plain scalar keeps its comma (`password: true,` is the string "true,").
+// Group 2 is a quoted scalar, group 3 a plain one.
 const ASSIGN_COLON_LINE = new RegExp(
-  String.raw`(?<=^[ \t]*(?:-[ \t]+)*["']?)(?=${NAME}["']?[ \t]*:[ \t]*(${YAML_QUOTED}|[^\n]*?)[ \t]*,?(?:[ \t]+#.*)?[ \t]*$)`,
+  String.raw`(?<=^[ \t]*(?:-[ \t]+)*["']?)(?=${NAME}["']?[ \t]*:[ \t]*(?:(${YAML_QUOTED})[ \t]*,?|([^\n]*?))(?:[ \t]+#.*)?[ \t]*$)`,
   "dgu",
 );
 // Inside a flow mapping or JSON object (after `{`, `,`, `[`): the scalar ends at `,` `}` `]`.
@@ -193,10 +195,13 @@ function scalarLiteral(raw: string): string | null {
   return referenceLiteral(t);
 }
 
-/** The part of a word after its first `:`, keeping each piece's provenance (curl `user:password`). */
+/**
+ * The part of a word after its first `:` as the program receives it (an escaped
+ * `\:` is a colon too), keeping each later piece's provenance (curl `user:password`).
+ */
 function afterFirstColon(segs: readonly Segment[]): Segment[] | null {
   for (let k = 0; k < segs.length; k++) {
-    const idx = segs[k]!.kind === "escaped" ? -1 : segs[k]!.text.indexOf(":");
+    const idx = segs[k]!.text.indexOf(":");
     if (idx !== -1) return [{ ...segs[k]!, text: segs[k]!.text.slice(idx + 1) }, ...segs.slice(k + 1)];
   }
   return null;
@@ -267,22 +272,23 @@ export function scanSecrets(text: string): SecretFinding[] {
     const at = (m: RegExpMatchArray, group: number) => lineAt(l, m.indices?.[group]?.[0] ?? m.index ?? 0);
     for (const { kind, re } of PATTERNS) for (const m of l.text.matchAll(re)) add(kind, at(m, 0));
     // Shell words after `=` and flags; YAML/JSON scalars after `:`.
-    type Named = [RegExpMatchArray, "shell" | "flag" | "scalar"];
+    // [match, mode, value group].
+    type Named = [RegExpMatchArray, "shell" | "flag" | "scalar", number];
     const named: Named[] = [
-      ...[...l.text.matchAll(ASSIGN_EQ)].map((m): Named => [m, "shell"]),
-      ...[...l.text.matchAll(ASSIGN_COLON_LINE)].map((m): Named => [m, "scalar"]),
-      ...[...l.text.matchAll(ASSIGN_COLON_FLOW)].map((m): Named => [m, "scalar"]),
-      ...[...l.text.matchAll(FLAG_SPACED)].map((m): Named => [m, "flag"]),
+      ...[...l.text.matchAll(ASSIGN_EQ)].map((m): Named => [m, "shell", 2]),
+      ...[...l.text.matchAll(ASSIGN_COLON_LINE)].map((m): Named => [m, "scalar", m[2] !== undefined ? 2 : 3]),
+      ...[...l.text.matchAll(ASSIGN_COLON_FLOW)].map((m): Named => [m, "scalar", 2]),
+      ...[...l.text.matchAll(FLAG_SPACED)].map((m): Named => [m, "flag", 2]),
     ];
-    for (const [m, mode] of named) {
+    for (const [m, mode, group] of named) {
       if (!isSecretName(m[1]!)) continue;
-      const raw = m[2]!;
+      const raw = m[group]!;
       let lit: string | null;
       if (mode === "scalar") lit = scalarLiteral(raw);
       // After a spaced flag, another option or a shell operator is not its value.
       else if (mode === "flag" && /^[-<>|;&]/u.test(raw)) lit = null;
       else lit = literalText(segments(raw), true);
-      if (lit !== null) add(LITERAL_KIND, at(m, 2));
+      if (lit !== null) add(LITERAL_KIND, at(m, group));
     }
     for (const m of l.text.matchAll(URL_USERINFO)) if (referenceLiteral(m[1]!) !== null) add("password in a URL", at(m, 1));
     for (const m of l.text.matchAll(BASIC_AUTH)) if (isBasicCredentials(m[1]!)) add("Basic auth credentials", at(m, 1));

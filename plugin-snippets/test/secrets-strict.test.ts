@@ -12,6 +12,7 @@ describe("strict rule for secret-named keys", () => {
     ["URL userinfo with a command substitution", "git clone https://user:$(hunter2)@example.com/r.git"],
     ["curl credentials with a command substitution", "curl -u 'user:$(hunter2)' https://example.com"],
     ["S6 curl credentials with an escaped dollar", 'curl -u "admin:\\$hunter2" https://example.com'],
+    ["S8 curl credentials with an escaped colon", "curl -u admin\\:hunter2 https://example.com"],
   ])("S2 keeps URL and curl checks without a runtime exemption: %s", (_why, text) => {
     expect(scanSecrets(text)).not.toEqual([]);
   });
@@ -48,6 +49,9 @@ describe("strict rule for secret-named keys", () => {
     ["S2 a command in a YAML value is not run", "password: $(cat pw)", 1],
     ["S6 an escaped dollar in double quotes", 'PASSWORD="\\$hunter2"', 1],
     ["S6 an escaped dollar unquoted", "PASSWORD=\\$hunter2", 1],
+    // Delta review round 3 on f13f1e2.
+    ["S9 a plain YAML scalar ending in a comma (reference)", "password: $PASSWORD,", 1],
+    ["S9 a plain YAML scalar ending in a comma (boolean)", "password: true,", 1],
   ])("blocks %s", (_why, text, line) => {
     expect(kinds(text)).toContain(`${line}:${LITERAL}`);
   });
@@ -87,6 +91,8 @@ describe("strict rule for secret-named keys", () => {
     '  "password": "$PASSWORD",',
     "password: true # set below",
     'PASSWORD="$(echo $PASSWORD)"',
+    '  "password": "",',
+    "curl -u admin\\: https://example.com",
   ])("keeps clean: %s", (text) => {
     expect(scanSecrets(text)).toEqual([]);
   });
