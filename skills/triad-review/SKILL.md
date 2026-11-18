@@ -1,6 +1,6 @@
 ---
 name: triad-review
-description: Use when the user asks for a "triad review", a "3-model review" or "review with three models". Runs one blind, read-only, scored (0-10) review round on 3 model families picked from Claude, GPT, Gemini, Kimi and Muse by review quality, quota, recent load and token cost, as visible Cloudroom child threads, then verifies and merges the findings. Not review-council ("council") and not sol-loop.
+description: Use when the user asks for a "triad review", a "3-model review" or "review with three models". Runs one blind, read-only, scored (0-10) review round on 3 model families picked from Claude, GPT, Gemini, Kimi and Muse by review quality, quota, recent load and token cost, as visible Cloudroom child threads on local machines or Cloud, then verifies and merges the findings. Not review-council ("council") and not sol-loop.
 ---
 
 # triad-review
@@ -14,15 +14,13 @@ is the caller's loop (sol-loop, review-council or the user).
 - Exactly 3 seats from 3 different families. Never 2 seats from one family.
 - Use your own family (the family of the model running you) only to fill a seat no other family can.
 - Every seat and probe is a Cloudroom child thread (`room-cli thread spawn --parent-self`). Never start an
-  agent CLI (`claude`, `codex`, `agy`, `muse`, `kimi`) from a shell. Never use built-in Agent/Task subagents.
-- Every seat gets the same brief file and the same head SHA. No seat sees another seat's reply.
+  agent CLI (`claude`, `codex`, `agy`, `muse`, `kimi`) from a shell, and never use the `argon` or
+  `muse-relay` shell relays. Never use built-in Agent/Task subagents.
+- Every seat gets the same brief and the same head SHA. No seat sees another seat's reply.
 - A family that is down is skipped. Never swap in another model of the same family to fill its seat; the
   only same-family fallbacks are the two named in step 3 (Carbon to Argon, Wonder Full to Wonder).
 - Fewer than 3 families up: run with what is up and say so in the report. None up: stop and say why.
 - Use the logins already on each machine (their subscription plans). Never add or set an API key for a seat.
-- Seats and probes run only on connected machines from `room-cli machine list`, never `--machine cloud`:
-  `agy` and `acp-muse` are local-host providers, and `settings usage` / `provider models` reject
-  `--machine cloud` ("Machine 'cloud' was not found").
 - The head must be a commit on a branch. If the change is not committed, or HEAD is detached, stop and ask;
   do not commit or branch on your own.
 
@@ -32,28 +30,34 @@ is the caller's loop (sol-loop, review-council or the user).
    No dot in the template: request ids must match `^[a-zA-Z0-9_-]{1,64}$` or the spawn fails with HTTP 400.
 2. Every spawn (probe, seat or retry) gets request id `$RID-<kind>-<family>-<n>` and the unique title
    `triad $RID <kind> <family> <n>` (`<kind>` is `probe` or `seat`; `<n>` counts up from 1 for each new
-   spawn of that kind and family, across machines, fallback models and retries). Before the spawn, append one JSON
-   line to `$RUN/spawns.jsonl` with its exact parameters: `requestId`, `title`, `kind`, `family`, `machine`,
-   `provider`, `model`, `level`, `baseBranch` (or `null`), `promptFile`. After the reply, append
+   spawn of that kind and family, across machines, fallback models and retries). Before the spawn, append
+   one JSON line to `$RUN/spawns.jsonl` with its exact parameters: `requestId`, `title`, `kind`, `family`,
+   `machine`, `provider`, `model`, `level`, `baseBranch` (or `null`), `promptFile`. After the reply, append
    `{"requestId":…,"threadId":…,"environmentId":…}` (`room-cli thread show <id> --json` gives
-   `.environment.id`).
+   `.environment.id`; it is `null` for a Cloud child).
    - HTTP 4xx validation error (for example `HTTP 400: Invalid string`): nothing was created. Append
      `{"requestId":…,"error":"<text>"}`; that record is resolved.
    - Any other error or no answer: replay that exact spawn with the same `--request-id` right away, in the
      same step (Cloudroom returns the thread if it was made instead of a duplicate). Never spawn in step 8.
 3. Secrets: if the diff holds a key, token or `.env` content, stop and tell the user (a prompt stays in its
-   thread log).
-4. Worktree hooks: before any spawn (probes in step 4 and seats in step 6), pick the commit it checks out,
-   `EXPECTED_SHA` (40 characters): the head on the author's machine; on another machine, which has no copy of
-   an unpushed head, `git rev-parse <ref>` in that machine's project checkout (for example over
-   `tailscale ssh`), where `<ref>` is its `.defaultWorktreeBaseBranch` from
-   `room-cli project branches "$ROOM_PROJECT_ID" --host <host id> --json`. Every spawn passes
-   `--base-branch "$EXPECTED_SHA"`, so the worktree and its hooks come from that exact commit.
+   thread log). Before any `--machine cloud` probe or seat from a local author: Cloudroom copies the
+   checkout's untracked `.env*` files into Cloud sandboxes and gives every Cloud thread the keys and setup
+   script in `room-cli cloud env list --json` (`.variables[].name`, `.setup`; values stay hidden). If any
+   `.env*` file in the checkout (`git ls-files --others --ignored --exclude-standard`) holds a credential,
+   or `.variables` or `.setup` is non-empty, use Cloud only if the user approved it with those items named.
+   A Cloud author's Cloud children share its own Cloud environment.
+4. Worktree hooks (local machines only; a Cloud child has no worktree): before any local spawn (probes in
+   step 4 and seats in step 6), pick the commit it checks out, `EXPECTED_SHA` (40 characters): the head on
+   the author's machine; on another machine, which has no copy of an unpushed head, `git rev-parse <ref>` in
+   that machine's project checkout (for example over `tailscale ssh`), where `<ref>` is its
+   `.defaultWorktreeBaseBranch` from `room-cli project branches "$ROOM_PROJECT_ID" --host <host id> --json`.
+   Every local spawn passes `--base-branch "$EXPECTED_SHA"`, so the worktree and its hooks come from that
+   exact commit.
    - `git ls-tree <EXPECTED_SHA> -- .worktreeinclude .bb-env-setup.sh .bb-env-teardown.sh` on that machine
      lists the hook files present. A file it does not list is absent, which is normal and safe.
    - Read each present file, and any repo script it calls, with `git show <EXPECTED_SHA>:<file>`. If
-     `.worktreeinclude` is present, also check the untracked files it matches in that machine's source
-     checkout (Cloudroom copies them into the worktree).
+     `.worktreeinclude` has any pattern that could match `.env`, `.env.*`, keys, certificates, tokens or
+     other credential files, do not spawn there: the untracked files it copies can change after you look.
    - If any of these would give the child a credential or run something unsafe, or the check itself fails
      (SSH error, missing commit, unreadable checkout), do not spawn on that machine; on the author's
      machine, stop and ask the user.
@@ -68,7 +72,7 @@ is the caller's loop (sol-loop, review-council or the user).
 
 ## 3. The families (default order, best reviewer first)
 
-Each cell is `--model` / `--reasoning-level`.
+Each cell is `--model` / `--reasoning-level` on local machines.
 
 | # | Family | `--provider` | High | Normal | Low |
 | - | --- | --- | --- | --- | --- |
@@ -85,33 +89,46 @@ fast with fewer deep catches. Muse Wonder Full's own prompt is about 28k input t
 - Gemini: Carbon first. If Carbon is down on every machine, use Argon with the same suffix
   (`gemini-4-argon-high` etc.). The agy model suffix and `--reasoning-level` must match.
 - Muse High: Wonder Full only with access proof (step 4); else `muse-wonder-1.0` / `high`.
+- On `--machine cloud`: GPT and Claude use the same provider and models. Kimi spawns as
+  `--provider acp-kimi --model default` (its Cloud harness id is `kimi`, but `--provider kimi` fails with
+  HTTP 400), same reasoning levels. Gemini and Muse have no Cloud harness today, so they are down on Cloud
+  until `room-cli cloud status --json` lists one for them and a Cloud probe passes.
 - Cost: today only Codex logs token counts (`thread/tokenUsage/updated`), so the ledger cannot re-rank yet
-  and this order stays. Once 2 or more of families 2 to 5 each have 10+ seat rows
-  with `tokens` set, re-rank those: sum `input - cached + output` over their last 20 such rows and divide by
-  the sum of `verified` (skip a family whose sum is 0). Lower ranks higher. GPT stays first on High risk.
+  and this order stays. Once 2 or more of families 2 to 5 each have 10+ seat rows with `tokens` set,
+  re-rank those: sum `input - cached + output` over their last 20 such rows and divide by the sum of
+  `verified` (skip a family whose sum is 0). Lower ranks higher. GPT stays first on High risk.
 
 ## 4. Check who is up
 
-Check each candidate on a named machine: the author's first (`--machine <name>`, see `room-cli machine list`).
-If `room-cli` fails for every provider (for example HTTP 401), the run is blocked: stop and report it.
-A check that fails for one provider means that provider is down on that machine.
+Machines: `room-cli status --json`. A local author (`.thread.environment.hostId` set) checks its own
+machine first, then the other connected machines in `room-cli machine list`, then `cloud` (useful when
+local machines are down or busy, for example in market hours, or when the user asks for Cloud). A Cloud
+author (`hostId` `null`) uses only `cloud`. If `room-cli` fails for every provider (for example HTTP 401),
+the run is blocked: stop and report it. A check that fails for one provider means that provider is down
+on that machine.
 
-1. Cooldown: a model whose last ledger row on that machine is `"ok":false` is down there if that row is a
-   limit, 429 or quota error under 6 hours old, or an access or unknown-model error under 24 hours old.
-   Apply this before any probe.
-2. `room-cli settings usage --json --machine <name>`: real quota, but only for `codex` and `claude-code`.
-   A `status` other than `ok`, or a `windows[].usedPercent` of 90 or more, means down. Skip windows whose
-   `model` is set to another model (for example the `Fable` window when the seat runs Opus).
-3. `room-cli provider models <provider> --json --machine <name>` must list the model, except Carbon (4.4).
-   Muse prints "No models available" when it is logged out on that machine.
-4. A listed model is not proof for `agy` or `acp-muse`. Carbon sits under "More Models" in agy's picker, and
-   Cloudroom's agy list can show only the three built-in Argon ids where Carbon works (`agy models` has no
-   flag for more). Muse lists Wonder Full on accounts that cannot call it. Proof is a ledger row for that
-   model and machine with `"ok":true` in the last 7 days. With none, spend one probe child per unproved
-   model: write `Probe only. Do not run any tools. Reply with exactly: PROBE-OK` to `$RUN/probe.md` and use
-   the step 6 spawn command with kind `probe` and `--prompt-file "$RUN/probe.md"` (step 1.4 applies).
-   It passes if the reply is `PROBE-OK` and the turn did not fail. Cloudroom logs only the requested model,
-   so this proves the id was accepted and ran, not which weights answered. Log the probe (step 8).
+1. Cooldown, every machine (`<name>` or `cloud`): a model whose last ledger row on that machine is
+   `"ok":false` is down there if that row is a limit, 429 or quota error under 6 hours old, or an access
+   or unknown-model error under 24 hours old. Apply this before any probe.
+2. Quota, `codex` and `claude-code` only: `room-cli settings usage --json --machine <name>` for a local
+   machine; for `cloud`, the same command without `--machine` (it fails with "Machine 'cloud' was not
+   found"; skip this check if it fails inside a Cloud author). A `status` other than `ok`, or a
+   `windows[].usedPercent` of 90 or more, means down. Skip windows whose `model` is set to another model
+   (for example the `Fable` window when the seat runs Opus).
+3. Models, local machines: `room-cli provider models <provider> --json --machine <name>` must list the
+   model, except Carbon (4.4). Muse prints "No models available" when it is logged out on that machine.
+   Cloud: `room-cli cloud status --json` must show `.ready` true and `.cloudPaused` false, the family's
+   harness in `.harnesses[].id` (`codex`, `claude-code`, `kimi`), and the model in that harness's
+   `.models[].model`, or, when `.models` is null or empty, equal to its `.model` (Kimi's is `default`).
+4. Proof. A listed model is not proof for `agy`, `acp-muse` or Cloud Kimi. Carbon sits under "More Models"
+   in agy's picker, and Cloudroom's agy list can show only the three built-in Argon ids where Carbon works
+   (`agy models` has no flag for more). Muse lists Wonder Full on accounts that cannot call it. Cloud Kimi
+   lists no models. Proof is a ledger row for that provider, model and machine with `"ok":true` in the
+   last 7 days. With none, spend one probe child per unproved model: write `Probe only. Do not run any
+   tools. Reply with exactly: PROBE-OK` to `$RUN/probe.md` and use the step 6 spawn command for that
+   machine with kind `probe` and `--prompt-file "$RUN/probe.md"` (step 1.3 and 1.4 apply). It passes if
+   the reply is `PROBE-OK` and the turn did not fail. Cloudroom logs only the requested model, so this
+   proves the id was accepted and ran, not which weights answered. Log the probe (step 8).
 5. Gemini, Kimi and Muse have no quota signal in `room-cli`, so 4.2 does not apply to them.
 
 ## 5. Pick the seats
@@ -120,7 +137,7 @@ A check that fails for one provider means that provider is down on that machine.
 2. Rotation: a family that sat in each of the last 3 runs moves below the next family that did not.
    Exception: GPT on High risk.
 3. Take the first 3. If fewer than 3, fill from your own family, only if step 4 found it up.
-   Machine: the author's first; another machine only when the family is down here.
+   Machine: the first in step 4's order where the family is up.
 
 ## 6. Brief and launch
 
@@ -151,7 +168,10 @@ SCORE: <0-10>/10
 F1 [BLOCKER|MAJOR|MINOR|NIT] <file>:<line> <claim>. Evidence: <quote or reason>. Fix: <one line>
 ```
 
-One spawn per seat (record it as in step 1.2; check worktree hooks as in step 1.4):
+`$RUN/brief-notools.md` is the line `Tool-free mode: do not call any command, file or MCP tools; review the
+inline Diff below alone and use CONTEXT: diff-only.` followed by `$RUN/brief.md` unchanged.
+
+One spawn per seat (record it as in step 1.2). Local machine (check worktree hooks as in step 1.4):
 
 ```sh
 room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --request-id "$RID-seat-<family>-<n>" \
@@ -160,44 +180,53 @@ room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --reques
   --title "triad $RID seat <family> <n>" --prompt-file "$RUN/brief.md"
 ```
 
+Cloud (no worktree, branch or permission flags; Cloud threads run with full permissions in their own
+disposable sandbox, so every Cloud attempt is tool-free):
+
+```sh
+room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --request-id "$RID-seat-<family>-<n>" \
+  --machine cloud --provider <p> --model <m> --reasoning-level <l> \
+  --title "triad $RID seat <family> <n>" --prompt-file "$RUN/brief-notools.md"
+```
+
 - `--base-branch` takes a 40-character commit (checked live: the worktree came up at that exact commit).
-  On another machine `EXPECTED_SHA` is its default-branch commit, not the head, so that seat must use
-  `CONTEXT: diff-only`.
-- `--permission-mode accept-edits` for every provider. Cloudroom has no read-only mode; each seat starts in
-  its own throwaway worktree. Headless agy cannot ask: any denied read or command ends its turn with no
-  review (`acp/agy-acp.mjs`, `onEvent`).
+- Local: `--permission-mode accept-edits` for every provider. Cloudroom has no read-only mode; each local
+  seat starts in its own throwaway worktree. Headless agy cannot ask: any denied read or command ends its
+  turn with no review (`acp/agy-acp.mjs`, `onEvent`).
 - Wait on each seat by id: `room-cli thread wait <id> --event turn/completed --timeout 120`, repeated up to
-  20 minutes. Between waits, `room-cli thread interactions list <id>` lists pending approvals. Read each with
-  `room-cli thread interactions show <interaction> <id>` and check the whole command: every flag, argument,
-  pipe, redirection and path. Approve (`room-cli thread interactions approve <interaction> <id>`) only a
-  non-mutating read: `git rev-parse HEAD`, `git status`, `git diff`, `git show`, `git log`, `ls`, `cat`,
-  `head`, `tail`, `wc`, `nl`, `grep`, `rg` or `sed -n` (no `-i`, no write flag, no `>`), on relative,
-  non-credential paths inside that seat's checkout. Deny everything else
-  (`room-cli thread interactions deny …`), such as `npm test`, and deny any command you cannot see in full
-  (some providers, such as Kimi, send only a truncated summary).
+  20 minutes. Between waits on a local seat, `room-cli thread interactions list <id>` lists pending
+  approvals. Read each with `room-cli thread interactions show <interaction> <id>` and check the whole
+  command: every flag, argument, pipe, redirection and path. Approve
+  (`room-cli thread interactions approve <interaction> <id>`) only a non-mutating read: `git rev-parse
+  HEAD`, `git status`, `git diff`, `git show`, `git log`, `ls`, `cat`, `head`, `tail`, `wc`, `nl`, `grep`,
+  `rg` or `sed -n` (no `-i`, no write flag, no `>`), on relative, non-credential paths inside that seat's
+  checkout. Deny everything else (`room-cli thread interactions deny …`), such as `npm test`, and deny any
+  command you cannot see in full (some providers, such as Kimi, send only a truncated summary).
 - Still running after 20 minutes, a `turn/completed` with `status` `failed`, or an empty reply is a failed
   seat, never an APPROVE.
 - A valid reply (`room-cli thread output <id>`) has exactly one of each header, then only `F` lines:
   - `HEAD: <the head SHA>`.
-  - `CONTEXT: checkout` or `CONTEXT: diff-only`. `checkout` counts only if `room-cli environment status
-    <env id> --json` shows `.workspace.checkout.headSha` equal to the head; otherwise it must be `diff-only`.
+  - `CONTEXT: checkout` only on a local seat whose `EXPECTED_SHA` and `room-cli environment status <env id>
+    --json` `.workspace.checkout.headSha` both equal the head; every other seat, Cloud included, must use
+    `CONTEXT: diff-only`.
   - `VERDICT: APPROVE` with `SCORE: 10/10` and no `F` lines, or `VERDICT: CHANGES` with at least one `F` line
     and an integer `SCORE` in the band of its highest severity: any BLOCKER `0`-`4`, else any MAJOR `5`-`7`,
     else (MINOR or NIT only) `8`-`9`.
   - Every other line in the form `F<n> [BLOCKER|MAJOR|MINOR|NIT] <file>:<line> <claim>. Evidence: <…> Fix: <…>`.
-  - `.workspace.workingTree.state` is `clean` in that environment status. This only sees the final state
-    (not ignored files or reverted edits), so the thread log is checked too:
-  - `room-cli thread log <id> --json --all` has no `fileChange` item. A `diff-only` seat has no `fileRead`
-    item and no `commandExecution` other than `git rev-parse HEAD` (the brief's own check). A `checkout` seat's `commandExecution` items are only the
-    approved reads listed above (look inside a shell wrapper such as `/bin/zsh -lc '…'`), and every path it
-    reads, by `fileRead` or by command, is inside its worktree (`.environment.path` from
-    `room-cli thread show <id> --json`) and is not `.env` or a credential file. A read whose target the log
-    does not show counts as a miss.
+  - Local seat: `.workspace.workingTree.state` is `clean` in that environment status. This only sees the
+    final state (not ignored files or reverted edits), so the thread log is checked too.
+  - `room-cli thread log <id> --json --all` never has a `fileChange` item. A `diff-only` seat has no
+    `fileRead` or `toolCall` item, and no `commandExecution` other than `git rev-parse HEAD`; with
+    `brief-notools.md`, none at all. A `checkout` seat may run only the approved reads above: as a
+    `commandExecution` (look inside a shell wrapper such as `/bin/zsh -lc '…'`), as a `fileRead`, or as a
+    read-only `toolCall` (for lean-ctx: `ctx_read`, `ctx_search`, `ctx_glob`, `ctx_tree`; a `ctx_shell`
+    `arguments.command` is judged like a `commandExecution`; anything else, such as `ctx_patch`, is a
+    miss). Every path read must show in the log (`path`, `arguments.paths` or the command), sit inside the
+    worktree (`.environment.path` from `room-cli thread show <id> --json`), and not be `.env` or a
+    credential file. A read whose target the log does not show is a miss.
 
-  Any miss makes the reply invalid: re-run the seat once (a second attempt), then report it failed. If attempt 1
-  ended on a tool auto-denial, attempt 2 uses `$RUN/brief-notools.md`: the line
-  `Tool-free retry: do not call any tools; review the inline Diff only and use CONTEXT: diff-only.` followed
-  by `$RUN/brief.md` unchanged.
+  Any miss makes the reply invalid: re-run the seat once (a second attempt), then report it failed. If a
+  local attempt 1 ended on a tool auto-denial, its second attempt uses `$RUN/brief-notools.md`.
 
 ## 7. Merge and verify
 
@@ -212,9 +241,9 @@ room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --reques
 ## 8. Ledger, clean up, report
 
 Append one JSON line per probe and per seat attempt (a retried seat logs both attempts) to
-`~/.local/state/triad-review/ledger.jsonl` (`mkdir -p` the directory). A valid seat reply logs its
-`verdict`, integer `score`, `raised` and `verified`. Probes, failed and invalid attempts log `null` for all
-four:
+`~/.local/state/triad-review/ledger.jsonl` (`mkdir -p` the directory). `machine` is the machine name or
+`cloud`. A valid seat reply logs its `verdict`, integer `score`, `raised` and `verified`. Probes, failed and
+invalid attempts log `null` for all four:
 
 ```json
 {"ts":"2026-11-18T09:00:00Z","run":"<RID>","kind":"seat","repo":"<name>","head":"<sha>","risk":"normal","family":"gpt","provider":"codex","model":"gpt-6.1-sol","level":"medium","machine":"aipc-ubuntu","thread":"thr_x","ok":true,"error":null,"verdict":"CHANGES","score":8,"raised":3,"verified":2,"tokens":{"input":0,"cached":0,"output":0,"reasoning":0},"ctx":null,"secs":0}
@@ -241,14 +270,15 @@ of `$RUN/spawns.jsonl` by `requestId`, so each spawn is one record (its paramete
    with `.thread.status` `idle` or `error` (not `pending`, `starting`, `active` or `stopping`). If `stop`
    errors, or the status is still unsettled after 1 minute, run `stop` once more; unsettled after 2 minutes
    leaves the record unresolved, and an unsettled thread is never archived or deleted. Then
-   `room-cli thread archive <threadId>` and `room-cli environment delete <environmentId>` (probes, seats
-   and retries alike; take `.environment.id` from `room-cli thread show <threadId> --json` if it was not
-   recorded); both must exit 0.
-3. `room-cli environment show <environmentId> --json` must reach `.lifecycle.phase` `destroyed`
-   (teardown runs in the background). If it shows `parked`, run `room-cli environment delete <environmentId>`
-   again and re-check. Not `destroyed` within 5 minutes: the record stays unresolved.
+   `room-cli thread archive <threadId>`; it must exit 0. A Cloud record ends here (it has no
+   `environmentId`; archiving retires its sandbox).
+3. Local records (probes, seats and retries alike; take `.environment.id` from `room-cli thread show
+   <threadId> --json` if it was not recorded): `room-cli environment delete <environmentId>` must exit 0,
+   then `room-cli environment show <environmentId> --json` must reach `.lifecycle.phase` `destroyed`
+   (teardown runs in the background). If it shows `parked`, run `room-cli environment delete
+   <environmentId>` again and re-check. Not `destroyed` within 5 minutes: the record stays unresolved.
 
-`rm -r "$RUN"` only when every record passed all three. Otherwise delete only the prompt files, keep
+`rm -r "$RUN"` only when every record is resolved. Otherwise delete only the prompt files, keep
 `$RUN/spawns.jsonl`, and report its path, the unresolved request ids and any environment not `destroyed`.
 
 Report:
