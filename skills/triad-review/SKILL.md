@@ -1,6 +1,6 @@
 ---
 name: triad-review
-description: Use when the user asks for a "triad review", a "3-model review" or "review with three models". Runs one blind, read-only review round on 3 model families picked from Claude, GPT, Gemini, Kimi and Muse by review quality, quota, recent load and token cost, as visible Cloudroom child threads, then verifies and merges the findings. Not review-council ("council") and not sol-loop.
+description: Use when the user asks for a "triad review", a "3-model review" or "review with three models". Runs one blind, read-only, scored (0-10) review round on 3 model families picked from Claude, GPT, Gemini, Kimi and Muse by review quality, quota, recent load and token cost, as visible Cloudroom child threads, then verifies and merges the findings. Not review-council ("council") and not sol-loop.
 ---
 
 # triad-review
@@ -27,23 +27,26 @@ is the caller's loop (sol-loop, review-council or the user).
 
 1. `RUN=$(mktemp -d "${TMPDIR:-/tmp}/triad-XXXXXX")` (private, unique). `RID=$(basename "$RUN")`.
    No dot in the template: request ids must match `^[a-zA-Z0-9_-]{1,64}$` or the spawn fails with HTTP 400.
-2. Every spawn (probe, seat or retry) gets its own request id `$RID-<probe|seat>-<family>-<attempt>`.
-   Before the spawn, append one JSON line to `$RUN/spawns.jsonl` with its exact parameters: `requestId`,
-   `kind`, `family`, `machine`, `provider`, `model`, `level`, `baseBranch` (or `null`), `promptFile`. After
-   the reply, append `{"requestId":…,"threadId":…,"environmentId":…}` (`room-cli thread show <id> --json`
-   gives `.environment.id`). A spawn rejected with an HTTP 4xx validation error (for example
-   `HTTP 400: Invalid string`) created nothing: append `{"requestId":…,"error":"<text>"}`; that record is
-   resolved. Any other error or no answer is unconfirmed: replay that exact spawn with the same
-   `--request-id`, and Cloudroom returns the thread if it was made instead of a duplicate.
+2. Every spawn (probe, seat or retry) gets request id `$RID-<kind>-<family>-<attempt>` and the unique title
+   `triad $RID <kind> <family> <attempt>` (`<kind>` is `probe` or `seat`). Before the spawn, append one JSON
+   line to `$RUN/spawns.jsonl` with its exact parameters: `requestId`, `title`, `kind`, `family`, `machine`,
+   `provider`, `model`, `level`, `baseBranch` (or `null`), `promptFile`. After the reply, append
+   `{"requestId":…,"threadId":…,"environmentId":…}` (`room-cli thread show <id> --json` gives
+   `.environment.id`).
+   - HTTP 4xx validation error (for example `HTTP 400: Invalid string`): nothing was created. Append
+     `{"requestId":…,"error":"<text>"}`; that record is resolved.
+   - Any other error or no answer: replay that exact spawn with the same `--request-id` right away, in the
+     same step (Cloudroom returns the thread if it was made instead of a duplicate). Never spawn in step 8.
 3. Secrets: if the diff holds a key, token or `.env` content, stop and tell the user (a prompt stays in its
    thread log).
-4. Worktree files: before any spawn (probes in step 4 and seats in step 6), read `.worktreeinclude` and
-   `.bb-env-setup.sh` at the exact ref and machine that spawn checks out: `git show <head branch>:<file>` when
-   it passes `--base-branch`. Without it the ref is that machine's `.defaultWorktreeBaseBranch` from
-   `room-cli project branches "$ROOM_PROJECT_ID" --host <host id> --json` (it differs per machine); read
-   `<that ref>:<file>` in that machine's project checkout (for example over `tailscale ssh`). If either file
-   would give the child a credential, or you cannot read the ref on that machine, do not spawn there. On the
-   author's machine, stop and ask the user.
+4. Worktree hooks: before any spawn (probes in step 4 and seats in step 6), read `.worktreeinclude`,
+   `.bb-env-setup.sh` and `.bb-env-teardown.sh`, and any repo script they call, at the exact ref and machine
+   that spawn checks out: `git show <head branch>:<file>` when it passes `--base-branch`. Without it the ref is
+   that machine's `.defaultWorktreeBaseBranch` from `room-cli project branches "$ROOM_PROJECT_ID" --host
+   <host id> --json` (it differs per machine); read `<that ref>:<file>` in that machine's project checkout
+   (for example over `tailscale ssh`). If any of them would give the child a credential or run something
+   unsafe, or you cannot read the ref on that machine, do not spawn there. On the author's machine, stop and
+   ask the user.
 
 ## 2. Size the risk
 
@@ -93,8 +96,7 @@ A check that fails for one provider means that provider is down on that machine.
    flag for more). Muse lists Wonder Full on accounts that cannot call it. Proof is a ledger row for that
    model and machine with `"ok":true` in the last 7 days. With none, spend one probe child per unproved
    model: write `Probe only. Do not run any tools. Reply with exactly: PROBE-OK` to `$RUN/probe.md` and use
-   the step 6 spawn command with `--request-id "$RID-probe-<family>-<attempt>"` and
-   `--prompt-file "$RUN/probe.md"` (step 1.4 applies).
+   the step 6 spawn command with kind `probe` and `--prompt-file "$RUN/probe.md"` (step 1.4 applies).
    It passes if the reply is `PROBE-OK` and the turn did not fail. Cloudroom logs only the requested model,
    so this proves the id was accepted and ran, not which weights answered. Log the probe (step 8).
 5. Gemini, Kimi and Muse have no quota signal in `room-cli`, so 4.2 does not apply to them.
@@ -113,55 +115,65 @@ Write the brief to `$RUN/brief.md`. Keep it small and byte-identical for every s
 
 ```
 Review only. Do not edit, write, commit, push, comment on PRs, or start subagents or threads.
-Do not open .env or credential files.
-Repo: <abs path>  Base: <sha>  Head: <sha>  Intent: <1-2 sentences>  Out of scope: <scope>
+Do not open .env, credential or skill files, or any path outside your current working directory.
+Repo: <repo name>  Base: <sha>  Head: <sha>  Intent: <1-2 sentences>  Out of scope: <scope>
 Checks: <test / typecheck / lint results>
 Diff (git diff <base>..<head>):
 <the diff; no whole files>
-You may read surrounding code in your checkout if git rev-parse HEAD equals Head.
-If it does not, or you cannot run git, review the diff alone and add the line CONTEXT: diff-only.
+If git rev-parse HEAD runs and equals Head, you may read relative files in your working directory and use
+CONTEXT: checkout. If HEAD differs or you cannot run commands, call no command or file tools: review the
+Diff above alone and use CONTEXT: diff-only.
 Find bugs, broken callers, mismatch with intent, missing tests, security, data loss, concurrency.
 Skip style unless it hides a bug.
 BLOCKER = intended case wrong, or a security or data-loss bug. MAJOR = a real bug callers will hit.
 MINOR = a narrow real defect, or doc wording people act on that could misdirect. NIT = cosmetic.
+SCORE is an integer: 10/10 only with VERDICT: APPROVE and zero findings; with CHANGES 8-9 if only
+MINOR/NIT, 5-7 if any MAJOR, 0-4 if any BLOCKER.
 Reply in at most 40 lines, this format only:
 HEAD: <Head from this brief>
 CONTEXT: checkout or diff-only
 VERDICT: APPROVE (zero findings) or CHANGES
+SCORE: <0-10>/10
 F1 [BLOCKER|MAJOR|MINOR|NIT] <file>:<line> <claim>. Evidence: <quote or reason>. Fix: <one line>
 ```
 
-One spawn per seat (record it as in step 1.2; check worktree files as in step 1.4):
+One spawn per seat (record it as in step 1.2; check worktree hooks as in step 1.4):
 
 ```sh
 room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --request-id "$RID-seat-<family>-1" \
-  --provider <p> --model <m> --reasoning-level <l> --permission-mode <accept-edits|full> \
+  --provider <p> --model <m> --reasoning-level <l> --permission-mode accept-edits \
   --new-environment worktree [--base-branch <head branch>] [--machine <name>] \
-  --title "triad $RID <family>" --prompt-file "$RUN/brief.md"
+  --title "triad $RID seat <family> 1" --prompt-file "$RUN/brief.md"
 ```
 
 - Same machine: pass `--base-branch <head branch>`. Without it the worktree comes from the project default
-  branch. Another machine has no copy of an unpushed branch: omit `--base-branch` there (the seat answers
+  branch. Another machine has no copy of an unpushed branch: omit `--base-branch` there (the seat must use
   `CONTEXT: diff-only`), unless the user allowed a push.
-- Cloudroom has no read-only permission mode (`accept-edits`, `auto`, `full`); each seat touches only its
-  own throwaway worktree, and the clean-worktree check below catches edits. Use `accept-edits`, except
-  `full` for `agy`: headless agy cannot ask, and any denied read or command ends its turn with no review
-  (`acp/agy-acp.mjs`, `onEvent`). The brief still says read-only.
+- `--permission-mode accept-edits` for every provider. Cloudroom has no read-only mode; each seat starts in
+  its own throwaway worktree and the clean-worktree check below catches edits. Headless agy cannot ask:
+  any denied read or command ends its turn with no review (`acp/agy-acp.mjs`, `onEvent`).
 - Wait on each seat by id: `room-cli thread wait <id> --event turn/completed --timeout 120`, repeated up to
-  20 minutes. Between waits, `room-cli thread interactions list <id>` shows pending approvals: approve
-  (`room-cli thread interactions approve <interaction> <id>`) only read-only inspection (`git rev-parse`,
-  `status`, `diff`, `show`, `log`; `ls`, `cat`, `grep`, `sed -n`); deny anything else, such as `npm test`.
-  Still running after 20 minutes, a `turn/completed` with `status` `failed`, or an empty reply is a failed
+  20 minutes. Between waits, `room-cli thread interactions list <id>` lists pending approvals. Read each with
+  `room-cli thread interactions show <interaction> <id>` and check the whole command: every flag, argument,
+  pipe, redirection and path. Approve (`room-cli thread interactions approve <interaction> <id>`) only a
+  non-mutating read: `git rev-parse HEAD`, `git status`, `git diff`, `git show`, `git log`, `ls`, `cat`,
+  `grep` or `sed -n` (no `-i`, no write flag, no `>`), on relative, non-credential paths inside that seat's
+  checkout. Deny everything else (`room-cli thread interactions deny …`), such as `npm test`.
+- Still running after 20 minutes, a `turn/completed` with `status` `failed`, or an empty reply is a failed
   seat, never an APPROVE.
-- A valid reply (`room-cli thread output <id>`) has all of:
+- A valid reply (`room-cli thread output <id>`) has exactly one of each header, then only `F` lines:
   - `HEAD: <the head SHA>`.
-  - `CONTEXT: checkout` or `CONTEXT: diff-only`; no other value.
-  - `VERDICT: APPROVE` with no `F` lines, or `VERDICT: CHANGES` with at least one `F` line.
-  - Every `F` line in the form `F<n> [BLOCKER|MAJOR|MINOR|NIT] <file>:<line> <claim>. Evidence: <…> Fix: <…>`.
-  - `room-cli environment status <env id> --json` shows `.workspace.workingTree.state` `clean` and, on a
-    same-machine seat, `.workspace.checkout.headSha` equal to the head.
+  - `CONTEXT: checkout` or `CONTEXT: diff-only`. `checkout` counts only if `room-cli environment status
+    <env id> --json` shows `.workspace.checkout.headSha` equal to the head; otherwise it must be `diff-only`.
+  - `VERDICT: APPROVE` with `SCORE: 10/10` and no `F` lines, or `VERDICT: CHANGES` with `SCORE: <0-9>/10`
+    (an integer) and at least one `F` line.
+  - Every other line in the form `F<n> [BLOCKER|MAJOR|MINOR|NIT] <file>:<line> <claim>. Evidence: <…> Fix: <…>`.
+  - `.workspace.workingTree.state` is `clean` in that same environment status.
 
-  Any miss makes the reply invalid: re-run the seat once (attempt 2), then report it failed.
+  Any miss makes the reply invalid: re-run the seat once (attempt 2), then report it failed. If attempt 1
+  ended on a tool auto-denial, attempt 2 uses `$RUN/brief-notools.md`: the line
+  `Tool-free retry: do not call any tools; review the inline Diff only and use CONTEXT: diff-only.` followed
+  by `$RUN/brief.md` unchanged.
 
 ## 7. Merge and verify
 
@@ -175,10 +187,11 @@ room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --reques
 ## 8. Ledger, clean up, report
 
 Append one JSON line per seat and per probe to `~/.local/state/triad-review/ledger.jsonl`
-(`mkdir -p` the directory; `"kind":"probe"` rows leave `verdict`, `raised` and `verified` `null`):
+(`mkdir -p` the directory). `score` is the seat's integer score from a valid reply; probes, failed and
+invalid seats get `null`, as do `verdict`, `raised` and `verified` on probe rows:
 
 ```json
-{"ts":"2026-11-18T09:00:00Z","run":"<RID>","kind":"seat","repo":"<name>","head":"<sha>","risk":"normal","family":"gpt","provider":"codex","model":"gpt-6.1-sol","level":"medium","machine":"aipc-ubuntu","thread":"thr_x","ok":true,"error":null,"verdict":"CHANGES","raised":3,"verified":2,"tokens":{"input":0,"cached":0,"output":0,"reasoning":0},"ctx":null,"secs":0}
+{"ts":"2026-11-18T09:00:00Z","run":"<RID>","kind":"seat","repo":"<name>","head":"<sha>","risk":"normal","family":"gpt","provider":"codex","model":"gpt-6.1-sol","level":"medium","machine":"aipc-ubuntu","thread":"thr_x","ok":true,"error":null,"verdict":"CHANGES","score":8,"raised":3,"verified":2,"tokens":{"input":0,"cached":0,"output":0,"reasoning":0},"ctx":null,"secs":0}
 ```
 
 - Read usage from `room-cli thread log <id> --json --all`. `tokens`: the last `thread/tokenUsage/updated`
@@ -189,20 +202,29 @@ Append one JSON line per seat and per probe to `~/.local/state/triad-review/ledg
   either event is missing.
 - A failed, limited or logged-out seat or probe: `"ok":false` and the error text in `error`.
 
-Clean up on every exit, early ones included, for each `requestId` in `$RUN/spawns.jsonl`:
+Clean up on every exit, early ones included, for each record in `$RUN/spawns.jsonl`. Never call
+`room-cli thread spawn` here.
 
-1. A resolved 4xx `error` record needs nothing more. No `threadId` and no such error: replay its recorded
-   spawn with the same `--request-id` (while its `promptFile` still exists), then get `.environment.id` from
-   `room-cli thread show <threadId> --json`.
-2. `room-cli thread stop <threadId>`, `room-cli thread archive <threadId>`, then
-   `room-cli environment delete <environmentId>`; archive and delete must exit 0.
+1. A resolved 4xx `error` record needs nothing more. A record with no `threadId`: look it up read-only,
+   `room-cli thread list --project "$ROOM_PROJECT_ID" --include-archived --fields id,title`, by its exact
+   `title`, then `room-cli thread show <threadId> --json` for `.environment.id`. Not found, or the lookup
+   fails: the record stays unresolved.
+2. `room-cli thread stop <threadId>`, then poll `room-cli thread show <threadId> --json` until
+   `.thread.status` is neither `active` nor `stopping` (if `stop` errors or reports the stop unconfirmed, run
+   it once more; still `active` or `stopping` after that leaves the record unresolved).
+   Then `room-cli thread archive <threadId>` and `room-cli environment delete <environmentId>`; both must
+   exit 0.
 3. `room-cli environment show <environmentId> --json` must reach `.lifecycle.phase` `destroyed` (teardown runs
-   in the background; re-check once at the end of the run).
+   in the background). If it shows `parked`, run `room-cli environment delete <environmentId>` again and
+   re-check.
 
-`rm -r "$RUN"` only when every record passed all three. Otherwise delete only the prompt files (once no replay
-needs them), keep `$RUN/spawns.jsonl`, and report its path, the unresolved request ids and any environment not
-`destroyed`.
+`rm -r "$RUN"` only when every record passed all three. Otherwise delete only the prompt files, keep
+`$RUN/spawns.jsonl`, and report its path, the unresolved request ids and any environment not `destroyed`.
 
-Report: each seat (family, model, level, machine, context), each skipped family and why, a table of items
-(id, severity, file:line, claim, shared or single with raisers, verified, rejected or unclear), the verdict,
-and tokens and seconds per seat.
+Report:
+
+- One row per seat: family, model / level, machine, context, `<score>/10 <VERDICT>` (or
+  `no score - failed (<reason>)`; never invent a score), raised / verified, tokens or ctx, secs.
+- Each skipped family and why.
+- A table of items: id, severity, file:line, claim, shared or single with raisers, verified, rejected or unclear.
+- The run verdict (APPROVE, CHANGES or INCOMPLETE) and the mean score over valid seats.
