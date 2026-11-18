@@ -53,8 +53,10 @@ is the caller's loop (sol-loop, review-council or the user).
    - Scan the Git revisions Cloud can copy too, so a `.env*` scrubbed from a worktree cannot hide a
      committed or staged credential: a local author checks `.env*` paths (matching `(^|/)\.env`) in its
      own `Head` and in the default source's `HEAD` and default-branch ref (`git ls-tree -r --name-only
-     <rev>` on each, then `git show <rev>:<path>`); a Cloud author checks `HEAD` and the index
-     (`git ls-files --cached`, then `git show :<path>`).
+     <rev>` on each); a Cloud author checks `HEAD` and the index (`git ls-files --cached`). Feed each
+     blob's contents straight to the credential-pattern check (`git show <rev>:<path>` or
+     `git show :<path>` piped to the scanner, never printed): the output names only the path and the
+     verdict, and a blob the check cannot read counts as a check that cannot complete.
    - Cloud variables and setup: a local author reads `room-cli cloud env list --json`
      (`.variables[].name`, `.setup`; values stay hidden). A Cloud author has no `cloud` command: check
      `env | cut -d= -f1` for credential-looking names (never print values) and treat its setup script as
@@ -208,8 +210,8 @@ inline Diff below alone and use CONTEXT: diff-only.` followed by `$RUN/brief.md`
 
 `PROMPT_FILE` is `$RUN/brief.md` only for attempt 1 of a local seat whose `EXPECTED_SHA` is the head (it
 may read its checkout); it is `$RUN/brief-notools.md` for every Cloud attempt, every local attempt whose
-`EXPECTED_SHA` is not the head, and every attempt 2 retry after a tool auto-denial or a log miss (probes
-always pass `--prompt-file "$RUN/probe.md"`).
+`EXPECTED_SHA` is not the head, and every attempt 2, whatever the retry's reason (probes always pass
+`--prompt-file "$RUN/probe.md"`).
 
 One spawn per seat (record it as in step 1.2). Local machine (check worktree hooks as in step 1.4):
 
@@ -291,8 +293,8 @@ reads the reply in `room-cli thread output <id>` `.reply`.
     sandbox, `$RUN/brief-notools.md` and reply validation, and the report discloses it (`audit:
     messages-only (in-sandbox Cloud limit)`, step 8).
 
-  Any miss makes the reply invalid: re-run the seat once (a second attempt), then report it failed. If a
-  local attempt 1 ended on a tool auto-denial, its second attempt uses `$RUN/brief-notools.md`.
+  Any miss makes the reply invalid: re-run the seat once (a second attempt, always on
+  `$RUN/brief-notools.md`), then report it failed.
 
 ## 7. Merge and verify
 
