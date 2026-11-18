@@ -56,7 +56,9 @@ is the caller's loop (sol-loop, review-council or the user).
      <rev>` on each); a Cloud author checks `HEAD` and the index (`git ls-files --cached`). Feed each
      blob's contents straight to the credential-pattern check (`git show <rev>:<path>` or
      `git show :<path>` piped to the scanner, never printed): the output names only the path and the
-     verdict, and a blob the check cannot read counts as a check that cannot complete.
+     verdict. A failed `git show` counts as a check that cannot complete — verify its exit status
+     separately (a scanner no-match on the empty input of a failed pipe is not a clean read), as does
+     any blob the check cannot read.
    - Cloud variables and setup: a local author reads `room-cli cloud env list --json`
      (`.variables[].name`, `.setup`; values stay hidden). A Cloud author has no `cloud` command: check
      `env | cut -d= -f1` for credential-looking names (never print values) and treat its setup script as
