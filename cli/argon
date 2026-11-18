@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 'use strict';
-// Compatibility shim: `argon` was renamed to `gemini-relay`. Runs it with the same arguments.
+// Compatibility shim: `argon` was renamed to `gemini-relay`. Runs it in this process (so signals still reach agy).
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
 const relay = path.join(path.dirname(fs.realpathSync(__filename)), 'gemini-relay');
-const r = spawnSync(process.execPath, [relay, ...process.argv.slice(2)], { stdio: 'inherit' });
-process.exit(r.status === null ? 1 : r.status);
+process.argv[1] = relay;
+require(relay).cli();

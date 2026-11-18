@@ -270,7 +270,8 @@ function main(argv) {
   throw new Error(`unknown command ${cmd}\n${USAGE}`);
 }
 
-if (require.main === module) {
+function cli() {
   try { main(process.argv.slice(2)); } catch (e) { console.error(`${NAME}: ${e.message}`); process.exit(1); }
 }
-module.exports = { parseArgs, agyArgs, render, normalizeToken, parseDotenv };
+if (require.main === module) cli();
+module.exports = { parseArgs, agyArgs, render, normalizeToken, parseDotenv, cli };

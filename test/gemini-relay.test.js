@@ -233,3 +233,21 @@ test('setup: an agy that cannot execute reports the launch error', () => {
   assert.ok(!/undefined|TypeError/.test(r.stderr), r.stderr);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+test('cli/argon shim forwards SIGTERM to agy', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
+  fs.mkdirSync(path.join(tmp, 'bin'));
+  fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/usr/bin/env node
+require('fs').writeFileSync(${JSON.stringify(path.join(tmp, 'agy.pid'))}, String(process.pid));
+process.on('SIGTERM', () => { require('fs').writeFileSync(${JSON.stringify(path.join(tmp, 'got-term'))}, '1'); process.exit(0); });
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}`, GEMINI_CACHE_DIR: path.join(tmp, 'cache') };
+  const child = require('child_process').spawn(SHIM, ['run', 'hi'], { cwd: tmp, env, stdio: 'ignore' });
+  const closed = new Promise((res) => child.on('close', res));
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(tmp, 'agy.pid')); i++) await new Promise((r) => setTimeout(r, 50));
+  child.kill('SIGTERM');
+  await closed;
+  assert.ok(fs.existsSync(path.join(tmp, 'got-term')), 'agy received SIGTERM through the shim');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
