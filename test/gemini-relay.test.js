@@ -184,6 +184,12 @@ test('a conversation saved in the old ~/.cache/argon cache still resumes', () =>
   const r = spawnSync(SHIM, ['run', 'hi'], { cwd, env, encoding: 'utf8' });
   assert.strictEqual(r.status, 0, r.stderr);
   assert.match(fs.readFileSync(path.join(tmp, 'args'), 'utf8'), /--conversation old-conv/);
+  // the new save does not copy legacy entries; an explicit cache dir ignores the legacy cache
+  assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(tmp, '.cache', 'gemini-relay', 'conversations.json'), 'utf8'))), [fs.realpathSync(cwd)]);
+  fs.rmSync(path.join(tmp, '.cache', 'gemini-relay'), { recursive: true });
+  spawnSync(RELAY, ['run', 'hi'], { cwd, env: { ...env, GEMINI_CACHE_DIR: path.join(tmp, 'other') }, encoding: 'utf8' });
+  assert.ok(!fs.readFileSync(path.join(tmp, 'args'), 'utf8').includes('--conversation old-conv'));
+  assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(tmp, 'other', 'conversations.json'), 'utf8'))), [fs.realpathSync(cwd)]);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -203,6 +209,9 @@ test('cli/argon shim delegates to gemini-relay (usage and a run with the carbon 
   fs.mkdirSync(path.join(tmp, 'bin'));
   fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/bin/sh\necho "$@" > "${tmp}/args"\ncat >/dev/null\ncat "${path.join(__dirname, 'fixtures', 'tool-error.ndjson')}"\n`, { mode: 0o755 });
   const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}`, GEMINI_CACHE_DIR: path.join(tmp, 'cache') };
+  const viaNode = spawnSync(process.execPath, [SHIM, '--help'], { env, encoding: 'utf8' });
+  assert.strictEqual(viaNode.status, 0, viaNode.stderr);
+  assert.match(viaNode.stdout, /usage: gemini-relay <command>/);
   const help = spawnSync(SHIM, ['--help'], { env, encoding: 'utf8' });
   assert.strictEqual(help.status, 0, help.stderr);
   assert.match(help.stdout, /usage: gemini-relay <command>/);
@@ -210,5 +219,17 @@ test('cli/argon shim delegates to gemini-relay (usage and a run with the carbon 
   const r = spawnSync(SHIM, ['run', 'hi'], { cwd: tmp, env, encoding: 'utf8' });
   assert.strictEqual(r.status, 0, r.stderr);
   assert.match(fs.readFileSync(path.join(tmp, 'args'), 'utf8'), /--model gemini-4-carbon-high/);
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('setup: an agy that cannot execute reports the launch error', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
+  fs.mkdirSync(path.join(tmp, 'bin'));
+  fs.writeFileSync(path.join(tmp, 'bin', 'agy'), '#!/nonexistent/interp\n', { mode: 0o755 });
+  const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}`, GEMINI_AGY_TOKEN_B64: b64(LOGIN) };
+  const r = spawnSync(process.execPath, [RELAY, 'setup'], { cwd: tmp, env, encoding: 'utf8' });
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.stderr, /could not run agy models|does not list a carbon model/);
+  assert.ok(!/undefined|TypeError/.test(r.stderr), r.stderr);
   fs.rmSync(tmp, { recursive: true, force: true });
 });

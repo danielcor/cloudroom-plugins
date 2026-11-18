@@ -48,4 +48,4 @@ A cheap Cloud thread that only forwards messages:
 1. Make sure the project's Cloud environment includes the `danielcor/cloudroom-plugins` repo (it appears as `/repos/cloudroom-plugins`; older sandboxes mount it as `/repos/cloudroom-gemini` or `/repos/cloudroom-argon`)
    and that the project's `.env` has `GEMINI_AGY_TOKEN_B64` (see the README: `gemini-relay export-token >> .env`).
 2. New Cloud thread, provider Claude Code, model `claude-haiku-5-5`.
-3. First message: `Read /repos/cloudroom-plugins/skills/gemini/SKILL.md and follow it. From now on relay everything I write to Gemini.`
+3. First message (substitute your actual mount path): `Read /repos/cloudroom-plugins/skills/gemini/SKILL.md and follow it. From now on relay everything I write to Gemini.`

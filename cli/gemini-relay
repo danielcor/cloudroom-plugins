@@ -116,9 +116,10 @@ const agyBin = () => {
 };
 
 const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } };
-const LEGACY_CACHE_DIR = path.join(os.homedir(), '.cache', 'argon'); // pre-rename conversations, read-only
-// Entries saved under the old `argon` cache still resume until a new one is written for that cwd.
-const readCache = () => ({ ...readJson(path.join(LEGACY_CACHE_DIR, 'conversations.json')), ...readJson(path.join(CACHE_DIR, 'conversations.json')) });
+const readCache = () => readJson(path.join(CACHE_DIR, 'conversations.json'));
+// Pre-rename conversations: looked up (never copied) only when the default cache dir is in use.
+const DEFAULT_CACHE = !process.env.GEMINI_CACHE_DIR && !process.env.ARGON_CACHE_DIR;
+const legacyConversation = (cwd) => (DEFAULT_CACHE ? readJson(path.join(os.homedir(), '.cache', 'argon', 'conversations.json'))[cwd] : null);
 function saveConversation(cwd, id) {
   const m = readCache();
   m[cwd] = id;
@@ -130,7 +131,7 @@ function runTurn(prompt, opts) {
   const agy = agyBin();
   if (!agy) throw new Error(`agy is not installed; run \`${NAME} setup\``);
   const cwd = fs.realpathSync(process.cwd());
-  const conversation = opts.fresh ? null : opts.conversation || readCache()[cwd] || null;
+  const conversation = opts.fresh ? null : opts.conversation || readCache()[cwd] || legacyConversation(cwd) || null;
   const child = spawn(agy, agyArgs(opts, conversation), { stdio: ['pipe', 'pipe', 'pipe'] });
   const st = { bol: true, conversation: null, result: null, error: null };
   let stderr = '';
@@ -235,6 +236,7 @@ function setup() {
     fs.chmodSync(TOKEN_FILE, 0o600);
   } else console.error('login: already present');
   const m = spawnSync(agyBin(), ['models'], { encoding: 'utf8' });
+  if (m.error) throw new Error(`could not run agy models: ${m.error.message}`);
   const carbon = m.stdout.split('\n').filter((l) => /gemini-4-carbon|gemini 4 carbon/i.test(l));
   if (m.status !== 0 || !carbon.length) {
     throw new Error(`agy models does not list a carbon model (login expired? delete ${TOKEN_FILE} and retry):\n${m.stdout}${m.stderr}`);

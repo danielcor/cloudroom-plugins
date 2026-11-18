@@ -116,7 +116,7 @@ One dependency-free Node (>= 20) script: `cli/gemini-relay` (`cli/argon` is a th
 | `gemini-relay export-token >> .env` | Prints `GEMINI_AGY_TOKEN_B64=...`. Refuses to write to a terminal. |
 
 Where `setup` gets the login, in order: the existing `~/.gemini/antigravity-cli/antigravity-oauth-token`,
-env `GEMINI_AGY_TOKEN_B64` (or the older `ARGON_AGY_TOKEN_B64`), that key in the nearest `.env` (cwd up to the git root), then the paired desktop through
+env `GEMINI_AGY_TOKEN_B64`, that key in the nearest `.env` (cwd up to the git root), then the older `ARGON_AGY_TOKEN_B64` the same way (env, then `.env`), then the paired desktop through
 `room-cli mac run` (file, macOS keychain, `secret-tool`, or the gnome keyring over D-Bus). The file is written `0600`;
 values are never printed. `agy` refreshes the token by itself and writes it back.
 
