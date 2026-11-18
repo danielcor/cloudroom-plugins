@@ -16,10 +16,12 @@ is the caller's loop (sol-loop, review-council or the user).
 - Every seat and probe is a Cloudroom child thread (`room-cli thread spawn --parent-self`). Never start an
   agent CLI (`claude`, `codex`, `agy`, `muse`, `kimi`) from a shell. Never use built-in Agent/Task subagents.
 - Every seat gets the same brief file and the same head SHA. No seat sees another seat's reply.
-- A family that is down is skipped. Never swap in another model of the same family to fill its seat.
+- A family that is down is skipped. Never swap in another model of the same family to fill its seat; the
+  only same-family fallbacks are the two named in step 3 (Carbon to Argon, Wonder Full to Wonder).
 - Fewer than 3 families up: run with what is up and say so in the report. None up: stop and say why.
 - Use the logins already on each machine (their subscription plans). Never add or set an API key for a seat.
-- The head must be a commit. If the change is not committed, stop and ask; do not commit on your own.
+- The head must be a commit on a branch. If the change is not committed, or HEAD is detached, stop and ask;
+  do not commit or branch on your own.
 
 ## 1. Start the run
 
@@ -29,17 +31,19 @@ is the caller's loop (sol-loop, review-council or the user).
    Before the spawn, append one JSON line to `$RUN/spawns.jsonl` with its exact parameters: `requestId`,
    `kind`, `family`, `machine`, `provider`, `model`, `level`, `baseBranch` (or `null`), `promptFile`. After
    the reply, append `{"requestId":…,"threadId":…,"environmentId":…}` (`room-cli thread show <id> --json`
-   gives `.environment.id`). A spawn that exits with an error created nothing: append
-   `{"requestId":…,"error":"<text>"}`; that record is resolved. If a spawn gives no answer at all, replay that
-   exact spawn with the same `--request-id`: Cloudroom returns that thread instead of a duplicate.
+   gives `.environment.id`). A spawn rejected with an HTTP 4xx validation error (for example
+   `HTTP 400: Invalid string`) created nothing: append `{"requestId":…,"error":"<text>"}`; that record is
+   resolved. Any other error or no answer is unconfirmed: replay that exact spawn with the same
+   `--request-id`, and Cloudroom returns the thread if it was made instead of a duplicate.
 3. Secrets: if the diff holds a key, token or `.env` content, stop and tell the user (a prompt stays in its
    thread log).
 4. Worktree files: before any spawn (probes in step 4 and seats in step 6), read `.worktreeinclude` and
    `.bb-env-setup.sh` at the exact ref and machine that spawn checks out: `git show <head branch>:<file>` when
-   it passes `--base-branch`, or that machine's default-branch checkout when it does not (for example
-   `tailscale ssh <host> git -C <checkout> show HEAD:<file>`). If either file would give the child a
-   credential, or you cannot read the ref on that machine, do not spawn there. On the author's machine, stop
-   and ask the user.
+   it passes `--base-branch`. Without it the ref is that machine's `.defaultWorktreeBaseBranch` from
+   `room-cli project branches "$ROOM_PROJECT_ID" --host <host id> --json` (it differs per machine); read
+   `<that ref>:<file>` in that machine's project checkout (for example over `tailscale ssh`). If either file
+   would give the child a credential, or you cannot read the ref on that machine, do not spawn there. On the
+   author's machine, stop and ask the user.
 
 ## 2. Size the risk
 
@@ -77,17 +81,20 @@ Check each candidate on a named machine: the author's first (`--machine <name>`,
 If `room-cli` fails for every provider (for example HTTP 401), the run is blocked: stop and report it.
 A check that fails for one provider means that provider is down on that machine.
 
-1. Cooldown: a family whose last ledger row on that machine is `"ok":false` with a limit, 429 or quota error
+1. Cooldown: a model whose last ledger row on that machine is `"ok":false` with a limit, 429 or quota error
    under 6 hours old is down there. Apply this before any probe.
 2. `room-cli settings usage --json --machine <name>`: real quota, but only for `codex` and `claude-code`.
-   Any `windows[].usedPercent` of 90 or more, or a `status` other than `ok`, means down.
+   A `status` other than `ok`, or a `windows[].usedPercent` of 90 or more, means down. Skip windows whose
+   `model` is set to another model (for example the `Fable` window when the seat runs Opus).
 3. `room-cli provider models <provider> --json --machine <name>` must list the model, except Carbon (4.4).
    Muse prints "No models available" when it is logged out on that machine.
 4. A listed model is not proof for `agy` or `acp-muse`. Carbon sits under "More Models" in agy's picker, and
    Cloudroom's agy list can show only the three built-in Argon ids where Carbon works (`agy models` has no
    flag for more). Muse lists Wonder Full on accounts that cannot call it. Proof is a ledger row for that
-   model and machine with `"ok":true` in the last 7 days. With none, spend one probe child (the only model
-   call before the review): prompt `Probe only. Do not run any tools. Reply with exactly: PROBE-OK`.
+   model and machine with `"ok":true` in the last 7 days. With none, spend one probe child per unproved
+   model: write `Probe only. Do not run any tools. Reply with exactly: PROBE-OK` to `$RUN/probe.md` and use
+   the step 6 spawn command with `--request-id "$RID-probe-<family>-<attempt>"` and
+   `--prompt-file "$RUN/probe.md"` (step 1.4 applies).
    It passes if the reply is `PROBE-OK` and the turn did not fail. Cloudroom logs only the requested model,
    so this proves the id was accepted and ran, not which weights answered. Log the probe (step 8).
 5. Gemini, Kimi and Muse have no quota signal in `room-cli`, so 4.2 does not apply to them.
@@ -128,7 +135,7 @@ One spawn per seat (record it as in step 1.2; check worktree files as in step 1.
 
 ```sh
 room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --request-id "$RID-seat-<family>-1" \
-  --provider <p> --model <m> --reasoning-level <l> --permission-mode accept-edits \
+  --provider <p> --model <m> --reasoning-level <l> --permission-mode <accept-edits|full> \
   --new-environment worktree [--base-branch <head branch>] [--machine <name>] \
   --title "triad $RID <family>" --prompt-file "$RUN/brief.md"
 ```
@@ -136,10 +143,16 @@ room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --reques
 - Same machine: pass `--base-branch <head branch>`. Without it the worktree comes from the project default
   branch. Another machine has no copy of an unpushed branch: omit `--base-branch` there (the seat answers
   `CONTEXT: diff-only`), unless the user allowed a push.
-- Cloudroom has no read-only permission mode (`accept-edits`, `auto`, `full`). Use `accept-edits`; each seat
-  edits only its own throwaway worktree. agy then denies shell commands, so it reviews the inline diff.
-- Wait on each seat by id: `room-cli thread wait <id> --event turn/completed --timeout 1200`. A timeout, a
-  `turn/completed` with `status` `failed`, or an empty reply is a failed seat, never an APPROVE.
+- Cloudroom has no read-only permission mode (`accept-edits`, `auto`, `full`); each seat touches only its
+  own throwaway worktree, and the clean-worktree check below catches edits. Use `accept-edits`, except
+  `full` for `agy`: headless agy cannot ask, and any denied read or command ends its turn with no review
+  (`acp/agy-acp.mjs`, `onEvent`). The brief still says read-only.
+- Wait on each seat by id: `room-cli thread wait <id> --event turn/completed --timeout 120`, repeated up to
+  20 minutes. Between waits, `room-cli thread interactions list <id>` shows pending approvals: approve
+  (`room-cli thread interactions approve <interaction> <id>`) only read-only inspection (`git rev-parse`,
+  `status`, `diff`, `show`, `log`; `ls`, `cat`, `grep`, `sed -n`); deny anything else, such as `npm test`.
+  Still running after 20 minutes, a `turn/completed` with `status` `failed`, or an empty reply is a failed
+  seat, never an APPROVE.
 - A valid reply (`room-cli thread output <id>`) has all of:
   - `HEAD: <the head SHA>`.
   - `CONTEXT: checkout` or `CONTEXT: diff-only`; no other value.
@@ -172,19 +185,22 @@ Append one JSON line per seat and per probe to `~/.local/state/triad-review/ledg
   event's `tokenUsage.total` (`inputTokens`, `cachedInputTokens`, `outputTokens`, `reasoningOutputTokens`);
   only Codex sends it today. Otherwise `tokens` is `null`, and `ctx` records the last
   `thread/contextWindowUsage/updated` `usedTokens` for reference only (context size, not spend). Never guess.
-- `secs`: `turn/completed` minus `turn/started` `createdAt` (milliseconds), divided by 1000.
+- `secs`: `turn/completed` minus `turn/started` `createdAt` (milliseconds), divided by 1000; `null` if
+  either event is missing.
 - A failed, limited or logged-out seat or probe: `"ok":false` and the error text in `error`.
 
 Clean up on every exit, early ones included, for each `requestId` in `$RUN/spawns.jsonl`:
 
-1. No `threadId` yet: replay its recorded spawn with the same `--request-id` (while `$RUN/brief.md` still
-   exists), then get `.environment.id` from `room-cli thread show <threadId> --json`.
-2. `room-cli thread archive <threadId>` and `room-cli environment delete <environmentId>`; both must exit 0.
+1. A resolved 4xx `error` record needs nothing more. No `threadId` and no such error: replay its recorded
+   spawn with the same `--request-id` (while its `promptFile` still exists), then get `.environment.id` from
+   `room-cli thread show <threadId> --json`.
+2. `room-cli thread stop <threadId>`, `room-cli thread archive <threadId>`, then
+   `room-cli environment delete <environmentId>`; archive and delete must exit 0.
 3. `room-cli environment show <environmentId> --json` must reach `.lifecycle.phase` `destroyed` (teardown runs
    in the background; re-check once at the end of the run).
 
-`rm -r "$RUN"` only when every record passed all three. Otherwise delete only `$RUN/brief.md` (once no replay
-needs it), keep `$RUN/spawns.jsonl`, and report its path, the unresolved request ids and any environment not
+`rm -r "$RUN"` only when every record passed all three. Otherwise delete only the prompt files (once no replay
+needs them), keep `$RUN/spawns.jsonl`, and report its path, the unresolved request ids and any environment not
 `destroyed`.
 
 Report: each seat (family, model, level, machine, context), each skipped family and why, a table of items
