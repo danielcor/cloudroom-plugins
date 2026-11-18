@@ -258,7 +258,7 @@ export class AgyAcpAgent {
     if (typeof cwd !== "string" || !cwd.startsWith("/")) throw Object.assign(new Error("cwd must be an absolute path"), { code: ERR.invalidParams });
     if (sessionId !== undefined && !/^[\w-]{1,128}$/.test(sessionId)) throw Object.assign(new Error("Invalid sessionId"), { code: ERR.invalidParams });
     const models = this.getModels();
-    const model = this.opts.model || (models.some((m) => m.modelId === "gemini-4-carbon-high") ? "gemini-4-carbon-high" : models[0].modelId);
+    const model = this.opts.model || models[0].modelId;
     const id = sessionId ?? `${SESSION_PREFIX}${randomUUID()}`;
     // Our sessions map to the agy conversation saved at their first prompt (none yet: start fresh);
     // any other id is taken as an agy conversation id.

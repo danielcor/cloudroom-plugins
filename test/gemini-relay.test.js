@@ -123,25 +123,68 @@ setTimeout(() => process.stdout.write(b.subarray(cut)), 100);
 
 function fakeAgy(tmp, models) {
   fs.mkdirSync(path.join(tmp, 'bin'));
-  fs.writeFileSync(path.join(tmp, 'bin', 'agy'),
-    `#!/bin/sh\nif [ "$1" = models ]; then printf '%s\\n' ${models}; exit 0; fi\ncat >/dev/null\ncat "${path.join(__dirname, 'fixtures', 'tool-error.ndjson')}"\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/bin/sh\nprintf '%s\\n' ${models}\n`, { mode: 0o755 });
 }
+const LOGIN = JSON.stringify({ token: { refresh_token: 'r' } });
+const b64 = (j) => Buffer.from(j).toString('base64');
+function setupRun(models, { env: extra = {}, dotenv } = {}) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
+  fakeAgy(tmp, models);
+  if (dotenv) fs.writeFileSync(path.join(tmp, '.env'), dotenv);
+  const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}` };
+  delete env.GEMINI_AGY_TOKEN_B64; delete env.ARGON_AGY_TOKEN_B64;
+  const r = spawnSync(process.execPath, [RELAY, 'setup'], { cwd: tmp, env: { ...env, ...extra }, encoding: 'utf8' });
+  const tokenFile = path.join(tmp, '.gemini', 'antigravity-cli', 'antigravity-oauth-token');
+  const token = fs.existsSync(tokenFile) ? fs.readFileSync(tokenFile, 'utf8') : null;
+  fs.rmSync(tmp, { recursive: true, force: true });
+  return { r, token };
+}
+const CARBON = "'Gemini 4 Carbon (High)' 'Gemini 4 Carbon (Low)'";
 
-test('setup reads GEMINI_AGY_TOKEN_B64, falls back to ARGON_AGY_TOKEN_B64, and checks carbon models', () => {
-  const json = JSON.stringify({ token: { refresh_token: 'r' } });
-  const b64 = Buffer.from(json).toString('base64');
+test('setup reads GEMINI_AGY_TOKEN_B64, falls back to ARGON_AGY_TOKEN_B64, and counts carbon models', () => {
   for (const key of ['GEMINI_AGY_TOKEN_B64', 'ARGON_AGY_TOKEN_B64']) {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
-    fakeAgy(tmp, "'Gemini 4 Carbon (High)' 'Gemini 4 Carbon (Low)'");
-    const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}`, [key]: b64 };
-    delete env[key === 'GEMINI_AGY_TOKEN_B64' ? 'ARGON_AGY_TOKEN_B64' : 'GEMINI_AGY_TOKEN_B64'];
-    const r = spawnSync(process.execPath, [RELAY, 'setup'], { cwd: tmp, env, encoding: 'utf8' });
+    const { r, token } = setupRun(CARBON, { env: { [key]: b64(LOGIN) } });
     assert.strictEqual(r.status, 0, r.stderr);
-    assert.match(r.stderr, new RegExp(`login: from ${'GEMINI_AGY_TOKEN_B64'}`));
+    assert.match(r.stderr, new RegExp(`login: from ${key}`));
     assert.match(r.stdout, /\(2 carbon models\)/);
-    assert.strictEqual(fs.readFileSync(path.join(tmp, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'), 'utf8'), json);
-    fs.rmSync(tmp, { recursive: true, force: true });
+    assert.strictEqual(token, LOGIN);
   }
+});
+
+test('setup: the Gemini key wins over the legacy key across env and .env', () => {
+  const stale = JSON.stringify({ token: { refresh_token: 'stale' } });
+  const { r, token } = setupRun(CARBON, { env: { ARGON_AGY_TOKEN_B64: b64(stale) }, dotenv: `GEMINI_AGY_TOKEN_B64=${b64(LOGIN)}\n` });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(token, LOGIN);
+});
+
+test('setup: a malformed token names the key that was used', () => {
+  for (const key of ['GEMINI_AGY_TOKEN_B64', 'ARGON_AGY_TOKEN_B64']) {
+    const { r } = setupRun(CARBON, { env: { [key]: 'bm90IGEgbG9naW4=' } });
+    assert.notStrictEqual(r.status, 0);
+    assert.match(r.stderr, new RegExp(`${key} is set but is not base64`));
+  }
+});
+
+test('setup: Orchestrator (Carbon) alone is not enough, a carbon model is required', () => {
+  const { r } = setupRun("'Orchestrator (Carbon)' 'Gemini 4 Argon (High)'", { env: { GEMINI_AGY_TOKEN_B64: b64(LOGIN) } });
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.stderr, /does not list a carbon model/);
+});
+
+test('a conversation saved in the old ~/.cache/argon cache still resumes', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
+  fs.mkdirSync(path.join(tmp, 'bin'));
+  fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/bin/sh\necho "$@" > "${tmp}/args"\ncat >/dev/null\ncat "${path.join(__dirname, 'fixtures', 'tool-error.ndjson')}"\n`, { mode: 0o755 });
+  const cwd = fs.mkdtempSync(path.join(tmp, 'work-'));
+  fs.mkdirSync(path.join(tmp, '.cache', 'argon'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, '.cache', 'argon', 'conversations.json'), JSON.stringify({ [fs.realpathSync(cwd)]: 'old-conv' }));
+  const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}` };
+  delete env.GEMINI_CACHE_DIR; delete env.ARGON_CACHE_DIR;
+  const r = spawnSync(SHIM, ['run', 'hi'], { cwd, env, encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.match(fs.readFileSync(path.join(tmp, 'args'), 'utf8'), /--conversation old-conv/);
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 test('export-token writes GEMINI_AGY_TOKEN_B64', () => {

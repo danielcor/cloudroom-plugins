@@ -115,7 +115,10 @@ const agyBin = () => {
   return dirs.map((d) => path.join(d, 'agy')).find((p) => fs.existsSync(p)) || null;
 };
 
-const readCache = () => { try { return JSON.parse(fs.readFileSync(path.join(CACHE_DIR, 'conversations.json'), 'utf8')); } catch { return {}; } };
+const readJson = (file) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; } };
+const LEGACY_CACHE_DIR = path.join(os.homedir(), '.cache', 'argon'); // pre-rename conversations, read-only
+// Entries saved under the old `argon` cache still resume until a new one is written for that cwd.
+const readCache = () => ({ ...readJson(path.join(LEGACY_CACHE_DIR, 'conversations.json')), ...readJson(path.join(CACHE_DIR, 'conversations.json')) });
 function saveConversation(cwd, id) {
   const m = readCache();
   m[cwd] = id;
@@ -173,12 +176,11 @@ function parseDotenv(text, key) {
   return value;
 }
 
-function tokenFromDotenv() {
-  const keys = [TOKEN_ENV, LEGACY_TOKEN_ENV];
+function tokenFromDotenv(key) {
   for (let dir = process.cwd(); ; dir = path.dirname(dir)) {
     try {
-      const text = fs.readFileSync(path.join(dir, '.env'), 'utf8');
-      for (const k of keys) { const v = parseDotenv(text, k); if (v) return v; }
+      const v = parseDotenv(fs.readFileSync(path.join(dir, '.env'), 'utf8'), key);
+      if (v) return v;
     } catch { /* no .env here */ }
     if (fs.existsSync(path.join(dir, '.git')) || dir === path.dirname(dir)) return null;
   }
@@ -212,11 +214,16 @@ function setup() {
   }
   if (!fs.existsSync(TOKEN_FILE)) {
     let token = null;
-    const fromEnv = process.env[TOKEN_ENV] || process.env[LEGACY_TOKEN_ENV] || tokenFromDotenv();
+    // Gemini key first (env, then .env), then the legacy Argon key the same way.
+    let key = null, fromEnv = null;
+    for (const k of [TOKEN_ENV, LEGACY_TOKEN_ENV]) {
+      fromEnv = process.env[k] || tokenFromDotenv(k);
+      if (fromEnv) { key = k; break; }
+    }
     if (fromEnv) {
       token = normalizeToken(fromEnv);
-      if (!token) throw new Error(`${TOKEN_ENV} is set but is not base64 of an agy login JSON`);
-      console.error(`login: from ${TOKEN_ENV}`);
+      if (!token) throw new Error(`${key} is set but is not base64 of an agy login JSON`);
+      console.error(`login: from ${key}`);
     } else {
       const d = tokenFromDesktop();
       if (!d.token) throw new Error(`no agy login: ${TOKEN_ENV} not set, and ${d.err}`);
@@ -228,10 +235,11 @@ function setup() {
     fs.chmodSync(TOKEN_FILE, 0o600);
   } else console.error('login: already present');
   const m = spawnSync(agyBin(), ['models'], { encoding: 'utf8' });
-  if (m.status !== 0 || !/carbon/i.test(m.stdout)) {
+  const carbon = m.stdout.split('\n').filter((l) => /gemini-4-carbon|gemini 4 carbon/i.test(l));
+  if (m.status !== 0 || !carbon.length) {
     throw new Error(`agy models does not list a carbon model (login expired? delete ${TOKEN_FILE} and retry):\n${m.stdout}${m.stderr}`);
   }
-  console.log(`ok: ${agyBin()} (${m.stdout.split('\n').filter((l) => /carbon/i.test(l)).length} carbon models)`);
+  console.log(`ok: ${agyBin()} (${carbon.length} carbon models)`);
 }
 
 function exportToken() {

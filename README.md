@@ -128,7 +128,7 @@ One time, on a machine where `agy` is logged in (run `agy` once to sign in):
 
 ```bash
 cd <your project> && git check-ignore .env   # must print ".env"; if not, add it to .gitignore first
-gemini-relay export-token >> .env            # or from a Cloud thread: gemini-relay setup && gemini-relay export-token >> .env
+~/src/cloudroom-gemini/cli/gemini-relay export-token >> .env   # or from a Cloud thread: gemini-relay setup && gemini-relay export-token >> .env
 ```
 
 Project `.env` files are copied into every Cloud sandbox, so Gemini then works with your machines off.
@@ -141,10 +141,10 @@ Nothing else to install: the skill finds `/repos/cloudroom-plugins/cli/gemini-re
 
 Then start a **relay thread**: new Cloud thread, Claude Code, `claude-haiku-5-5`, first message:
 
-> Read /repos/cloudroom-plugins/skills/gemini/SKILL.md and follow it. From now on relay everything I write to Gemini.
+> Read /repos/cloudroom-plugins/skills/gemini/SKILL.md (substitute your actual mount path) and follow it. From now on relay everything I write to Gemini.
 
 Every later message goes to Gemini verbatim; Haiku only forwards it and quotes the answer. To use it from any other
-thread, say the same thing there, or install the skill: `ln -sfn /repos/cloudroom-plugins/skills/gemini ~/.claude/skills/gemini`.
+thread, say the same thing there, or install the skill: `ln -sfn /repos/cloudroom-plugins/skills/gemini ~/.claude/skills/gemini` (substitute your actual mount path; in the commands above `gemini-relay` means `cli/gemini-relay` in the clone or mount).
 
 Limits:
 - The relay agent sees Gemini's output as command output, so the user may need to expand it; the skill tells it to quote the answer.
