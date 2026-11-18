@@ -1,6 +1,6 @@
 // Opt-in live smoke test: the plugin's bridge drives the installed agy-acp and the
 // signed-in agy for two turns with gemini-4-argon-low. Costs two small Argon turns.
-//   AGY_SMOKE=1 [AGY_SMOKE_MODEL=gemini-4-hydrogen-low] npx vitest run test/live-agy.smoke.test.ts
+//   AGY_SMOKE=1 AGY_SMOKE_MODEL=gemini-4-hydrogen-low npx vitest run test/live-agy.smoke.test.ts   (AGY_SMOKE_MODEL optional)
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

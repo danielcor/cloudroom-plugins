@@ -97,11 +97,13 @@ export function findAgy(explicit, env = process.env) {
 }
 
 // `agy models` prints "<id>\t<name>" lines. Known models first in KNOWN_MODELS order, then any new ones in agy's order.
+// agy lists this one but the owner chose not to offer it (no xhigh reasoning level).
+const EXCLUDED_MODELS = new Set(["gemini-4-hydrogen-xhigh"]);
 export function parseModels(stdout) {
   const listed = [];
   for (const line of stdout.split("\n")) {
     const m = /^(\S+)\t(.+)$/.exec(line.trim());
-    if (m) listed.push({ modelId: m[1], name: m[2].trim() });
+    if (m && !EXCLUDED_MODELS.has(m[1])) listed.push({ modelId: m[1], name: m[2].trim() });
   }
   if (listed.length === 0) return [...KNOWN_MODELS];
   const ids = new Set(listed.map((m) => m.modelId));

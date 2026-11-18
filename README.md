@@ -44,7 +44,7 @@ The `command` setting still accepts an absolute path. agy-acp itself finds agy o
 cd ~/src/cloudroom-argon/plugin && npm ci
 room-cli plugin build .
 room-cli plugin install path:$HOME/src/cloudroom-argon/plugin --yes
-room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.2  running
+room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.3  running
 room-cli provider models agy --machine aipc-ubuntu # 21 models: Gemini 4 Argon High (default), Medium, Low, then Carbon, Hydrogen, Flash, Claude, GPT-OSS
 ```
 
