@@ -252,14 +252,16 @@ setInterval(() => {}, 1000);
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
   const agyPid = () => { try { return Number(fs.readFileSync(pidFile, 'utf8')); } catch { return 0; } };
+  let deadlineTimer;
   try {
     for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) await sleep(50);
     assert.ok(fs.existsSync(pidFile), 'agy started');
     child.kill('SIGTERM');
-    const deadline = await Promise.race([closed.then(() => false), sleep(5000).then(() => true)]);
+    const deadline = await Promise.race([closed.then(() => false), new Promise((r) => { deadlineTimer = setTimeout(() => r(true), 5000); })]);
     assert.ok(!deadline, 'shim exited within 5s of SIGTERM');
     assert.ok(fs.existsSync(path.join(tmp, 'got-term')), 'agy received SIGTERM through the shim');
   } finally {
+    clearTimeout(deadlineTimer);
     const pid = agyPid();
     if (!exited) child.kill('SIGTERM');
     if (pid && alive(pid)) process.kill(pid, 'SIGTERM');

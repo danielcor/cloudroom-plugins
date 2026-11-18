@@ -30,7 +30,7 @@ For each user message, run it verbatim, in the project directory:
 - It continues the last Gemini conversation for this directory. Use `--new` only when the user asks for a fresh start,
   `--conversation ID` to resume a specific one (the id is printed on the last line of every run).
 - Defaults to `gemini-4-carbon-high`. Pass `--model` / `--effort low|medium|high|xhigh|max` only if the user asks.
-  `gemini-relay models` lists the choices.
+  `"$GEMINI" models` lists the choices.
 - Gemini runs with permissions skipped, in the cwd. It edits files and runs commands there itself.
 - Runs can take minutes. Give the command a long timeout, or run it in the background and read the output when it ends.
 
