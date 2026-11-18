@@ -14,12 +14,15 @@ const launchSpec = (host: ReturnType<typeof createFakePluginHost>) => {
 };
 
 describe("provider-agy", () => {
-  it("registers Antigravity on the ACP bridge, launching agy-acp with Argon first", async () => {
+  it("registers Antigravity on the ACP bridge, launching agy-acp with Carbon first", async () => {
     const { decl, spec } = launchSpec(await load());
     expect(decl.id).toBe("agy");
     expect(decl.displayName).toBe("Antigravity");
     expect(decl.capabilities.permissionModes).toEqual(["accept-edits", "full"]);
-    expect(decl.experimental_bridgeOptions).toMatchObject({ acpDialect: "generic", primaryModels: ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"] });
+    expect(decl.experimental_bridgeOptions).toMatchObject({ acpDialect: "generic", primaryModels: expect.arrayContaining(["gemini-4-carbon-high", "gemini-4-argon-high", "gemini-4-hydrogen-low"]) });
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels).toHaveLength(21);
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels[0]).toBe("gemini-4-carbon-high");
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels.slice(14, 20)).toEqual(["claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low"]);
     expect(spec).toEqual({
       displayName: "Antigravity",
       command: "agy-acp",

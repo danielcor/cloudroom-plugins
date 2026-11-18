@@ -18,10 +18,30 @@ import { fileURLToPath } from "node:url";
 
 export const VERSION = "0.1.0";
 export const PROTOCOL_VERSION = 1;
-export const ARGON_MODELS = [
+// Every model `agy models` listed on 2026-11-18, Gemini 4 first (Carbon High is the default). Pinned order, and the
+// fallback when `agy models` fails.
+export const KNOWN_MODELS = [
+  { modelId: "gemini-4-carbon-high", name: "Gemini 4 Carbon (High)" },
+  { modelId: "gemini-4-carbon-medium", name: "Gemini 4 Carbon (Medium)" },
+  { modelId: "gemini-4-carbon-low", name: "Gemini 4 Carbon (Low)" },
   { modelId: "gemini-4-argon-high", name: "Gemini 4 Argon (High)" },
   { modelId: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium)" },
   { modelId: "gemini-4-argon-low", name: "Gemini 4 Argon (Low)" },
+  { modelId: "gemini-4-hydrogen-high", name: "Gemini 4 Hydrogen (High)" },
+  { modelId: "gemini-4-hydrogen-medium", name: "Gemini 4 Hydrogen (Medium)" },
+  { modelId: "gemini-4-hydrogen-low", name: "Gemini 4 Hydrogen (Low)" },
+  { modelId: "gemini-pro-orchestrator", name: "Orchestrator (Carbon)" },
+  { modelId: "gemini-pro-orchestrator-argon", name: "Orchestrator (Argon)" },
+  { modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
+  { modelId: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)" },
+  { modelId: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
+  { modelId: "claude-opus-5-5-high", name: "Claude Opus 5.5 (High)" },
+  { modelId: "claude-opus-5-5-medium", name: "Claude Opus 5.5 (Medium)" },
+  { modelId: "claude-opus-5-5-low", name: "Claude Opus 5.5 (Low)" },
+  { modelId: "claude-sonnet-5-5-high", name: "Claude Sonnet 5.5 (High)" },
+  { modelId: "claude-sonnet-5-5-medium", name: "Claude Sonnet 5.5 (Medium)" },
+  { modelId: "claude-sonnet-5-5-low", name: "Claude Sonnet 5.5 (Low)" },
+  { modelId: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
 ];
 export const MODES = [
   { id: "accept-edits", name: "Accept edits", description: "agy --mode accept-edits: reads and edits in the workspace (and any --add-dir / AGY_ACP_ADD_DIRS directories) run; shell commands and reads outside those directories are denied (headless agy cannot ask)." },
@@ -30,7 +50,7 @@ export const MODES = [
   { id: "bypass", name: "Bypass permissions", description: "agy --dangerously-skip-permissions: every tool runs without asking." },
 ];
 export const EFFORTS = ["default", "low", "medium", "high", "xhigh", "max"];
-// agy models can carry their effort in the id (gemini-4-argon-high). agy refuses --effort with such a model
+// agy models can carry their effort in the id (gemini-4-carbon-high). agy refuses --effort with such a model
 // unless the two agree, so the id's suffix wins and --effort is left off.
 export const effortSuffixed = (modelId) => /-(low|medium|high|xhigh|max)$/.test(modelId);
 const SESSION_PREFIX = "agyacp-";
@@ -76,17 +96,19 @@ export function findAgy(explicit, env = process.env) {
   return existsSync(local) ? local : "agy";
 }
 
-// `agy models` prints "<id>\t<name>" lines. Argon first (high, medium, low), then the rest in agy's order.
+// `agy models` prints "<id>\t<name>" lines. Known models first in KNOWN_MODELS order, then any new ones in agy's order.
+// agy lists this one but the owner chose not to offer it (no xhigh reasoning level).
+const EXCLUDED_MODELS = new Set(["gemini-4-hydrogen-xhigh"]);
 export function parseModels(stdout) {
   const listed = [];
   for (const line of stdout.split("\n")) {
     const m = /^(\S+)\t(.+)$/.exec(line.trim());
-    if (m) listed.push({ modelId: m[1], name: m[2].trim() });
+    if (m && !EXCLUDED_MODELS.has(m[1])) listed.push({ modelId: m[1], name: m[2].trim() });
   }
-  if (listed.length === 0) return [...ARGON_MODELS];
+  if (listed.length === 0) return [...KNOWN_MODELS];
   const ids = new Set(listed.map((m) => m.modelId));
-  const argon = ARGON_MODELS.filter((m) => ids.has(m.modelId)).map((m) => listed.find((l) => l.modelId === m.modelId));
-  return [...argon, ...listed.filter((m) => !ARGON_MODELS.some((a) => a.modelId === m.modelId))];
+  const pinned = KNOWN_MODELS.filter((m) => ids.has(m.modelId)).map((m) => listed.find((l) => l.modelId === m.modelId));
+  return [...pinned, ...listed.filter((m) => !KNOWN_MODELS.some((a) => a.modelId === m.modelId))];
 }
 
 export function toolKind(name) {
@@ -236,7 +258,7 @@ export class AgyAcpAgent {
     if (typeof cwd !== "string" || !cwd.startsWith("/")) throw Object.assign(new Error("cwd must be an absolute path"), { code: ERR.invalidParams });
     if (sessionId !== undefined && !/^[\w-]{1,128}$/.test(sessionId)) throw Object.assign(new Error("Invalid sessionId"), { code: ERR.invalidParams });
     const models = this.getModels();
-    const model = this.opts.model || (models.some((m) => m.modelId === "gemini-4-argon-high") ? "gemini-4-argon-high" : models[0].modelId);
+    const model = this.opts.model || models[0].modelId;
     const id = sessionId ?? `${SESSION_PREFIX}${randomUUID()}`;
     // Our sessions map to the agy conversation saved at their first prompt (none yet: start fresh);
     // any other id is taken as an agy conversation id.

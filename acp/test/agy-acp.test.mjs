@@ -48,17 +48,17 @@ test("initialize advertises load, resume and text prompts", async () => {
   assert.equal(r.agentInfo.name, "agy-acp");
 });
 
-test("session/new starts no agy until the first prompt, lists Argon first, high by default", async () => {
+test("session/new starts no agy until the first prompt, lists Carbon first, high by default", async () => {
   const h = harness("two-turn-read-file.ndjson");
   const r = await h.call("session/new", { cwd: "/tmp", mcpServers: [] });
   assert.match(r.sessionId, /^agyacp-[0-9a-f-]{36}$/);
   assert.deepEqual(h.spawns(), [], "a model probe (session/new only) leaves no agy conversation");
-  assert.deepEqual(r.models.availableModels.slice(0, 3).map((m) => m.modelId), ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"]);
-  assert.equal(r.models.currentModelId, "gemini-4-argon-high");
+  assert.deepEqual(r.models.availableModels.slice(0, 3).map((m) => m.modelId), ["gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low"]);
+  assert.equal(r.models.currentModelId, "gemini-4-carbon-high");
   assert.equal(r.modes.currentModeId, "accept-edits");
   assert.deepEqual(r.configOptions.map((o) => [o.id, o.category]), [["model", "model"], ["effort", "thought_level"], ["mode", "mode"]]);
   await h.call("session/prompt", { sessionId: r.sessionId, prompt: text("read note.txt") });
-  assert.deepEqual(h.spawns(), [["-p=", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-argon-high", "--mode", "accept-edits"]]);
+  assert.deepEqual(h.spawns(), [["-p=", "--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-4-carbon-high", "--mode", "accept-edits"]]);
   h.agent.shutdown();
 });
 
@@ -220,7 +220,7 @@ test("session/load replays the saved transcript; resume does not; unknown ids fa
   assert.equal(resumed.sessionId, undefined);
   assert.equal(h2.updates().length, 0);
   const loaded = await h2.call("session/load", { sessionId, cwd: "/tmp", mcpServers: [] });
-  assert.equal(loaded.models.currentModelId, "gemini-4-argon-high");
+  assert.equal(loaded.models.currentModelId, "gemini-4-carbon-high");
   const replay = h2.updates();
   assert.deepEqual(replay[0], { sessionUpdate: "user_message_chunk", content: { type: "text", text: "read note.txt" } });
   assert.ok(replay.some((x) => x.sessionUpdate === "tool_call"));
@@ -235,8 +235,14 @@ test("session/load replays the saved transcript; resume does not; unknown ids fa
 });
 
 test("helpers", () => {
-  assert.deepEqual(parseModels("").map((m) => m.modelId), ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"]);
+  const all = parseModels("").map((m) => m.modelId);
+  assert.equal(all.length, 21);
+  assert.deepEqual(all, ["gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low", "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low", "gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low", "gpt-oss-120b-medium"]);
   assert.deepEqual(parseModels("x-1\tX One\ngemini-4-argon-low\tLow\n").map((m) => m.modelId), ["gemini-4-argon-low", "x-1"]);
+  const fromAgy = parseModels(readFileSync(fixture("models.txt"), "utf8")).map((m) => m.modelId);
+  assert.deepEqual([...fromAgy].sort(), [...all].sort(), "the fixture is agy's real list (incl. the excluded xhigh row); the result matches KNOWN_MODELS");
+  assert.deepEqual(["gemini-4-carbon-low", "gemini-4-hydrogen-high"].map(effortSuffixed), [true, true]);
+  assert.deepEqual(["gemini-pro-orchestrator", "gemini-pro-orchestrator-argon"].map(effortSuffixed), [false, false]);
   assert.equal(promptText([{ type: "text", text: "a" }, { type: "resource_link", uri: "file:///w/a%20b.ts", name: "b" }]), "a\n@/w/a b.ts");
   assert.throws(() => promptText([{ type: "image", data: "", mimeType: "image/png" }]), /text and resource blocks only/);
   assert.equal(toolKind("run_command"), "execute");
@@ -250,9 +256,9 @@ test("an effort-suffixed model id wins over the effort setting: agy refuses --ef
   const h = harness("two-turn-read-file.ndjson");
   const { sessionId } = await h.call("session/new", { cwd: "/tmp", mcpServers: [] });
   await h.call("session/set_config_option", { sessionId, configId: "effort", value: "low" });
-  await h.call("session/prompt", { sessionId, prompt: text("read note.txt") }); // default model gemini-4-argon-high + effort low
+  await h.call("session/prompt", { sessionId, prompt: text("read note.txt") }); // default model gemini-4-carbon-high + effort low
   assert.ok(!h.spawns()[0].includes("--effort"), h.spawns()[0].join(" "));
-  assert.deepEqual(h.spawns()[0].slice(h.spawns()[0].indexOf("--model"), h.spawns()[0].indexOf("--model") + 2), ["--model", "gemini-4-argon-high"]);
+  assert.deepEqual(h.spawns()[0].slice(h.spawns()[0].indexOf("--model"), h.spawns()[0].indexOf("--model") + 2), ["--model", "gemini-4-carbon-high"]);
   h.agent.shutdown();
 });
 

@@ -1,7 +1,7 @@
 # agy-acp
 
 An [Agent Client Protocol](https://agentclientprotocol.com) (ACP) agent on stdio for the
-Google Antigravity CLI (`agy`). Any ACP client (Cloudroom/BB, Zed, ...) can run Gemini 4 Argon
+Google Antigravity CLI (`agy`). Any ACP client (Cloudroom/BB, Zed, ...) can run Gemini 4 Carbon
 and the other `agy models` through it.
 
 It runs one long-lived `agy -p= --input-format stream-json --output-format stream-json` process
@@ -26,7 +26,7 @@ agy-acp [--agy PATH] [--model ID] [--effort default|low|medium|high|xhigh|max]
 ```
 
 - `--agy`: agy binary (default: `$AGY_PATH`, then `agy` on `PATH`, then `~/.local/bin/agy`).
-- `--model`: default model (default `gemini-4-argon-high`).
+- `--model`: default model (default `gemini-4-carbon-high`).
 - `--mode`: default session mode (default `accept-edits`). `--dangerously-skip-permissions` is the
   same as `--mode bypass`.
 - `--state-dir`: where each session's agy conversation id and its transcript for `session/load`
