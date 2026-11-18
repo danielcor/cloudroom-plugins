@@ -19,7 +19,9 @@ describe("provider-agy", () => {
     expect(decl.id).toBe("agy");
     expect(decl.displayName).toBe("Antigravity");
     expect(decl.capabilities.permissionModes).toEqual(["accept-edits", "full"]);
-    expect(decl.experimental_bridgeOptions).toMatchObject({ acpDialect: "generic", primaryModels: ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"] });
+    expect(decl.experimental_bridgeOptions).toMatchObject({ acpDialect: "generic", primaryModels: expect.arrayContaining(["gemini-4-argon-high", "gemini-4-carbon-high", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-low"]) });
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels).toHaveLength(22);
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels[0]).toBe("gemini-4-argon-high");
     expect(spec).toEqual({
       displayName: "Antigravity",
       command: "agy-acp",

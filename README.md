@@ -45,7 +45,7 @@ cd ~/src/cloudroom-argon/plugin && npm ci
 room-cli plugin build .
 room-cli plugin install path:$HOME/src/cloudroom-argon/plugin --yes
 room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.2  running
-room-cli provider models agy --machine aipc-ubuntu # Gemini 4 Argon High (default), Medium, Low
+room-cli provider models agy --machine aipc-ubuntu # 22 models: Gemini 4 Argon High (default), Medium, Low, then Carbon, Hydrogen, Flash, Claude, GPT-OSS
 ```
 
 `room-cli` here is the desktop app's CLI. On aipc it lives inside the mounted AppImage:
@@ -58,13 +58,13 @@ Install step 1 there, then run `room-cli provider models agy --machine <name> --
 
 1. In Cloudroom, start a new thread on a project and pick the machine (aipc-ubuntu, mac or
    aliengaming-wsl-debian).
-2. Pick the **Antigravity** provider and a model: Gemini 4 Argon High (default), Medium or Low.
+2. Pick the **Antigravity** provider and a model: Gemini 4 Argon High (default), or any other model `agy models` lists (Gemini 4 Carbon and Hydrogen, Orchestrator, Gemini 3.8 Flash, Claude Opus/Sonnet 5.5, GPT-OSS 120B).
 3. Pick the permission mode. **Accept edits** lets agy read and edit files in the thread's workspace but
    auto-denies shell commands and file reads outside the workspace (headless agy cannot ask; the reply names what
    it denied). **Full** runs agy with `--dangerously-skip-permissions`. See [Accept edits and reads](#accept-edits-and-reads).
 4. Optional: the reasoning level maps to agy `--effort`, except for models whose id ends in an effort
-   (`gemini-4-argon-high`, `-medium`, `-low`): agy rejects a conflicting `--effort` for those, so the id wins and
-   the level is ignored. Pick the Low/Medium/High model instead.
+   (`gemini-4-argon-high`, `gemini-4-hydrogen-xhigh`, `-medium`, `-low`, ...): agy rejects a conflicting `--effort` for those, so the id wins and
+   the level is ignored. Pick the model with the effort you want instead (the Orchestrator models have no suffix and take the level).
 
 Threads resume after a restart: agy-acp keeps each thread's agy conversation id and restarts agy with `--conversation`.
 

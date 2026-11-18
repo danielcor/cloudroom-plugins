@@ -1,16 +1,16 @@
 {
   "name": "bb-plugin-provider-agy",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
-  "description": "Run Cloudroom threads with Google Antigravity (agy) and Gemini 4 Argon, through the agy-acp adapter.",
+  "description": "Run Cloudroom threads with Google Antigravity (agy) and every Antigravity model (Gemini 4 Argon, Carbon and Hydrogen, Gemini 3.8 Flash, Claude, GPT-OSS), through the agy-acp adapter.",
   "engines": {
     "bb": ">=0.0",
     "bbPluginSdk": ">=0.6.49"
   },
   "bb": {
     "name": "Antigravity provider",
-    "description": "Run Cloudroom threads with Google Antigravity (agy) and Gemini 4 Argon.",
+    "description": "Run Cloudroom threads with Google Antigravity (agy) and every Antigravity model (Gemini 4 Argon, Carbon and Hydrogen, Gemini 3.8 Flash, Claude, GPT-OSS).",
     "branding": {
       "icon": "./icons/antigravity.svg"
     },

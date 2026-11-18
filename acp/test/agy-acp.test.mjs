@@ -235,8 +235,14 @@ test("session/load replays the saved transcript; resume does not; unknown ids fa
 });
 
 test("helpers", () => {
-  assert.deepEqual(parseModels("").map((m) => m.modelId), ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low"]);
+  const all = parseModels("").map((m) => m.modelId);
+  assert.equal(all.length, 22);
+  assert.deepEqual(all.slice(0, 10), ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low", "gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low"]);
   assert.deepEqual(parseModels("x-1\tX One\ngemini-4-argon-low\tLow\n").map((m) => m.modelId), ["gemini-4-argon-low", "x-1"]);
+  const fromAgy = parseModels(readFileSync(fixture("models.txt"), "utf8")).map((m) => m.modelId);
+  assert.deepEqual([...fromAgy].sort(), [...all].sort(), "the fixture is agy's real list and matches KNOWN_MODELS");
+  assert.deepEqual(["gemini-4-carbon-low", "gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-high"].map(effortSuffixed), [true, true, true]);
+  assert.deepEqual(["gemini-pro-orchestrator", "gemini-pro-orchestrator-argon"].map(effortSuffixed), [false, false]);
   assert.equal(promptText([{ type: "text", text: "a" }, { type: "resource_link", uri: "file:///w/a%20b.ts", name: "b" }]), "a\n@/w/a b.ts");
   assert.throws(() => promptText([{ type: "image", data: "", mimeType: "image/png" }]), /text and resource blocks only/);
   assert.equal(toolKind("run_command"), "execute");
