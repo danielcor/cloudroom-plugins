@@ -19,12 +19,12 @@ export const AGY_MODELS = [
   "gemini-3.8-flash-high",
   "gemini-3.8-flash-medium",
   "gemini-3.8-flash-low",
-  "claude-opus-5-5-low",
-  "claude-opus-5-5-medium",
   "claude-opus-5-5-high",
-  "claude-sonnet-5-5-low",
-  "claude-sonnet-5-5-medium",
+  "claude-opus-5-5-medium",
+  "claude-opus-5-5-low",
   "claude-sonnet-5-5-high",
+  "claude-sonnet-5-5-medium",
+  "claude-sonnet-5-5-low",
   "gpt-oss-120b-medium",
 ];
 const REASONING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;

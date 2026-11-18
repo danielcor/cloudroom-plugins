@@ -35,12 +35,12 @@ export const KNOWN_MODELS = [
   { modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
   { modelId: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)" },
   { modelId: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
-  { modelId: "claude-opus-5-5-low", name: "Claude Opus 5.5 (Low)" },
-  { modelId: "claude-opus-5-5-medium", name: "Claude Opus 5.5 (Medium)" },
   { modelId: "claude-opus-5-5-high", name: "Claude Opus 5.5 (High)" },
-  { modelId: "claude-sonnet-5-5-low", name: "Claude Sonnet 5.5 (Low)" },
-  { modelId: "claude-sonnet-5-5-medium", name: "Claude Sonnet 5.5 (Medium)" },
+  { modelId: "claude-opus-5-5-medium", name: "Claude Opus 5.5 (Medium)" },
+  { modelId: "claude-opus-5-5-low", name: "Claude Opus 5.5 (Low)" },
   { modelId: "claude-sonnet-5-5-high", name: "Claude Sonnet 5.5 (High)" },
+  { modelId: "claude-sonnet-5-5-medium", name: "Claude Sonnet 5.5 (Medium)" },
+  { modelId: "claude-sonnet-5-5-low", name: "Claude Sonnet 5.5 (Low)" },
   { modelId: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
 ];
 export const MODES = [

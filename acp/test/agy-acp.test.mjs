@@ -237,7 +237,7 @@ test("session/load replays the saved transcript; resume does not; unknown ids fa
 test("helpers", () => {
   const all = parseModels("").map((m) => m.modelId);
   assert.equal(all.length, 21);
-  assert.deepEqual(all.slice(0, 9), ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low", "gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low", "gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low"]);
+  assert.deepEqual(all, ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low", "gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low", "gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low", "gpt-oss-120b-medium"]);
   assert.deepEqual(parseModels("x-1\tX One\ngemini-4-argon-low\tLow\n").map((m) => m.modelId), ["gemini-4-argon-low", "x-1"]);
   const fromAgy = parseModels(readFileSync(fixture("models.txt"), "utf8")).map((m) => m.modelId);
   assert.deepEqual([...fromAgy].sort(), [...all].sort(), "the fixture is agy's real list (incl. the excluded xhigh row); the result matches KNOWN_MODELS");

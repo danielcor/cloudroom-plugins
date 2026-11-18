@@ -22,6 +22,7 @@ describe("provider-agy", () => {
     expect(decl.experimental_bridgeOptions).toMatchObject({ acpDialect: "generic", primaryModels: expect.arrayContaining(["gemini-4-argon-high", "gemini-4-carbon-high", "gemini-4-hydrogen-low"]) });
     expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels).toHaveLength(21);
     expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels[0]).toBe("gemini-4-argon-high");
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels.slice(14, 20)).toEqual(["claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low"]);
     expect(spec).toEqual({
       displayName: "Antigravity",
       command: "agy-acp",
