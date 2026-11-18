@@ -27,7 +27,6 @@ export const KNOWN_MODELS = [
   { modelId: "gemini-4-carbon-high", name: "Gemini 4 Carbon (High)" },
   { modelId: "gemini-4-carbon-medium", name: "Gemini 4 Carbon (Medium)" },
   { modelId: "gemini-4-carbon-low", name: "Gemini 4 Carbon (Low)" },
-  { modelId: "gemini-4-hydrogen-xhigh", name: "Gemini 4 Hydrogen (XHigh)" },
   { modelId: "gemini-4-hydrogen-high", name: "Gemini 4 Hydrogen (High)" },
   { modelId: "gemini-4-hydrogen-medium", name: "Gemini 4 Hydrogen (Medium)" },
   { modelId: "gemini-4-hydrogen-low", name: "Gemini 4 Hydrogen (Low)" },

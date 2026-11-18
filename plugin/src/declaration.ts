@@ -11,7 +11,6 @@ export const AGY_MODELS = [
   "gemini-4-carbon-high",
   "gemini-4-carbon-medium",
   "gemini-4-carbon-low",
-  "gemini-4-hydrogen-xhigh",
   "gemini-4-hydrogen-high",
   "gemini-4-hydrogen-medium",
   "gemini-4-hydrogen-low",
