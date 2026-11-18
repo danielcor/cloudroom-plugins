@@ -18,15 +18,15 @@ import { fileURLToPath } from "node:url";
 
 export const VERSION = "0.1.0";
 export const PROTOCOL_VERSION = 1;
-// Every model `agy models` listed on 2026-11-18, Gemini 4 first (Argon High is the default). Pinned order, and the
+// Every model `agy models` listed on 2026-11-18, Gemini 4 first (Carbon High is the default). Pinned order, and the
 // fallback when `agy models` fails.
 export const KNOWN_MODELS = [
-  { modelId: "gemini-4-argon-high", name: "Gemini 4 Argon (High)" },
-  { modelId: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium)" },
-  { modelId: "gemini-4-argon-low", name: "Gemini 4 Argon (Low)" },
   { modelId: "gemini-4-carbon-high", name: "Gemini 4 Carbon (High)" },
   { modelId: "gemini-4-carbon-medium", name: "Gemini 4 Carbon (Medium)" },
   { modelId: "gemini-4-carbon-low", name: "Gemini 4 Carbon (Low)" },
+  { modelId: "gemini-4-argon-high", name: "Gemini 4 Argon (High)" },
+  { modelId: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium)" },
+  { modelId: "gemini-4-argon-low", name: "Gemini 4 Argon (Low)" },
   { modelId: "gemini-4-hydrogen-high", name: "Gemini 4 Hydrogen (High)" },
   { modelId: "gemini-4-hydrogen-medium", name: "Gemini 4 Hydrogen (Medium)" },
   { modelId: "gemini-4-hydrogen-low", name: "Gemini 4 Hydrogen (Low)" },
@@ -50,7 +50,7 @@ export const MODES = [
   { id: "bypass", name: "Bypass permissions", description: "agy --dangerously-skip-permissions: every tool runs without asking." },
 ];
 export const EFFORTS = ["default", "low", "medium", "high", "xhigh", "max"];
-// agy models can carry their effort in the id (gemini-4-argon-high). agy refuses --effort with such a model
+// agy models can carry their effort in the id (gemini-4-carbon-high). agy refuses --effort with such a model
 // unless the two agree, so the id's suffix wins and --effort is left off.
 export const effortSuffixed = (modelId) => /-(low|medium|high|xhigh|max)$/.test(modelId);
 const SESSION_PREFIX = "agyacp-";
@@ -258,7 +258,7 @@ export class AgyAcpAgent {
     if (typeof cwd !== "string" || !cwd.startsWith("/")) throw Object.assign(new Error("cwd must be an absolute path"), { code: ERR.invalidParams });
     if (sessionId !== undefined && !/^[\w-]{1,128}$/.test(sessionId)) throw Object.assign(new Error("Invalid sessionId"), { code: ERR.invalidParams });
     const models = this.getModels();
-    const model = this.opts.model || (models.some((m) => m.modelId === "gemini-4-argon-high") ? "gemini-4-argon-high" : models[0].modelId);
+    const model = this.opts.model || (models.some((m) => m.modelId === "gemini-4-carbon-high") ? "gemini-4-carbon-high" : models[0].modelId);
     const id = sessionId ?? `${SESSION_PREFIX}${randomUUID()}`;
     // Our sessions map to the agy conversation saved at their first prompt (none yet: start fresh);
     // any other id is taken as an agy conversation id.

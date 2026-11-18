@@ -3,14 +3,14 @@ import type { AcpLaunchSpec } from "@get-bb/plugin-sdk/provider-bridge/acp";
 
 export const AGY_PROVIDER_ID = "agy";
 export const DEFAULT_AGY_ACP_COMMAND = "agy-acp";
-// Every model `agy models` listed on 2026-11-18; Argon High is first (the default).
+// Every model `agy models` listed on 2026-11-18; Carbon High is first (the default).
 export const AGY_MODELS = [
-  "gemini-4-argon-high",
-  "gemini-4-argon-medium",
-  "gemini-4-argon-low",
   "gemini-4-carbon-high",
   "gemini-4-carbon-medium",
   "gemini-4-carbon-low",
+  "gemini-4-argon-high",
+  "gemini-4-argon-medium",
+  "gemini-4-argon-low",
   "gemini-4-hydrogen-high",
   "gemini-4-hydrogen-medium",
   "gemini-4-hydrogen-low",
@@ -30,7 +30,7 @@ export const AGY_MODELS = [
 const REASONING_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 // agy-acp exposes agy --effort as the "effort" config option (left off for models whose id ends in an effort,
-// like gemini-4-argon-high: the id wins) and takes its default permission mode as a flag (headless agy cannot
+// like gemini-4-carbon-high: the id wins) and takes its default permission mode as a flag (headless agy cannot
 // ask for approval).
 // addDirs (path-separated) become agy --add-dir: headless agy in Accept edits auto-denies file reads outside the
 // thread's workspace, and an added directory is readable and editable (shell stays denied).
