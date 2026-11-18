@@ -1,0 +1,47 @@
+{
+  "name": "bb-plugin-snippets",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Prompt Snippets: a table of reusable prompts kept as Markdown files, with a picker that writes the chosen snippet into the chat composer.",
+  "engines": {
+    "bb": ">=0.0",
+    "bbPluginSdk": ">=0.6.49"
+  },
+  "bb": {
+    "name": "Prompt Snippets",
+    "description": "Keep reusable prompts as Markdown files and insert them into the composer.",
+    "branding": {
+      "icon": "./icons/snippets.svg"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@get-bb/plugin-sdk": "0.6.49",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.3",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "better-sqlite3": "^12.11.1",
+    "cron-parser": "^5.10.2",
+    "hono": "^4.13.14",
+    "jsdom": "^26.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.1"
+  }
+}
