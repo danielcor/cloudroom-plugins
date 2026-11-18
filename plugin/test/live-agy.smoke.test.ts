@@ -1,6 +1,7 @@
 // Opt-in live smoke test: the plugin's bridge drives the installed agy-acp and the
-// signed-in agy for two turns with gemini-4-argon-low. Costs two small Argon turns.
-//   AGY_SMOKE=1 npx vitest run test/live-agy.smoke.test.ts
+// signed-in agy for two turns with AGY_SMOKE_MODEL (default gemini-4-carbon-low). Costs two small agy turns.
+//   AGY_SMOKE=1 AGY_SMOKE_MODEL=gemini-4-hydrogen-low npx vitest run test/live-agy.smoke.test.ts
+// AGY_SMOKE_MODEL is optional (default gemini-4-carbon-low).
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,12 +15,12 @@ import { experimental_providerBridge } from "../src/host.js";
 import { agyLaunchSpec } from "../src/declaration.js";
 
 describe.runIf(process.env.AGY_SMOKE === "1")("live agy", () => {
-  it("runs two Argon turns with a tool call through agy-acp", async () => {
+  it("runs two turns with a tool call through agy-acp (AGY_SMOKE_MODEL, default Carbon Low)", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "agy-smoke-"));
     writeFileSync(join(cwd, "note.txt"), "hello from the bridge smoke test\n");
     const h = createBridgeJsonRpcTestHarness(experimental_providerBridge.handleLine);
     const options = {
-      model: "gemini-4-argon-low",
+      model: process.env.AGY_SMOKE_MODEL ?? "gemini-4-carbon-low",
       permissionMode: "accept-edits",
       permissionScope: "workspace",
       approvalReviewer: "user",

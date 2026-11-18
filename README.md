@@ -1,16 +1,16 @@
 # cloudroom-plugins
 
-More agent harnesses for Cloudroom: Gemini 4 Argon (Google Antigravity, `agy`), Meta Muse
-(Muse Code, Muse Wonder Full) and Qoder (Qwen 4 Max Preview). Argon is documented first; [Muse](#muse) and
+More agent harnesses for Cloudroom: Gemini 4 Carbon (Google Antigravity, `agy`), Meta Muse
+(Muse Code, Muse Wonder Full) and Qoder (Qwen 4 Max Preview). Gemini is documented first; [Muse](#muse) and
 [Qoder](#qoder) have their own sections below.
 
 - [`acp/`](acp/): **agy-acp**, an Agent Client Protocol agent that wraps the agy CLI's headless
   stream-json mode. Works with any ACP client. Its README has the ACP compliance note.
 - [`plugin/`](plugin/): **provider-agy**, a Cloudroom plugin that adds the "Antigravity" provider
   (id `agy`) to local threads. It runs agy-acp through the plugin SDK's ACP bridge.
-- [`cli/argon`](cli/argon) and [`skills/argon/`](skills/argon/): **argon**, a command plus a skill that run Argon
+- [`cli/gemini-relay`](cli/gemini-relay) and [`skills/gemini/`](skills/gemini/): **gemini-relay**, a command plus a skill that run Gemini
   headless in Cloud threads through a cheap relay agent (Cloud threads cannot host a custom harness). See
-  [Cloud threads](#cloud-threads-argon).
+  [Cloud threads](#cloud-threads-gemini-relay).
 - [`muse-acp/`](muse-acp/), [`plugin-muse/`](plugin-muse/), [`cli/muse-relay`](cli/muse-relay) and
   [`skills/muse/`](skills/muse/): the same three pieces for Muse. See [Muse](#muse).
 - [`plugin-qoder/`](plugin-qoder/): **provider-qoder**, the "Qoder" provider (id `qoder`) for local threads on
@@ -22,7 +22,7 @@ More agent harnesses for Cloudroom: Gemini 4 Argon (Google Antigravity, `agy`), 
   by 3 model families (Claude, GPT, Gemini, Kimi, Muse), picked by quality, quota and load, as Cloudroom child threads.
 
 For local threads, agy keeps its own Google login on each machine and the plugin never reads, copies or logs
-credentials. The `argon` command copies that login into Cloud sandboxes (below).
+credentials. The `gemini-relay` command copies that login into Cloud sandboxes (below).
 
 ## Install
 
@@ -34,9 +34,9 @@ aliengaming-wsl-debian join it as machines, so the plugin goes on aipc only.
 
 ```sh
 curl -fsSL https://antigravity.google/cli/install.sh | bash   # skip if `agy --version` works
-agy models                                                   # must list gemini-4-argon-*; if not, run `agy` and sign in
-mkdir -p ~/src && git clone https://github.com/danielcor/cloudroom-plugins ~/src/cloudroom-argon
-npm install -g ~/src/cloudroom-argon/acp                     # links agy-acp into npm's global bin; keep the clone
+agy models                                                   # must list gemini-4-carbon-*; if not, run `agy` and sign in
+mkdir -p ~/src && git clone https://github.com/danielcor/cloudroom-plugins ~/src/cloudroom-gemini
+npm install -g ~/src/cloudroom-gemini/acp                     # links agy-acp into npm's global bin; keep the clone
 agy-acp --version
 ```
 
@@ -49,11 +49,11 @@ The `command` setting still accepts an absolute path. agy-acp itself finds agy o
 ### 2. The plugin (on the Cloudroom server, aipc)
 
 ```sh
-cd ~/src/cloudroom-argon/plugin && npm ci
+cd ~/src/cloudroom-gemini/plugin && npm ci
 room-cli plugin build .
-room-cli plugin install path:$HOME/src/cloudroom-argon/plugin --yes
-room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.1  running
-room-cli provider models agy --machine aipc-ubuntu # Gemini 4 Argon High (default), Medium, Low
+room-cli plugin install path:$HOME/src/cloudroom-gemini/plugin --yes
+room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.3  running
+room-cli provider models agy --machine aipc-ubuntu # 21 models: Gemini 4 Carbon High (default), Medium, Low, then Argon, Hydrogen, Orchestrator, Flash, Claude, GPT-OSS
 ```
 
 `room-cli` here is the desktop app's CLI. On aipc it lives inside the mounted AppImage:
@@ -62,24 +62,43 @@ room-cli provider models agy --machine aipc-ubuntu # Gemini 4 Argon High (defaul
 A machine without agy-acp shows only "Agent default" under `room-cli provider models agy --machine <name>`.
 Install step 1 there, then run `room-cli provider models agy --machine <name> --restart`.
 
-## Start an Argon thread
+## Start a Gemini thread
 
 1. In Cloudroom, start a new thread on a project and pick the machine (aipc-ubuntu, mac or
    aliengaming-wsl-debian).
-2. Pick the **Antigravity** provider and a model: Gemini 4 Argon High (default), Medium or Low.
-3. Pick the permission mode. **Accept edits** lets agy edit files but auto-denies shell commands
-   (headless agy cannot ask; the reply names what it denied). **Full** runs agy with
-   `--dangerously-skip-permissions`.
-4. Optional: the reasoning level maps to agy `--effort`.
+2. Pick the **Antigravity** provider and a model: Gemini 4 Carbon High (default), or any other model `agy models` lists except Gemini 4 Hydrogen XHigh, which is omitted on purpose (Gemini 4 Argon and Hydrogen, Orchestrator, Gemini 3.8 Flash, Claude Opus/Sonnet 5.5, GPT-OSS 120B).
+3. Pick the permission mode. **Accept edits** lets agy read and edit files in the thread's workspace but
+   auto-denies shell commands and file reads outside the workspace (headless agy cannot ask; the reply names what
+   it denied). **Full** runs agy with `--dangerously-skip-permissions`. See [Accept edits and reads](#accept-edits-and-reads).
+4. Optional: the reasoning level maps to agy `--effort`, except for models whose id ends in an effort
+   (`gemini-4-carbon-high`, `-medium`, `-low`, ...): agy rejects a conflicting `--effort` for those, so the id wins and
+   the level is ignored. Pick the model with the effort you want instead (the Orchestrator models have no suffix and take the level).
 
 Threads resume after a restart: agy-acp keeps each thread's agy conversation id and restarts agy with `--conversation`.
+
+### Accept edits and reads
+
+Headless `agy --mode accept-edits` reads and edits inside the workspace, but **silently denies file reads outside
+it** (the tool returns nothing; the turn ends with `denied_actions`). Reproduced on agy 1.4.7: a file next to the
+workspace under `$HOME` was denied while `/tmp` paths and the workspace itself read fine. `--mode auto` and
+`--mode plan` deny the same reads, so a reviewer that has to read other trees (skills, sibling worktrees) needs one of:
+
+- **Full**: everything allowed, shell included.
+- **Extra directories**: `--add-dir DIR` makes `DIR` part of the workspace: reads *and* edits allowed, shell still
+  denied (checked with a write and a shell call). Set it in the plugin setting "Extra directories for Accept edits"
+  (`:`-separated, every machine), in `AGY_ACP_ADD_DIRS`, with `agy-acp --add-dir DIR`, or per session through ACP's
+  `additionalDirectories`.
+- **Read-only grants**: `read_file(DIR/**)` entries under `permissions.allow` in
+  `~/.gemini/antigravity-cli/settings.json`. agy-acp never edits that file; it names this option in its denial message.
+
+Nothing grants "read anywhere, edit only the workspace, no shell" in one switch: agy has no such flag.
 
 ## Develop
 
 ```sh
 cd acp && npm test                          # agy-acp unit tests (fake agy replaying recorded transcripts)
 cd plugin && npm ci && npx tsc --noEmit && npx vitest run   # registration + SDK bridge conformance
-AGY_SMOKE=1 npx vitest run test/live-agy.smoke.test.ts      # live: two gemini-4-argon-low turns through the bridge
+AGY_SMOKE=1 npx vitest run test/live-agy.smoke.test.ts      # live: two gemini-4-carbon-low turns through the bridge
 ```
 
 `room-cli plugin install` and `plugin reload` prune the plugin's dev dependencies; run `npm ci`
@@ -93,54 +112,54 @@ again before running the tests in an installed plugin directory.
   ACP registry). It needs its own Google sign-in per
   machine (browser OAuth) and is a ~0.9 GB download. agy-acp reuses the agy CLI login instead.
 
-## Cloud threads: `argon`
+## Cloud threads: `gemini-relay`
 
-One dependency-free Node (>= 20) script: `cli/argon`.
+One dependency-free Node (>= 20) script: `cli/gemini-relay` (`cli/argon` is a thin compatibility wrapper that runs it).
 
 | Command | What it does |
 | --- | --- |
-| `argon setup` | Idempotent. Installs `agy` (official `install.sh`) if missing, gets the login (below), checks `agy models` lists an argon model. |
-| `argon run [--model M] [--effort L] [--new \| --conversation ID] [PROMPT]` | One turn in the cwd, permissions skipped. Streams Argon's text and one line per tool call, ends with `conversation: <id>`. Continues the last conversation for this cwd unless `--new`. The prompt can come from stdin. Non-zero exit with agy's error on failure. Default model `gemini-4-argon-high`. |
-| `argon models` | `agy models`. |
-| `argon export-token >> .env` | Prints `ARGON_AGY_TOKEN_B64=...`. Refuses to write to a terminal. |
+| `gemini-relay setup` | Idempotent. Installs `agy` (official `install.sh`) if missing, gets the login (below), checks `agy models` lists a carbon model. |
+| `gemini-relay run [--model M] [--effort L] [--new \| --conversation ID] [PROMPT]` | One turn in the cwd, permissions skipped. Streams Gemini's text and one line per tool call, ends with `conversation: <id>`. Continues the last conversation for this cwd unless `--new`. The prompt can come from stdin. Non-zero exit with agy's error on failure. Default model `gemini-4-carbon-high`. |
+| `gemini-relay models` | `agy models`. |
+| `gemini-relay export-token >> .env` | Prints `GEMINI_AGY_TOKEN_B64=...`. Refuses to write to a terminal. |
 
 Where `setup` gets the login, in order: the existing `~/.gemini/antigravity-cli/antigravity-oauth-token`,
-env `ARGON_AGY_TOKEN_B64`, that key in the nearest `.env` (cwd up to the git root), then the paired desktop through
+env `GEMINI_AGY_TOKEN_B64`, that key in the nearest `.env` (cwd up to the git root), then the older `ARGON_AGY_TOKEN_B64` the same way (env, then `.env`), then the paired desktop through
 `room-cli mac run` (file, macOS keychain, `secret-tool`, or the gnome keyring over D-Bus). The file is written `0600`;
 values are never printed. `agy` refreshes the token by itself and writes it back.
 
 Tests: `npm test` (parsing and event rendering against scrubbed real `agy` transcripts, plus a fake-`agy` end-to-end run).
 
-### Using Argon in a Cloud thread
+### Using Gemini in a Cloud thread
 
 One time, on a machine where `agy` is logged in (run `agy` once to sign in):
 
 ```bash
 cd <your project> && git check-ignore .env   # must print ".env"; if not, add it to .gitignore first
-argon export-token >> .env                   # or from a Cloud thread: argon setup && argon export-token >> .env
+~/src/cloudroom-gemini/cli/gemini-relay export-token >> .env   # or from a Cloud thread (substitute your mount path): /repos/cloudroom-plugins/cli/gemini-relay setup && /repos/cloudroom-plugins/cli/gemini-relay export-token >> .env
 ```
 
-Project `.env` files are copied into every Cloud sandbox, so Argon then works with your machines off.
+Project `.env` files are copied into every Cloud sandbox, so Gemini then works with your machines off.
 Treat that `.env` like a password: it holds a refresh token for your Google account's Antigravity login.
 Always append with `>>`; never run `export-token` where its output is captured into a chat or log.
 
-Make the script and skill available in sandboxes: add the `danielcor/cloudroom-argon` repo to the project's Cloud
-environment so it appears as `/repos/cloudroom-argon` (or `room-cli mac pull` a checkout from your desktop).
-Nothing else to install: the skill finds `/repos/cloudroom-argon/cli/argon` itself.
+Make the script and skill available in sandboxes: add the `danielcor/cloudroom-plugins` repo to the project's Cloud
+environment so it appears as `/repos/cloudroom-plugins` (older environments mount it as `/repos/cloudroom-gemini` or `/repos/cloudroom-argon`; the skill checks all) (or `room-cli mac pull` a checkout from your desktop).
+Nothing else to install: the skill finds `/repos/cloudroom-plugins/cli/gemini-relay` (or the old `/repos/cloudroom-gemini` / `/repos/cloudroom-argon`) itself.
 
 Then start a **relay thread**: new Cloud thread, Claude Code, `claude-haiku-5-5`, first message:
 
-> Read /repos/cloudroom-argon/skills/argon/SKILL.md and follow it. From now on relay everything I write to Argon.
+> Read /repos/cloudroom-plugins/skills/gemini/SKILL.md (substitute your actual mount path) and follow it. From now on relay everything I write to Gemini.
 
-Every later message goes to Argon verbatim; Haiku only forwards it and quotes the answer. To use it from any other
-thread, say the same thing there, or install the skill: `ln -sfn /repos/cloudroom-argon/skills/argon ~/.claude/skills/argon`.
+Every later message goes to Gemini verbatim; Haiku only forwards it and quotes the answer. To use it from any other
+thread, say the same thing there, or install the skill: `ln -sfn /repos/cloudroom-plugins/skills/gemini ~/.claude/skills/gemini` (substitute your actual mount path; in the commands above `gemini-relay` means `cli/gemini-relay` in the clone or mount).
 
 Limits:
-- The relay agent sees Argon's output as command output, so the user may need to expand it; the skill tells it to quote the answer.
-- One turn per call: no mid-turn questions or permission prompts (Argon runs with permissions skipped, in the cwd).
-- Sandboxes are separate machines: Argon edits files in that sandbox's checkout, so commit and push to get them out.
-- Several sandboxes share one login; if Google ever revokes it, re-run `argon export-token >> .env` from a working machine.
-- Argon calls cost the user's Antigravity quota; the relay model costs Cloudroom usage on top.
+- The relay agent sees Gemini's output as command output, so the user may need to expand it; the skill tells it to quote the answer.
+- One turn per call: no mid-turn questions or permission prompts (Gemini runs with permissions skipped, in the cwd).
+- Sandboxes are separate machines: Gemini edits files in that sandbox's checkout, so commit and push to get them out.
+- Several sandboxes share one login; if Google ever revokes it, re-run `gemini-relay export-token >> .env` from a working machine.
+- Gemini calls cost the user's Antigravity quota; the relay model costs Cloudroom usage on top.
 
 ## Muse
 
@@ -184,8 +203,9 @@ Each machine that runs Muse threads needs muse (signed in), Node 22 or newer, an
    muse-acp --list-models                                 # muse-wonder-full-1.0 - Muse Wonder Full 1.0, ...
    ```
 
-   `muse login` is a device-code sign-in: it prints a code to enter at a URL. `META_API_KEY` in the Cloudroom
-   daemon's environment also works instead of a login.
+   `muse login` is a device-code sign-in: it prints a code to enter at a URL, and it is the login that spends your
+   plan. `META_API_KEY` in the Cloudroom daemon's environment also works, but it is pay-per-token API billing with
+   no plan allowance (`muse usage` says `No subscription allowance (api_key)`), and it overrides a `muse login`.
 
 2. The plugin, on the Cloudroom server (aipc):
 
@@ -214,27 +234,32 @@ model call before your message.
 
 ### Cloud threads: `muse-relay`
 
-One dependency-free Node (>= 20) script: `cli/muse-relay`, the same UX as `argon`.
+One dependency-free Node (>= 20) script: `cli/muse-relay`, the same UX as `gemini-relay`.
 
 | Command | What it does |
 | --- | --- |
 | `muse-relay setup` | Idempotent. Installs `muse` (official `install.sh`) if missing and finds the login (below). |
 | `muse-relay run [--model M] [--effort L] [--new \| --session ID] [PROMPT]` | One turn in the cwd with approvals and Muse's sandbox off. Streams Muse's text and one line per tool call, then `model: <id> (<n> tokens in, <m> out)` and `session: <id>`. Continues the last session for this cwd unless `--new`. The prompt can come from stdin. Non-zero exit with Muse's error on failure. Default model `muse-wonder-full-1.0`; `-contributor` models are refused. |
 | `muse-relay models` | Muse's live model list, without contributor variants. |
-| `muse-relay export-key >> .env` | Prints `META_API_KEY=...`. Refuses to write to a terminal. |
+| `muse-relay export-login >> .env` | Prints `MUSE_AUTH_B64=...`, your `~/.config/muse/auth.json` (the `muse login` plan login) in base64. Refuses to write to a terminal. |
+| `muse-relay export-key >> .env` | Prints `META_API_KEY=...`, the pay-per-token **API** fallback (prints a warning). Refuses to write to a terminal. |
 
-The login, in order: env `META_API_KEY`, that key in the nearest `.env` (cwd up to the git root, read on every run),
-an existing `muse login`, then the paired desktop's key through `room-cli mac run` (its `META_API_KEY` or
-`~/.config/muse/auth.json`), saved with `muse auth set`. Values are never printed.
+`muse-relay` uses your **plan** login, not an API key. The login, in order: an existing plan login in
+`~/.config/muse/auth.json`; env `MUSE_AUTH_B64`; that key in the nearest `.env` (cwd up to the git root); the paired
+desktop's `~/.config/muse/auth.json` through `room-cli mac run`. A found login is written to `~/.config/muse/auth.json`
+with mode `0600`; only oauth (plan) logins are imported, an API-key `auth.json` is skipped. Only when none of those exist does it fall back to `META_API_KEY` (env or `.env`), with a one-line
+warning that this bills the API. While a plan login exists, `META_API_KEY` is removed from muse's environment, because
+muse would otherwise prefer it. Values are never printed. `muse` refreshes the login's token itself and writes it
+back to that file; a sandbox's copy refreshes on its own, so re-run `export-login` if Meta ever revokes it.
 
 One time, on a machine where `muse` is logged in:
 
 ```bash
 cd <your project> && git check-ignore .env   # must print ".env"; if not, add it to .gitignore first
-muse-relay export-key >> .env                # or from a Cloud thread: muse-relay setup && muse-relay export-key >> .env
+muse-relay export-login >> .env              # or from a Cloud thread: muse-relay setup && muse-relay export-login >> .env
 ```
 
-Treat that `.env` like a password: the key spends your Muse plan. Never `source` it (keys can hold shell
+Treat that `.env` like a password: the login spends your Muse plan. Never `source` it (keys can hold shell
 metacharacters such as `|`); `muse-relay` parses it.
 
 Add the `danielcor/cloudroom-plugins` repo to the project's Cloud environment (it appears as
@@ -242,12 +267,12 @@ Add the `danielcor/cloudroom-plugins` repo to the project's Cloud environment (i
 
 > Read /repos/cloudroom-plugins/skills/muse/SKILL.md and follow it. From now on relay everything I write to Muse.
 
-The limits are argon's: one turn per call, no mid-turn questions, edits stay in that sandbox until pushed.
+The limits are gemini-relay's: one turn per call, no mid-turn questions, edits stay in that sandbox until pushed.
 
 ### Develop
 
 ```sh
-npm test                                     # argon + muse-relay (fake muse replaying scrubbed transcripts)
+npm test                                     # gemini-relay + muse-relay (fake muse replaying scrubbed transcripts)
 cd muse-acp && npm ci && npm test            # launcher, model list format, the muse-clean flags
 cd plugin-muse && npm ci && npx tsc --noEmit && npx vitest run
 MUSE_SMOKE=1 npx vitest run test/live-muse.smoke.test.ts    # live: two muse-spark-1.3 turns through the bridge
