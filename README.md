@@ -18,6 +18,8 @@ More agent harnesses for Cloudroom: Gemini 4 Argon (Google Antigravity, `agy`), 
 - [`plugin-snippets/`](plugin-snippets/): **Prompt Snippets** (`snippets`), a sidebar page and a composer `+`
   menu row that keep reusable prompts as Markdown files and append the one you pick to the composer. See its
   [README](plugin-snippets/README.md).
+- [`skills/triad-review/`](skills/triad-review/): **triad-review**, a skill for one blind, read-only review
+  by 3 model families (Claude, GPT, Gemini, Kimi, Muse), picked by quality, quota and load, as Cloudroom child threads.
 
 For local threads, agy keeps its own Google login on each machine and the plugin never reads, copies or logs
 credentials. The `argon` command copies that login into Cloud sandboxes (below).
