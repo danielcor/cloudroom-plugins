@@ -25,12 +25,19 @@ is the caller's loop (sol-loop, review-council or the user).
 
 1. `RUN=$(mktemp -d "${TMPDIR:-/tmp}/triad.XXXXXX")` (private, unique). `RID=$(basename "$RUN")`.
 2. Every spawn (probe, seat or retry) gets its own request id `$RID-<probe|seat>-<family>-<attempt>`.
-   Append the id to `$RUN/ids` before the spawn. If a spawn gives no answer, re-run it with the same
+   Before the spawn, append one JSON line to `$RUN/spawns.jsonl` with its exact parameters: `requestId`,
+   `kind`, `family`, `machine`, `provider`, `model`, `level`, `baseBranch` (or `null`), `promptFile`. After
+   the reply, append `{"requestId":…,"threadId":…,"environmentId":…}` (`room-cli thread show <id> --json`
+   gives `.environment.id`). If a spawn gives no answer, replay that exact spawn with the same
    `--request-id`: Cloudroom returns that thread instead of a duplicate.
-3. Secrets: if the diff holds a key, token or `.env` content, stop and tell the user (a seat's prompt stays
-   in its thread log). Read `.worktreeinclude` and `.bb-env-setup.sh` at the ref each seat's worktree is made
-   from (`git show <ref>:<file>`: the head branch, or the project default branch on another machine). If either
-   would give a seat a credential, stop and ask the user.
+3. Secrets: if the diff holds a key, token or `.env` content, stop and tell the user (a prompt stays in its
+   thread log).
+4. Worktree files: before any spawn (probes in step 4 and seats in step 6), read `.worktreeinclude` and
+   `.bb-env-setup.sh` at the exact ref and machine that spawn checks out: `git show <head branch>:<file>` when
+   it passes `--base-branch`, or that machine's default-branch checkout when it does not (for example
+   `tailscale ssh <host> git -C <checkout> show HEAD:<file>`). If either file would give the child a
+   credential, or you cannot read the ref on that machine, do not spawn there. On the author's machine, stop
+   and ask the user.
 
 ## 2. Size the risk
 
@@ -57,8 +64,8 @@ fast with fewer deep catches. Muse Wonder Full's own prompt is about 28k input t
 - Gemini: Carbon first. If Carbon is down on every machine, use Argon with the same suffix
   (`gemini-4-argon-high` etc.). The agy model suffix and `--reasoning-level` must match.
 - Muse High: Wonder Full only with access proof (step 4); else `muse-wonder-1.0` / `high`.
-- Cost: this order already puts cheaper families (Kimi) above the costliest (Muse). Today only Codex logs
-  token counts, so the ledger cannot re-rank yet. Once 2 or more of families 2 to 5 each have 10+ seat rows
+- Cost: today only Codex logs token counts (`thread/tokenUsage/updated`), so the ledger cannot re-rank yet
+  and this order stays. Once 2 or more of families 2 to 5 each have 10+ seat rows
   with `tokens` set, re-rank those: sum `input - cached + output` over their last 20 such rows and divide by
   the sum of `verified` (skip a family whose sum is 0). Lower ranks higher. GPT stays first on High risk.
 
@@ -115,7 +122,7 @@ VERDICT: APPROVE (zero findings) or CHANGES
 F1 [BLOCKER|MAJOR|MINOR|NIT] <file>:<line> <claim>. Evidence: <quote or reason>. Fix: <one line>
 ```
 
-One spawn per seat (request id as in step 1):
+One spawn per seat (record it as in step 1.2; check worktree files as in step 1.4):
 
 ```sh
 room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --request-id "$RID-seat-<family>-1" \
@@ -131,10 +138,15 @@ room-cli thread spawn --parent-self --project "$ROOM_PROJECT_ID" --json --reques
   edits only its own throwaway worktree. agy then denies shell commands, so it reviews the inline diff.
 - Wait on each seat by id: `room-cli thread wait <id> --event turn/completed --timeout 1200`. A timeout, a
   `turn/completed` with `status` `failed`, or an empty reply is a failed seat, never an APPROVE.
-- A valid reply (`room-cli thread output <id>`) has `HEAD:` equal to the head SHA, a `CONTEXT:` line, and
-  `VERDICT: APPROVE` with no `F` lines or `VERDICT: CHANGES` with at least one. Also,
-  `room-cli environment status <env id> --json` must show `.workspace.workingTree.state` `clean` and, on a
-  same-machine seat, `.workspace.checkout.headSha` equal to the head. Otherwise the seat is invalid: re-run it once (attempt 2), then report it failed.
+- A valid reply (`room-cli thread output <id>`) has all of:
+  - `HEAD: <the head SHA>`.
+  - `CONTEXT: checkout` or `CONTEXT: diff-only`; no other value.
+  - `VERDICT: APPROVE` with no `F` lines, or `VERDICT: CHANGES` with at least one `F` line.
+  - Every `F` line in the form `F<n> [BLOCKER|MAJOR|MINOR|NIT] <file>:<line> <claim>. Evidence: <…> Fix: <…>`.
+  - `room-cli environment status <env id> --json` shows `.workspace.workingTree.state` `clean` and, on a
+    same-machine seat, `.workspace.checkout.headSha` equal to the head.
+
+  Any miss makes the reply invalid: re-run the seat once (attempt 2), then report it failed.
 
 ## 7. Merge and verify
 
@@ -161,12 +173,17 @@ Append one JSON line per seat and per probe to `~/.local/state/triad-review/ledg
 - `secs`: `turn/completed` minus `turn/started` `createdAt` (milliseconds), divided by 1000.
 - A failed, limited or logged-out seat or probe: `"ok":false` and the error text in `error`.
 
-Clean up on every exit, early ones included. For each request id in `$RUN/ids`, get its thread (the spawn's
-`--json` reply, or re-run that spawn with the same `--request-id`) and its `.environment.id`
-(`room-cli thread show <id> --json`). Then `room-cli thread archive <thread>` and
-`room-cli environment delete <env>`. Teardown runs in the background; `room-cli environment show <env> --json`
-reaches `.lifecycle.phase` `destroyed` when it is done. Re-check once at the end of the run. Then `rm -r "$RUN"`.
-Name any environment not yet `destroyed` in the report.
+Clean up on every exit, early ones included, for each `requestId` in `$RUN/spawns.jsonl`:
+
+1. No `threadId` yet: replay its recorded spawn with the same `--request-id` (while `$RUN/brief.md` still
+   exists), then get `.environment.id` from `room-cli thread show <threadId> --json`.
+2. `room-cli thread archive <threadId>` and `room-cli environment delete <environmentId>`; both must exit 0.
+3. `room-cli environment show <environmentId> --json` must reach `.lifecycle.phase` `destroyed` (teardown runs
+   in the background; re-check once at the end of the run).
+
+`rm -r "$RUN"` only when every record passed all three. Otherwise delete only `$RUN/brief.md` (once no replay
+needs it), keep `$RUN/spawns.jsonl`, and report its path, the unresolved request ids and any environment not
+`destroyed`.
 
 Report: each seat (family, model, level, machine, context), each skipped family and why, a table of items
 (id, severity, file:line, claim, shared or single with raisers, verified, rejected or unclear), the verdict,
