@@ -128,7 +128,7 @@ One time, on a machine where `agy` is logged in (run `agy` once to sign in):
 
 ```bash
 cd <your project> && git check-ignore .env   # must print ".env"; if not, add it to .gitignore first
-~/src/cloudroom-gemini/cli/gemini-relay export-token >> .env   # or from a Cloud thread: gemini-relay setup && gemini-relay export-token >> .env
+~/src/cloudroom-gemini/cli/gemini-relay export-token >> .env   # or from a Cloud thread (substitute your mount path): /repos/cloudroom-plugins/cli/gemini-relay setup && /repos/cloudroom-plugins/cli/gemini-relay export-token >> .env
 ```
 
 Project `.env` files are copied into every Cloud sandbox, so Gemini then works with your machines off.

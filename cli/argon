@@ -4,5 +4,8 @@
 const fs = require('fs');
 const path = require('path');
 const relay = path.join(path.dirname(fs.realpathSync(__filename)), 'gemini-relay');
-process.argv[1] = relay;
-require(relay).cli();
+if (require.main === module) process.argv[1] = relay; // before loading: the usage text names argv[1]
+const mod = require(relay);
+if (require.main === module) mod.cli();
+const { parseArgs, agyArgs, render, normalizeToken, parseDotenv } = mod;
+module.exports = { parseArgs, agyArgs, render, normalizeToken, parseDotenv };

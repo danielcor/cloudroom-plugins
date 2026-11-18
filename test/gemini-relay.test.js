@@ -178,7 +178,7 @@ test('a conversation saved in the old ~/.cache/argon cache still resumes', () =>
   fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/bin/sh\necho "$@" > "${tmp}/args"\ncat >/dev/null\ncat "${path.join(__dirname, 'fixtures', 'tool-error.ndjson')}"\n`, { mode: 0o755 });
   const cwd = fs.mkdtempSync(path.join(tmp, 'work-'));
   fs.mkdirSync(path.join(tmp, '.cache', 'argon'), { recursive: true });
-  fs.writeFileSync(path.join(tmp, '.cache', 'argon', 'conversations.json'), JSON.stringify({ [fs.realpathSync(cwd)]: 'old-conv' }));
+  fs.writeFileSync(path.join(tmp, '.cache', 'argon', 'conversations.json'), JSON.stringify({ [fs.realpathSync(cwd)]: 'old-conv', '/unrelated/dir': 'other-conv' }));
   const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}` };
   delete env.GEMINI_CACHE_DIR; delete env.ARGON_CACHE_DIR;
   const r = spawnSync(SHIM, ['run', 'hi'], { cwd, env, encoding: 'utf8' });
@@ -229,7 +229,9 @@ test('setup: an agy that cannot execute reports the launch error', () => {
   const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}`, GEMINI_AGY_TOKEN_B64: b64(LOGIN) };
   const r = spawnSync(process.execPath, [RELAY, 'setup'], { cwd: tmp, env, encoding: 'utf8' });
   assert.notStrictEqual(r.status, 0);
-  assert.match(r.stderr, /could not run agy models|does not list a carbon model/);
+  assert.match(r.stderr, /could not run agy models/);
+  assert.match(r.stderr, /ENOENT|EACCES|spawn/);
+  assert.ok(!/does not list a carbon model/.test(r.stderr), r.stderr);
   assert.ok(!/undefined|TypeError/.test(r.stderr), r.stderr);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -237,20 +239,43 @@ test('setup: an agy that cannot execute reports the launch error', () => {
 test('cli/argon shim forwards SIGTERM to agy', async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
   fs.mkdirSync(path.join(tmp, 'bin'));
+  const pidFile = path.join(tmp, 'agy.pid');
   fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/usr/bin/env node
 process.on('SIGTERM', () => { require('fs').writeFileSync(${JSON.stringify(path.join(tmp, 'got-term'))}, '1'); process.exit(0); });
-require('fs').writeFileSync(${JSON.stringify(path.join(tmp, 'agy.pid'))}, String(process.pid));
+require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
 setInterval(() => {}, 1000);
 `, { mode: 0o755 });
   const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}`, GEMINI_CACHE_DIR: path.join(tmp, 'cache') };
   const child = require('child_process').spawn(SHIM, ['run', 'hi'], { cwd: tmp, env, stdio: 'ignore' });
-  const closed = new Promise((res) => child.on('close', res));
-  for (let i = 0; i < 100 && !fs.existsSync(path.join(tmp, 'agy.pid')); i++) await new Promise((r) => setTimeout(r, 50));
-  assert.ok(fs.existsSync(path.join(tmp, 'agy.pid')), 'agy started');
-  child.kill('SIGTERM');
-  const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
-  await closed;
-  clearTimeout(timer);
-  assert.ok(fs.existsSync(path.join(tmp, 'got-term')), 'agy received SIGTERM through the shim');
-  fs.rmSync(tmp, { recursive: true, force: true });
+  let exited = child.exitCode !== null || child.signalCode !== null;
+  const closed = new Promise((res) => child.on('close', () => { exited = true; res(); }));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const agyPid = () => { try { return Number(fs.readFileSync(pidFile, 'utf8')); } catch { return 0; } };
+  try {
+    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) await sleep(50);
+    assert.ok(fs.existsSync(pidFile), 'agy started');
+    child.kill('SIGTERM');
+    const deadline = await Promise.race([closed.then(() => false), sleep(5000).then(() => true)]);
+    assert.ok(!deadline, 'shim exited within 5s of SIGTERM');
+    assert.ok(fs.existsSync(path.join(tmp, 'got-term')), 'agy received SIGTERM through the shim');
+  } finally {
+    const pid = agyPid();
+    if (!exited) child.kill('SIGTERM');
+    if (pid && alive(pid)) process.kill(pid, 'SIGTERM');
+    for (let i = 0; i < 20 && (!exited || (pid && alive(pid))); i++) await sleep(100);
+    if (!exited) { child.kill('SIGKILL'); await closed; }
+    if (pid && alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('require("../cli/argon") returns the helpers without running the CLI', () => {
+  const r = spawnSync(process.execPath, ['-e', `const m = require(${JSON.stringify(SHIM)}); console.log(Object.keys(m).sort().join(','), typeof m.parseArgs, process.argv.length)`, 'x'], { encoding: 'utf8', timeout: 10000 });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(r.stdout.trim(), 'agyArgs,normalizeToken,parseArgs,parseDotenv,render function 2');
+  assert.strictEqual(r.stderr, '');
+  const m = require('../cli/argon');
+  assert.strictEqual(m.parseArgs, parseArgs);
+  assert.strictEqual(m.render, render);
 });
