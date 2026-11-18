@@ -23,13 +23,15 @@ is the caller's loop (sol-loop, review-council or the user).
 
 ## 1. Start the run
 
-1. `RUN=$(mktemp -d "${TMPDIR:-/tmp}/triad.XXXXXX")` (private, unique). `RID=$(basename "$RUN")`.
+1. `RUN=$(mktemp -d "${TMPDIR:-/tmp}/triad-XXXXXX")` (private, unique). `RID=$(basename "$RUN")`.
+   No dot in the template: request ids must match `^[a-zA-Z0-9_-]{1,64}$` or the spawn fails with HTTP 400.
 2. Every spawn (probe, seat or retry) gets its own request id `$RID-<probe|seat>-<family>-<attempt>`.
    Before the spawn, append one JSON line to `$RUN/spawns.jsonl` with its exact parameters: `requestId`,
    `kind`, `family`, `machine`, `provider`, `model`, `level`, `baseBranch` (or `null`), `promptFile`. After
    the reply, append `{"requestId":…,"threadId":…,"environmentId":…}` (`room-cli thread show <id> --json`
-   gives `.environment.id`). If a spawn gives no answer, replay that exact spawn with the same
-   `--request-id`: Cloudroom returns that thread instead of a duplicate.
+   gives `.environment.id`). A spawn that exits with an error created nothing: append
+   `{"requestId":…,"error":"<text>"}`; that record is resolved. If a spawn gives no answer at all, replay that
+   exact spawn with the same `--request-id`: Cloudroom returns that thread instead of a duplicate.
 3. Secrets: if the diff holds a key, token or `.env` content, stop and tell the user (a prompt stays in its
    thread log).
 4. Worktree files: before any spawn (probes in step 4 and seats in step 6), read `.worktreeinclude` and
