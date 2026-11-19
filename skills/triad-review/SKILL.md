@@ -190,8 +190,10 @@ failed probe of that model) marks only that model down there.
    signed out or discovery fails transiently, `acp/agy-acp.mjs`), and older `provider-agy` versions omit
    newer Gemini ids from their fallback lists (the three `gemini-4-argon-*` ids, or the 21-model
    Carbon-led list before Neon), so a non-empty `agy` list proves neither availability nor absence and
-   every step-3 Gemini option goes to 4.4 (a model that `agy` lacks fails the probe and hits 4.1's 24h
-   unknown-model cooldown). Muse lists Wonder Full on accounts
+   every step-3 Gemini option goes to 4.4. Record an `agy-acp` catalog rejection (`Invalid model "<id>";
+   expected one of …`, raised before `agy` starts) as `"ok":false` (unproved, down for this run) without
+   4.1's 24h unknown-model cooldown; apply that 24h cooldown only when the error confirms `agy` itself
+   rejected the model as unknown. Muse lists Wonder Full on accounts
    that cannot call it. An `acp-kimi` or `qoder` list does not show that the login works, and
    `acp-default` lists no models. Cloud Kimi lists no models. Proof: an `"ok":true` ledger row for that
    provider, model, level and machine, under 7 days old and newer than every `"ok":false` row for that
