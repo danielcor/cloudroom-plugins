@@ -119,8 +119,8 @@ fast with fewer deep catches. Muse Wonder Full's own prompt is about 28k input t
 - Gemini, first option up wins (each option tries the local candidate machines in step 4's order before
   the next option): `gemini-4-neon-<level>`, then `gemini-4-carbon-<level>`, then `gemini-4-argon-<level>`,
   each with its own step 4 checks (`<level>` is `high`, `medium` or `low` from row 3). Pass the matching
-  `--reasoning-level` (`agy-acp` omits `--effort` on effort-suffixed ids so the id wins, `acp/agy-acp.mjs`,
-  and an older `agy-acp` rejects a mismatch).
+  `--reasoning-level` (`agy-acp` omits `--effort` on effort-suffixed ids so the id wins, `acp/agy-acp.mjs`;
+  older `agy-acp` forwards `--effort` and `agy` rejects a mismatch).
 - Muse High: Wonder Full only with access proof (step 4); else `muse-wonder-1.0` / `high`.
 - Kimi, first option up wins (each local option tries the local candidate machines in step 4's order
   before the next option):
@@ -167,11 +167,11 @@ failed probe of that model) marks only that model down there.
    other than `ok`, or a `windows[].usedPercent` of 90 or more, means down. Skip windows whose `model` is
    set to another model (for example the `Fable` window when the seat runs Opus).
 3. Models, plus the shared Cloud budget: on a local machine, `room-cli provider models <provider>
-   --json --machine <name>` must list the model, except an `agy` list of only the three
-   `gemini-4-argon-*` ids (an older `provider-agy`) and an `acp-kimi` list of only `acp-default` (both go
-   to 4.4); an `agy` list with other entries that omits the Gemini model asked for means that `agy` CLI
-   lacks it (down there, no probe); Muse prints "No models available" when it is logged out on that
-   machine. `acp-kimi` and `qoder` reject `--restart` (HTTP 400 "does not support restarting model
+   --json --machine <name>` must list the model, except any non-empty `agy` list and an `acp-kimi` list
+   of only `acp-default` (both go to 4.4, because `agy-acp` returns a pinned fallback list indistinguishable
+   from a live list when `agy models` fails, and older `provider-agy` versions omit newer Gemini ids from
+   their fallbacks); Muse prints "No models available" when it is logged out on that
+   machine. `agy`, `acp-kimi` and `qoder` reject `--restart` (HTTP 400 "does not support restarting model
    discovery"), so read the list as it is. A real `kimi-code/*` list without the Kimi model asked for
    means that model is down there, no probe. `qoder` listing only `qmodel_latest` with "Shown until Qoder
    reports its live model list over ACP." is its fallback entry: `kmodel_latest` is down there. Cloud,
@@ -187,8 +187,11 @@ failed probe of that model) marks only that model down there.
    `{"model":"default"}` and says to omit `--model`).
 4. Proof. A listed model is not proof for `agy`, `acp-muse`, `acp-kimi`, `qoder` or Cloud Kimi. `agy-acp`
    returns its pinned `KNOWN_MODELS` fallback list when `agy models` fails (for example when `agy` is
-   signed out, `acp/agy-acp.mjs`), and an older `provider-agy` lists only the three `gemini-4-argon-*`
-   ids. Muse lists Wonder Full on accounts
+   signed out or discovery fails transiently, `acp/agy-acp.mjs`), and older `provider-agy` versions omit
+   newer Gemini ids from their fallback lists (the three `gemini-4-argon-*` ids, or the 21-model
+   Carbon-led list before Neon), so a non-empty `agy` list proves neither availability nor absence and
+   every step-3 Gemini option goes to 4.4 (a model that `agy` lacks fails the probe and hits 4.1's 24h
+   unknown-model cooldown). Muse lists Wonder Full on accounts
    that cannot call it. An `acp-kimi` or `qoder` list does not show that the login works, and
    `acp-default` lists no models. Cloud Kimi lists no models. Proof: an `"ok":true` ledger row for that
    provider, model, level and machine, under 7 days old and newer than every `"ok":false` row for that
