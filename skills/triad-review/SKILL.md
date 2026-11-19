@@ -79,13 +79,14 @@ is the caller's loop (sol-loop, review-council or the user).
    - Read each present file, and any repo script it calls, with `git show <EXPECTED_SHA>:<file>`. If
      `.worktreeinclude` has any pattern that could match `.env`, `.env.*`, keys, certificates, tokens or
      other credential files, do not spawn there: the untracked files it copies can change after you look.
-   - Before a `qoder` spawn on that machine, also list tracked symlinks: `git ls-tree -r <EXPECTED_SHA>`
-     entries with mode `120000`. Read each target with `git cat-file -p <oid>` and check its exit status.
-     Skip `qoder` on that machine if a read fails (never count it as clean), if any target is absolute or
-     has a `..` path segment, if `.worktreeinclude` could copy a symlink, or if `.bb-env-setup.sh` (or a
-     script it calls) could create one or cannot be fully read: its bridge checks `fs/write_text_file`
-     paths as text and does not follow symlinks (`plugin-qoder/README.md`). This check skips only `qoder`
-     on that machine (the next bullet does not apply to it); go on down the Kimi chain (step 3).
+   - `qoder` symlink check, in step 4 before `qoder` counts as up on that machine (cached proof or not):
+     list tracked symlinks, the `git ls-tree -r <EXPECTED_SHA>` entries with mode `120000` (the command
+     must exit 0), and read each target with `git cat-file -p <oid>` (each must exit 0). Skip `qoder` on
+     that machine if either command fails (never count it as clean), if any target is absolute or has a
+     `..` path segment, if `.worktreeinclude` could copy a symlink, or if `.bb-env-setup.sh` (or a script
+     it calls, read in the bullet above) could create one: its bridge checks `fs/write_text_file` paths as
+     text and does not follow symlinks (`plugin-qoder/README.md`). These symlink results skip only `qoder`
+     on that machine; go on down the Kimi chain (step 3). A failed hook read is the next bullet's case.
    - If any of these would give the child a credential or run something unsafe, or the check itself fails
      (SSH error, missing commit, unreadable checkout), do not spawn on that machine; on the author's
      machine, stop and ask the user.
@@ -120,8 +121,9 @@ fast with fewer deep catches. Muse Wonder Full's own prompt is about 28k input t
 - Kimi, first option up wins (each local option tries the local candidate machines in step 4's order
   before the next option):
   1. `acp-kimi` with `kimi-code/k3.1-pro` (row 4 levels).
-  2. `qoder` with `kmodel_latest` (Kimi-K3.1-Pro), local machines only: `high` / `high` / `low`. Its
-     catalog lists `max`, but `room-cli thread spawn` rejects `max` on `qoder` with HTTP 400.
+  2. `qoder` with `kmodel_latest` (Kimi-K3.1-Pro), on `aipc-ubuntu` only (`plugin-qoder/README.md`):
+     `high` / `high` / `low`. Its catalog lists `max`, but `room-cli thread spawn` rejects `max` on
+     `qoder` with HTTP 400.
   3. `acp-kimi` with `kimi-code/k3` (`max` / `high` / `low`), with its own step 4 checks.
   4. Cloud Kimi (below, `max` / `high` / `low`), when `cloud` is a candidate and every local option is
      down, or when `cloud` is the only candidate.
@@ -130,7 +132,7 @@ fast with fewer deep catches. Muse Wonder Full's own prompt is about 28k input t
   desktop fails with HTTP 400); a Cloud author's in-sandbox spawn takes `--provider kimi` with no
   `--model` (its only listing is `default`). Same reasoning levels. Gemini and Muse have no Cloud harness
   today, so they are down on Cloud until `room-cli cloud status --json` `.harnesses[].id` (or `room-cli
-  provider list` in-sandbox) lists one for them and a Cloud probe passes. `qoder` is local only.
+  provider list` in-sandbox) lists one for them and a Cloud probe passes. `qoder` runs on `aipc-ubuntu` only.
 - Cost: today only Codex logs token counts (`thread/tokenUsage/updated`), so the ledger cannot re-rank yet
   and this order stays. Once 2 or more of families 2 to 5 each have 10+ seat rows with `tokens` set,
   re-rank those: sum `input - cached + output` over their last 20 such rows and divide by the sum of
@@ -147,7 +149,9 @@ its own machine first, then the other connected machines in `room-cli machine li
 when local machines are down or busy, for example in market hours). If the user asked for Cloud or named
 machines, keep only the candidates they asked for (a requested machine that is unknown or disconnected is
 down). If `room-cli` fails for every provider (for example HTTP 401), the run is blocked: stop and report
-it. A check that fails for one provider means that provider is down on that machine.
+it. A check that fails for one provider means that provider is down on that machine, except that a
+failure tied to one model (a missing catalog entry, an access, entitlement or unknown-model error, or a
+failed probe of that model) marks only that model down there.
 
 1. Cooldown, per `(provider, model, machine)` (`<name>` or `cloud`): if its last ledger row is
    `"ok":false`, it is down there when that row is a limit, 429 or quota error under 6 hours old, an
@@ -193,7 +197,8 @@ it. A check that fails for one provider means that provider is down on that mach
    disposable sandbox and the tool-free prompt — step 6); and a local probe's worktree is `clean` at
    `EXPECTED_SHA`. Anything else is `"ok":false` with the reason, and the model is not proved. Cloudroom
    logs only the requested model, so a pass proves the id was accepted and ran, not which weights
-   answered. Log the probe (step 8).
+   answered. While a local probe runs, poll `room-cli thread interactions list <id>` and deny every
+   request (step 6). Log the probe (step 8).
 5. Local Gemini, Kimi (`acp-kimi` and `qoder`) and Muse, and every Cloud seat, have no per-provider
    subscription window in `room-cli`, so 4.2 does not apply to them (4.3's shared Cloud Credits gate
    still applies to Cloud).
@@ -333,7 +338,8 @@ reads the reply in `room-cli thread output <id>` `.reply`.
   Any miss makes the reply invalid: re-run the seat once (a second attempt, always on
   `$RUN/brief-notools.md`), then report it failed. If attempt 1 failed with a limit, 429, quota,
   auth/login, access or unknown-model error, log it (step 8) and run attempt 2 on the next option or
-  machine in that family's step 3 and 4 order that is still up, with its own step 1.4 and 4 checks.
+  machine in that family's step 3 and 4 order that is still up, with its own step 1.4 and 4 checks. If
+  none is up, report the seat failed without attempt 2.
 
 ## 7. Merge and verify
 
