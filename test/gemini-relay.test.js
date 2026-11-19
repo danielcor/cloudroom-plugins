@@ -139,14 +139,14 @@ function setupRun(models, { env: extra = {}, dotenv } = {}) {
   fs.rmSync(tmp, { recursive: true, force: true });
   return { r, token };
 }
-const NEON = "'gemini-4-neon-high\tGemini 4 Neon (High)' 'gemini-4-neon-low\tGemini 4 Neon (Low)' 'gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)'";
+const NEON = fs.readFileSync(path.join(__dirname, '..', 'acp', 'test', 'fixtures', 'models.txt'), 'utf8').trim().split('\n').map((l) => `'${l}'`).join(' ');
 
 test('setup reads GEMINI_AGY_TOKEN_B64, falls back to ARGON_AGY_TOKEN_B64, and counts neon models', () => {
   for (const key of ['GEMINI_AGY_TOKEN_B64', 'ARGON_AGY_TOKEN_B64']) {
     const { r, token } = setupRun(NEON, { env: { [key]: b64(LOGIN) } });
     assert.strictEqual(r.status, 0, r.stderr);
     assert.match(r.stderr, new RegExp(`login: from ${key}`));
-    assert.match(r.stdout, /\(3 neon models\)/);
+    assert.match(r.stdout, /\(4 neon models\)/);
     assert.strictEqual(token, LOGIN);
   }
 });

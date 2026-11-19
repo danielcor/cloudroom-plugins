@@ -241,7 +241,8 @@ test("helpers", () => {
   assert.deepEqual(all, ["gemini-4-neon-high", "gemini-4-neon-medium", "gemini-4-neon-low", "gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low", "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low", "gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low", "gemini-pro-orchestrator", "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-argon", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low", "gpt-oss-120b-medium"]);
   assert.deepEqual(parseModels("x-1\tX One\ngemini-4-argon-low\tLow\n").map((m) => m.modelId), ["gemini-4-argon-low", "x-1"]);
   const fromAgy = parseModels(readFileSync(fixture("models.txt"), "utf8")).map((m) => m.modelId);
-  assert.deepEqual([...fromAgy].sort(), [...all].sort(), "the fixture is agy's real list (incl. the excluded xhigh row); the result matches KNOWN_MODELS");
+  assert.equal(readFileSync(fixture("models.txt"), "utf8").trim().split("\n").length, 27, "the fixture is agy's real 27-row list (incl. both excluded xhigh rows)");
+  assert.deepEqual(fromAgy, all, "fixture-backed discovery returns exactly the pinned 25-model order");
   assert.deepEqual(["gemini-4-neon-low", "gemini-4-carbon-low", "gemini-4-hydrogen-high"].map(effortSuffixed), [true, true, true]);
   assert.deepEqual(["gemini-pro-orchestrator", "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-argon"].map(effortSuffixed), [false, false, false]);
   assert.equal(promptText([{ type: "text", text: "a" }, { type: "resource_link", uri: "file:///w/a%20b.ts", name: "b" }]), "a\n@/w/a b.ts");

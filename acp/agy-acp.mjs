@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 export const VERSION = "0.1.0";
 export const PROTOCOL_VERSION = 1;
-// Every model `agy models` listed on 2026-11-18, Gemini 4 first (Neon High is the default). Pinned order, and the
+// Every model `agy models` listed on 2026-11-18 except the two excluded xhigh rows, Gemini 4 first (Neon High is the default). Pinned order, and the
 // fallback when `agy models` fails.
 export const KNOWN_MODELS = [
   { modelId: "gemini-4-neon-high", name: "Gemini 4 Neon (High)" },
