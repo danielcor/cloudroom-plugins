@@ -15,11 +15,11 @@ is the caller's loop (sol-loop, review-council or the user).
 - Use your own family (the family of the model running you) only to fill a seat no other family can.
 - Every seat and probe is a Cloudroom child thread (desktop `room-cli thread spawn --parent-self`; inside
   a Cloud sandbox, `room-cli thread spawn`, which parents implicitly). Never start an agent CLI (`claude`,
-  `codex`, `agy`, `muse`, `kimi`, `qoder`, `qodercli`) from a shell, and never use the `argon` or
-  `muse-relay` shell relays. Never use built-in Agent/Task subagents.
+  `codex`, `agy`, `muse`, `kimi`, `qoder`, `qodercli`) from a shell, and never use the `gemini-relay`,
+  `argon` or `muse-relay` shell relays. Never use built-in Agent/Task subagents.
 - Every seat gets the same brief and the same head SHA. No seat sees another seat's reply.
 - A family that is down is skipped. Never swap in another model of the same family to fill its seat; the
-  only same-family fallbacks are the ones named in step 3 (Carbon to Argon, Wonder Full to Wonder, and
+  only same-family fallbacks are the ones named in step 3 (Neon to Carbon to Argon, Wonder Full to Wonder, and
   Kimi's chain: `acp-kimi` `kimi-code/k3.1-pro`, then `qoder` `kmodel_latest`, then `acp-kimi`
   `kimi-code/k3`, then Cloud Kimi on `cloud`).
 - Fewer than 3 families up: run with what is up and say so in the report. None up: stop and say why.
@@ -108,7 +108,7 @@ Each cell is `--model` / `--reasoning-level` on local machines.
 | - | --- | --- | --- | --- | --- |
 | 1 | GPT | `codex` | `gpt-6.1-sol` / `high` | `gpt-6.1-sol` / `medium` | `gpt-6.1-sol` / `low` |
 | 2 | Claude | `claude-code` | `claude-opus-5-5` / `high` | `claude-opus-5-5` / `medium` | `claude-sonnet-5-5` / `medium` |
-| 3 | Gemini | `agy` | `gemini-4-carbon-high` / `high` | `gemini-4-carbon-medium` / `medium` | `gemini-4-carbon-low` / `low` |
+| 3 | Gemini | `agy` | `gemini-4-neon-high` / `high` | `gemini-4-neon-medium` / `medium` | `gemini-4-neon-low` / `low` |
 | 4 | Kimi | `acp-kimi` | `kimi-code/k3.1-pro` / `max` | `kimi-code/k3.1-pro` / `high` | `kimi-code/k3.1-pro` / `low` |
 | 5 | Muse | `acp-muse` | `muse-wonder-full-1.0` / `high` | `muse-wonder-1.0` / `high` | `muse-wonder-1.0` / `medium` |
 
@@ -116,8 +116,11 @@ Why this order: GPT is the most thorough on intended-case bugs and missing tests
 dangerous edge cases. Gemini is a strong second opinion but raises more false findings. Kimi is cheap and
 fast with fewer deep catches. Muse Wonder Full's own prompt is about 28k input tokens per call (README).
 
-- Gemini: Carbon first. If Carbon is down on every machine, use Argon with the same suffix
-  (`gemini-4-argon-high` etc.). The agy model suffix and `--reasoning-level` must match.
+- Gemini, first option up wins (each option tries the local candidate machines in step 4's order before
+  the next option): `gemini-4-neon-<level>`, then `gemini-4-carbon-<level>`, then `gemini-4-argon-<level>`,
+  each with its own step 4 checks (`<level>` is `high`, `medium` or `low` from row 3). Pass the matching
+  `--reasoning-level` (`agy-acp` omits `--effort` on effort-suffixed ids so the id wins, `acp/agy-acp.mjs`,
+  and an older `agy-acp` rejects a mismatch).
 - Muse High: Wonder Full only with access proof (step 4); else `muse-wonder-1.0` / `high`.
 - Kimi, first option up wins (each local option tries the local candidate machines in step 4's order
   before the next option):
@@ -164,8 +167,10 @@ failed probe of that model) marks only that model down there.
    other than `ok`, or a `windows[].usedPercent` of 90 or more, means down. Skip windows whose `model` is
    set to another model (for example the `Fable` window when the seat runs Opus).
 3. Models, plus the shared Cloud budget: on a local machine, `room-cli provider models <provider>
-   --json --machine <name>` must list the model, except Carbon and an `acp-kimi` list of only
-   `acp-default` (both go to 4.4); Muse prints "No models available" when it is logged out on that
+   --json --machine <name>` must list the model, except an `agy` list of only the three
+   `gemini-4-argon-*` ids (an older `provider-agy`) and an `acp-kimi` list of only `acp-default` (both go
+   to 4.4); an `agy` list with other entries that omits the Gemini model asked for means that `agy` CLI
+   lacks it (down there, no probe); Muse prints "No models available" when it is logged out on that
    machine. `acp-kimi` and `qoder` reject `--restart` (HTTP 400 "does not support restarting model
    discovery"), so read the list as it is. A real `kimi-code/*` list without the Kimi model asked for
    means that model is down there, no probe. `qoder` listing only `qmodel_latest` with "Shown until Qoder
@@ -180,9 +185,10 @@ failed probe of that model) marks only that model down there.
    or empty, equal to its `.model` (Kimi's is `default`); a Cloud author needs the harness id in
    `room-cli provider list` and the model in `room-cli provider models <provider>` (Kimi prints
    `{"model":"default"}` and says to omit `--model`).
-4. Proof. A listed model is not proof for `agy`, `acp-muse`, `acp-kimi`, `qoder` or Cloud Kimi. Carbon
-   sits under "More Models" in agy's picker, and Cloudroom's agy list can show only the three built-in
-   Argon ids where Carbon works (`agy models` has no flag for more). Muse lists Wonder Full on accounts
+4. Proof. A listed model is not proof for `agy`, `acp-muse`, `acp-kimi`, `qoder` or Cloud Kimi. `agy-acp`
+   returns its pinned `KNOWN_MODELS` fallback list when `agy models` fails (for example when `agy` is
+   signed out, `acp/agy-acp.mjs`), and an older `provider-agy` lists only the three `gemini-4-argon-*`
+   ids. Muse lists Wonder Full on accounts
    that cannot call it. An `acp-kimi` or `qoder` list does not show that the login works, and
    `acp-default` lists no models. Cloud Kimi lists no models. Proof: an `"ok":true` ledger row for that
    provider, model, level and machine, under 7 days old and newer than every `"ok":false` row for that
