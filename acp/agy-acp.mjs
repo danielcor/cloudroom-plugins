@@ -101,7 +101,7 @@ export function findAgy(explicit, env = process.env) {
 }
 
 // `agy models` prints "<id>\t<name>" lines. Known models first in KNOWN_MODELS order, then any new ones in agy's order.
-// agy lists these but the owner chose not to offer them (no xhigh reasoning level).
+// agy lists these but the owner chose not to offer them.
 const EXCLUDED_MODELS = new Set(["gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh"]);
 export function parseModels(stdout) {
   const listed = [];

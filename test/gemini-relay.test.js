@@ -121,15 +121,16 @@ setTimeout(() => process.stdout.write(b.subarray(cut)), 100);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-function fakeAgy(tmp, models) {
+function fakeAgy(tmp, models, exitCode = 0) {
   fs.mkdirSync(path.join(tmp, 'bin'));
-  fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/bin/sh\nprintf '%s\\n' ${models}\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(tmp, 'models.txt'), models);
+  fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/bin/sh\ncat "$(dirname "$0")/../models.txt"\nexit ${exitCode}\n`, { mode: 0o755 });
 }
 const LOGIN = JSON.stringify({ token: { refresh_token: 'r' } });
 const b64 = (j) => Buffer.from(j).toString('base64');
-function setupRun(models, { env: extra = {}, dotenv } = {}) {
+function setupRun(models, { env: extra = {}, dotenv, exitCode = 0 } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
-  fakeAgy(tmp, models);
+  fakeAgy(tmp, models, exitCode);
   if (dotenv) fs.writeFileSync(path.join(tmp, '.env'), dotenv);
   const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}` };
   delete env.GEMINI_AGY_TOKEN_B64; delete env.ARGON_AGY_TOKEN_B64;
@@ -139,7 +140,7 @@ function setupRun(models, { env: extra = {}, dotenv } = {}) {
   fs.rmSync(tmp, { recursive: true, force: true });
   return { r, token };
 }
-const NEON = fs.readFileSync(path.join(__dirname, '..', 'acp', 'test', 'fixtures', 'models.txt'), 'utf8').trim().split('\n').map((l) => `'${l}'`).join(' ');
+const NEON = fs.readFileSync(path.join(__dirname, '..', 'acp', 'test', 'fixtures', 'models.txt'), 'utf8');
 
 test('setup reads GEMINI_AGY_TOKEN_B64, falls back to ARGON_AGY_TOKEN_B64, and counts neon models', () => {
   for (const key of ['GEMINI_AGY_TOKEN_B64', 'ARGON_AGY_TOKEN_B64']) {
@@ -167,13 +168,13 @@ test('setup: a malformed token names the key that was used', () => {
 });
 
 test('setup: Orchestrator (Neon) or Carbon alone is not enough, gemini-4-neon-high is required', () => {
-  const { r } = setupRun("'gemini-pro-orchestrator-neon\tOrchestrator (Neon)' 'gemini-4-carbon-high\tGemini 4 Carbon (High)' 'gemini-4-neon-low\tGemini 4 Neon (Low)'", { env: { GEMINI_AGY_TOKEN_B64: b64(LOGIN) } });
+  const { r } = setupRun('gemini-pro-orchestrator-neon\tOrchestrator (Neon)\ngemini-4-carbon-high\tGemini 4 Carbon (High)\ngemini-4-neon-low\tGemini 4 Neon (Low)\n', { env: { GEMINI_AGY_TOKEN_B64: b64(LOGIN) } });
   assert.notStrictEqual(r.status, 0);
   assert.match(r.stderr, /does not list gemini-4-neon-high/);
 });
 
 test('setup: agy models that lists the default but exits nonzero fails', () => {
-  const { r } = setupRun("'gemini-4-neon-high\tGemini 4 Neon (High)'; exit 1 #", { env: { GEMINI_AGY_TOKEN_B64: b64(LOGIN) } });
+  const { r } = setupRun('gemini-4-neon-high\tGemini 4 Neon (High)\n', { exitCode: 1, env: { GEMINI_AGY_TOKEN_B64: b64(LOGIN) } });
   assert.notStrictEqual(r.status, 0);
   assert.match(r.stderr, /agy models failed/);
 });
