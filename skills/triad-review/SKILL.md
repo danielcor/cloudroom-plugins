@@ -160,8 +160,8 @@ failed probe of that model) marks only that model down there.
 1. Cooldown, per `(provider, model, machine)` (`<name>` or `cloud`): if its last ledger row is
    `"ok":false`, it is down there when that row is a limit, 429 or quota error under 6 hours old, an
    auth/login error under 6 hours old, or an entitlement/access or unknown-model error under 24 hours
-   old. Only for an auth/login row: if the user says they just signed in there, it is not down, but it
-   needs a fresh probe (4.4). Apply this before any probe.
+   old (not an `agy-acp` catalog rejection, 4.4). Only for an auth/login row: if the user says they
+   just signed in there, it is not down, but it needs a fresh probe (4.4). Apply this before any probe.
 2. Quota, `codex` and `claude-code` only, on local machines only: `room-cli settings usage --json
    --machine <name>` (never `--machine cloud`; it fails with "Machine 'cloud' was not found"). A `status`
    other than `ok`, or a `windows[].usedPercent` of 90 or more, means down. Skip windows whose `model` is
@@ -349,8 +349,9 @@ reads the reply in `room-cli thread output <id>` `.reply`.
 
   Any miss makes the reply invalid: re-run the seat once (a second attempt, always on
   `$RUN/brief-notools.md`), then report it failed. If attempt 1 failed with a limit, 429, quota,
-  auth/login, entitlement/access or unknown-model error (4.1's categories), log it (step 8) and run
-  attempt 2 on the next option or
+  auth/login, entitlement/access or unknown-model error (4.1's categories), or an `agy-acp` catalog
+  rejection (4.4; marks only that model down on that machine for this run, without 4.1's 24h cooldown),
+  log it (step 8) and run attempt 2 on the next option or
   machine in that family's step 3 and 4 order that is still up, with its own step 1.4 and 4 checks. If
   none is up, report the seat failed without attempt 2.
 
