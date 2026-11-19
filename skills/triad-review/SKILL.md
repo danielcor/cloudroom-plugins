@@ -84,7 +84,8 @@ is the caller's loop (sol-loop, review-council or the user).
      must exit 0), and read each target with `git cat-file -p <oid>` (each must exit 0). Skip `qoder` on
      that machine if either command fails (never count it as clean), if any target is absolute or has a
      `..` path segment, if `.worktreeinclude` could copy a symlink, or if `.bb-env-setup.sh` (or a script
-     it calls, read in the bullet above) could create one: its bridge checks `fs/write_text_file` paths as
+     it calls, read in the bullet above) is itself a tracked symlink or could create one: its bridge
+     checks `fs/write_text_file` paths as
      text and does not follow symlinks (`plugin-qoder/README.md`). These symlink results skip only `qoder`
      on that machine; go on down the Kimi chain (step 3). A failed hook read is the next bullet's case.
    - If any of these would give the child a credential or run something unsafe, or the check itself fails
@@ -337,7 +338,8 @@ reads the reply in `room-cli thread output <id>` `.reply`.
 
   Any miss makes the reply invalid: re-run the seat once (a second attempt, always on
   `$RUN/brief-notools.md`), then report it failed. If attempt 1 failed with a limit, 429, quota,
-  auth/login, access or unknown-model error, log it (step 8) and run attempt 2 on the next option or
+  auth/login, entitlement/access or unknown-model error (4.1's categories), log it (step 8) and run
+  attempt 2 on the next option or
   machine in that family's step 3 and 4 order that is still up, with its own step 1.4 and 4 checks. If
   none is up, report the seat failed without attempt 2.
 
