@@ -15,11 +15,13 @@ is the caller's loop (sol-loop, review-council or the user).
 - Use your own family (the family of the model running you) only to fill a seat no other family can.
 - Every seat and probe is a Cloudroom child thread (desktop `room-cli thread spawn --parent-self`; inside
   a Cloud sandbox, `room-cli thread spawn`, which parents implicitly). Never start an agent CLI (`claude`,
-  `codex`, `agy`, `muse`, `kimi`) from a shell, and never use the `argon` or `muse-relay` shell relays.
-  Never use built-in Agent/Task subagents.
+  `codex`, `agy`, `muse`, `kimi`, `qoder`, `qodercli`) from a shell, and never use the `argon` or
+  `muse-relay` shell relays. Never use built-in Agent/Task subagents.
 - Every seat gets the same brief and the same head SHA. No seat sees another seat's reply.
 - A family that is down is skipped. Never swap in another model of the same family to fill its seat; the
-  only same-family fallbacks are the two named in step 3 (Carbon to Argon, Wonder Full to Wonder).
+  only same-family fallbacks are the ones named in step 3 (Carbon to Argon, Wonder Full to Wonder, and
+  Kimi's chain: `acp-kimi` `kimi-code/k3.1-pro`, then `qoder` `kmodel_latest`, then `acp-kimi`
+  `kimi-code/k3`, then Cloud Kimi on `cloud`).
 - Fewer than 3 families up: run with what is up and say so in the report. None up: stop and say why.
 - Use the logins already on each machine (their subscription plans). Never add or set an API key for a seat.
 - The head must be a commit on a branch. If the change is not committed, or HEAD is detached, stop and ask;
@@ -77,6 +79,15 @@ is the caller's loop (sol-loop, review-council or the user).
    - Read each present file, and any repo script it calls, with `git show <EXPECTED_SHA>:<file>`. If
      `.worktreeinclude` has any pattern that could match `.env`, `.env.*`, keys, certificates, tokens or
      other credential files, do not spawn there: the untracked files it copies can change after you look.
+   - `qoder` symlink check, in step 4 before `qoder` counts as up on that machine (cached proof or not):
+     list tracked symlinks, the `git ls-tree -r <EXPECTED_SHA>` entries with mode `120000` (the command
+     must exit 0), and read each target with `git cat-file -p <oid>` (each must exit 0). Skip `qoder` on
+     that machine if either command fails (never count it as clean), if any target is absolute or has a
+     `..` path segment, if `.worktreeinclude` could copy a symlink, or if `.bb-env-setup.sh` (or a script
+     it calls, read in the bullet above) is itself a tracked symlink or could create any symlink: its bridge
+     checks `fs/write_text_file` paths as
+     text and does not follow symlinks (`plugin-qoder/README.md`). These symlink results skip only `qoder`
+     on that machine; go on down the Kimi chain (step 3). A failed hook read is the next bullet's case.
    - If any of these would give the child a credential or run something unsafe, or the check itself fails
      (SSH error, missing commit, unreadable checkout), do not spawn on that machine; on the author's
      machine, stop and ask the user.
@@ -98,7 +109,7 @@ Each cell is `--model` / `--reasoning-level` on local machines.
 | 1 | GPT | `codex` | `gpt-6.1-sol` / `high` | `gpt-6.1-sol` / `medium` | `gpt-6.1-sol` / `low` |
 | 2 | Claude | `claude-code` | `claude-opus-5-5` / `high` | `claude-opus-5-5` / `medium` | `claude-sonnet-5-5` / `medium` |
 | 3 | Gemini | `agy` | `gemini-4-carbon-high` / `high` | `gemini-4-carbon-medium` / `medium` | `gemini-4-carbon-low` / `low` |
-| 4 | Kimi | `acp-kimi` | `kimi-code/k3.1-pro` / `high` | `kimi-code/k3.1-pro` / `high` | `kimi-code/k3.1-pro` / `low` |
+| 4 | Kimi | `acp-kimi` | `kimi-code/k3.1-pro` / `max` | `kimi-code/k3.1-pro` / `high` | `kimi-code/k3.1-pro` / `low` |
 | 5 | Muse | `acp-muse` | `muse-wonder-full-1.0` / `high` | `muse-wonder-1.0` / `high` | `muse-wonder-1.0` / `medium` |
 
 Why this order: GPT is the most thorough on intended-case bugs and missing tests. Claude finds odd,
@@ -108,12 +119,21 @@ fast with fewer deep catches. Muse Wonder Full's own prompt is about 28k input t
 - Gemini: Carbon first. If Carbon is down on every machine, use Argon with the same suffix
   (`gemini-4-argon-high` etc.). The agy model suffix and `--reasoning-level` must match.
 - Muse High: Wonder Full only with access proof (step 4); else `muse-wonder-1.0` / `high`.
+- Kimi, first option up wins (each local option tries the local candidate machines in step 4's order
+  before the next option):
+  1. `acp-kimi` with `kimi-code/k3.1-pro` (row 4 levels).
+  2. `qoder` with `kmodel_latest` (Kimi-K3.1-Pro), on `aipc-ubuntu` only (`plugin-qoder/README.md`):
+     `high` / `high` / `low`. Its catalog lists `max`, but `room-cli thread spawn` rejects `max` on
+     `qoder` with HTTP 400.
+  3. `acp-kimi` with `kimi-code/k3` (`max` / `high` / `low`), with its own step 4 checks.
+  4. Cloud Kimi (below, `max` / `high` / `low`), when `cloud` is a candidate and every local option is
+     down, or when `cloud` is the only candidate.
 - On Cloud: GPT and Claude use the same provider ids and models. Kimi: a local author spawns
   `--provider acp-kimi --model default` (the Cloud harness id is `kimi`, but `--provider kimi` from the
   desktop fails with HTTP 400); a Cloud author's in-sandbox spawn takes `--provider kimi` with no
   `--model` (its only listing is `default`). Same reasoning levels. Gemini and Muse have no Cloud harness
   today, so they are down on Cloud until `room-cli cloud status --json` `.harnesses[].id` (or `room-cli
-  provider list` in-sandbox) lists one for them and a Cloud probe passes.
+  provider list` in-sandbox) lists one for them and a Cloud probe passes. `qoder` runs on `aipc-ubuntu` only.
 - Cost: today only Codex logs token counts (`thread/tokenUsage/updated`), so the ledger cannot re-rank yet
   and this order stays. Once 2 or more of families 2 to 5 each have 10+ seat rows with `tokens` set,
   re-rank those: sum `input - cached + output` over their last 20 such rows and divide by the sum of
@@ -130,20 +150,29 @@ its own machine first, then the other connected machines in `room-cli machine li
 when local machines are down or busy, for example in market hours). If the user asked for Cloud or named
 machines, keep only the candidates they asked for (a requested machine that is unknown or disconnected is
 down). If `room-cli` fails for every provider (for example HTTP 401), the run is blocked: stop and report
-it. A check that fails for one provider means that provider is down on that machine.
+it. A check that fails for one provider means that provider is down on that machine, except that a
+failure tied to one model (a missing catalog entry, an access, entitlement or unknown-model error, or a
+failed probe of that model) marks only that model down there.
 
-1. Cooldown, every machine (`<name>` or `cloud`): a model whose last ledger row on that machine is
-   `"ok":false` is down there if that row is a limit, 429 or quota error under 6 hours old, or an access
-   or unknown-model error under 24 hours old. Apply this before any probe.
+1. Cooldown, per `(provider, model, machine)` (`<name>` or `cloud`): if its last ledger row is
+   `"ok":false`, it is down there when that row is a limit, 429 or quota error under 6 hours old, an
+   auth/login error under 6 hours old, or an entitlement/access or unknown-model error under 24 hours
+   old. Only for an auth/login row: if the user says they just signed in there, it is not down, but it
+   needs a fresh probe (4.4). Apply this before any probe.
 2. Quota, `codex` and `claude-code` only, on local machines only: `room-cli settings usage --json
    --machine <name>` (never `--machine cloud`; it fails with "Machine 'cloud' was not found"). A `status`
    other than `ok`, or a `windows[].usedPercent` of 90 or more, means down. Skip windows whose `model` is
    set to another model (for example the `Fable` window when the seat runs Opus).
 3. Models, plus the shared Cloud budget: on a local machine, `room-cli provider models <provider>
-   --json --machine <name>` must list the model, except Carbon (4.4); Muse prints "No models available"
-   when it is logged out on that machine. Cloud, every family: `room-cli` has no per-provider
-   subscription window for Cloud, but Cloud Credits are shared — a local author's `room-cli cloud status
-   --json` must show `.ready` true, `.cloudPaused` false and `.planUsage` with `credits` under
+   --json --machine <name>` must list the model, except Carbon and an `acp-kimi` list of only
+   `acp-default` (both go to 4.4); Muse prints "No models available" when it is logged out on that
+   machine. `acp-kimi` and `qoder` reject `--restart` (HTTP 400 "does not support restarting model
+   discovery"), so read the list as it is. A real `kimi-code/*` list without the Kimi model asked for
+   means that model is down there, no probe. `qoder` listing only `qmodel_latest` with "Shown until Qoder
+   reports its live model list over ACP." is its fallback entry: `kmodel_latest` is down there. Cloud,
+   every family: `room-cli` has no per-provider subscription window for Cloud, but Cloud Credits are
+   shared — a local author's `room-cli cloud status --json` must show `.ready` true, `.cloudPaused`
+   false and `.planUsage` with `credits` under
    `creditsLimit` or `extraCredits` above 0 (`cloud` is down when both fail), and a Cloud author's
    `room-cli usage` must show credits left; unreadable numbers mean unknown, and 4.1's `cloud` cooldown
    is the guard. A local author then needs the family's harness in `.harnesses[].id` (`codex`,
@@ -151,14 +180,17 @@ it. A check that fails for one provider means that provider is down on that mach
    or empty, equal to its `.model` (Kimi's is `default`); a Cloud author needs the harness id in
    `room-cli provider list` and the model in `room-cli provider models <provider>` (Kimi prints
    `{"model":"default"}` and says to omit `--model`).
-4. Proof. A listed model is not proof for `agy`, `acp-muse` or Cloud Kimi. Carbon sits under "More Models"
-   in agy's picker, and Cloudroom's agy list can show only the three built-in Argon ids where Carbon works
-   (`agy models` has no flag for more). Muse lists Wonder Full on accounts that cannot call it. Cloud Kimi
-   lists no models. Proof is a ledger row for that provider, model and machine with `"ok":true` in the
-   last 7 days. With none, spend one probe child per unproved model: write `Probe only. Do not run any
-   tools. Reply with exactly: PROBE-OK` to `$RUN/probe.md` and use the step 6 spawn command for that
-   machine with kind `probe` and `--prompt-file "$RUN/probe.md"` (steps 1.3 and 1.4 apply). It passes only
-   when all hold: the turn did not fail; the reply text is exactly `PROBE-OK` (`thread output` prints it
+4. Proof. A listed model is not proof for `agy`, `acp-muse`, `acp-kimi`, `qoder` or Cloud Kimi. Carbon
+   sits under "More Models" in agy's picker, and Cloudroom's agy list can show only the three built-in
+   Argon ids where Carbon works (`agy models` has no flag for more). Muse lists Wonder Full on accounts
+   that cannot call it. An `acp-kimi` or `qoder` list does not show that the login works, and
+   `acp-default` lists no models. Cloud Kimi lists no models. Proof: an `"ok":true` ledger row for that
+   provider, model, level and machine, under 7 days old and newer than every `"ok":false` row for that
+   provider, model and machine. Without it, spend one probe child per unproved model and level: write
+   `Probe only. Do not run any tools. Reply with exactly: PROBE-OK` to `$RUN/probe.md` and use the step 6
+   spawn command for that machine with kind `probe` and `--prompt-file "$RUN/probe.md"` (steps 1.3 and
+   1.4 apply). It passes only when all hold: the turn did not fail; the reply text is exactly
+   `PROBE-OK` (`thread output` prints it
    raw for a local author, JSON `.reply` for a Cloud author); its log shows no tool use — a local
    author's `room-cli thread log <id> --json --all` has no `fileChange`, `fileRead`, `commandExecution`
    or `toolCall` item, and a Cloud author's `thread log` shows only the one prompt and the one `PROBE-OK`
@@ -166,9 +198,11 @@ it. A check that fails for one provider means that provider is down on that mach
    disposable sandbox and the tool-free prompt — step 6); and a local probe's worktree is `clean` at
    `EXPECTED_SHA`. Anything else is `"ok":false` with the reason, and the model is not proved. Cloudroom
    logs only the requested model, so a pass proves the id was accepted and ran, not which weights
-   answered. Log the probe (step 8).
-5. Local Gemini, Kimi and Muse, and every Cloud seat, have no per-provider subscription window in
-   `room-cli`, so 4.2 does not apply to them (4.3's shared Cloud Credits gate still applies to Cloud).
+   answered. While a local probe runs, poll `room-cli thread interactions list <id>` and deny every
+   request (step 6). Log the probe (step 8).
+5. Local Gemini, Kimi (`acp-kimi` and `qoder`) and Muse, and every Cloud seat, have no per-provider
+   subscription window in `room-cli`, so 4.2 does not apply to them (4.3's shared Cloud Credits gate
+   still applies to Cloud).
 
 ## 5. Pick the seats
 
@@ -176,7 +210,8 @@ it. A check that fails for one provider means that provider is down on that mach
 2. Rotation: a family that sat in each of the last 3 runs moves below the next family that did not.
    Exception: GPT on High risk.
 3. Take the first 3. If fewer than 3, fill from your own family, only if step 4 found it up.
-   Machine: the first in step 4's order where the family is up.
+   Machine: the first in step 4's order where the family is up. For Gemini, Muse High and Kimi, step 3's
+   option order comes first: take the first option that is up anywhere, then its first machine.
 
 ## 6. Brief and launch
 
@@ -207,13 +242,15 @@ SCORE: <0-10>/10
 F1 [BLOCKER|MAJOR|MINOR|NIT] <file>:<line> <claim>. Evidence: <quote or reason>. Fix: <one line>
 ```
 
-`$RUN/brief-notools.md` is the line `Tool-free mode: do not call any command, file or MCP tools; review the
-inline Diff below alone and use CONTEXT: diff-only.` followed by `$RUN/brief.md` unchanged.
+`$RUN/brief-notools.md` is the line `Tool-free mode, overriding the CONTEXT: checkout rule below: do not
+call any command, file or MCP tools; review the inline Diff below alone and use CONTEXT: diff-only.`
+followed by `$RUN/brief.md` unchanged.
 
-`PROMPT_FILE` is `$RUN/brief.md` only for attempt 1 of a local seat whose `EXPECTED_SHA` is the head (it
-may read its checkout); it is `$RUN/brief-notools.md` for every Cloud attempt, every local attempt whose
-`EXPECTED_SHA` is not the head, and every attempt 2, whatever the retry's reason (probes always pass
-`--prompt-file "$RUN/probe.md"`).
+`PROMPT_FILE` is `$RUN/brief.md` only for attempt 1 of a non-`qoder` local seat whose `EXPECTED_SHA` is
+the head (it may read its checkout); it is `$RUN/brief-notools.md` for every Cloud attempt, every `qoder`
+attempt (its ACP bridge serves an unasked `fs/read_text_file` for any path with no approval,
+`plugin-qoder/README.md`), every local attempt whose `EXPECTED_SHA` is not the head, and every attempt 2,
+whatever the retry's reason (probes always pass `--prompt-file "$RUN/probe.md"`).
 
 One spawn per seat (record it as in step 1.2). Local machine (check worktree hooks as in step 1.4):
 
@@ -257,9 +294,11 @@ reads the reply in `room-cli thread output <id>` `.reply`.
   turn with no review (`acp/agy-acp.mjs`, `onEvent`).
 - Wait on each seat by id: `room-cli thread wait <id> --event turn/completed --timeout 120`, repeated up to
   20 minutes (a Cloud author uses `wait --children` as above). Between waits on a local seat,
-  `room-cli thread interactions list <id>` lists pending
-  approvals. Read each with `room-cli thread interactions show <interaction> <id>` and check the whole
-  command: every flag, argument, pipe, redirection and path. Approve
+  `room-cli thread interactions list <id>` lists pending approvals. On a local probe, and on a local seat
+  launched with `$RUN/brief-notools.md` (every `qoder` seat, every attempt 2 and every seat not at the
+  head), deny every request (`room-cli thread interactions deny …`). Only a `$RUN/brief.md` seat may have
+  reads approved: read each with `room-cli thread interactions show <interaction> <id>` and check the
+  whole command: every flag, argument, pipe, redirection and path. Approve
   (`room-cli thread interactions approve <interaction> <id>`) only a non-mutating read: `git rev-parse
   HEAD`, `git status`, `git diff`, `git show`, `git log`, `ls`, `cat`, `head`, `tail`, `wc`, `nl`, `grep`,
   `rg` or `sed -n` (no `-i`, no write flag, no `>`), on relative, non-credential paths inside that seat's
@@ -273,7 +312,7 @@ reads the reply in `room-cli thread output <id>` `.reply`.
   - `CONTEXT: checkout` only on a local seat launched with `$RUN/brief.md` (attempt 1 at `EXPECTED_SHA`
     equal to the head) whose `room-cli environment status <env id> --json`
     `.workspace.checkout.headSha` equals the head; every attempt launched with `$RUN/brief-notools.md`,
-    including a local attempt 2 retry at the head, must use `CONTEXT: diff-only`.
+    including every `qoder` seat and a local attempt 2 retry at the head, must use `CONTEXT: diff-only`.
   - `VERDICT: APPROVE` with `SCORE: 10/10` and no `F` lines, or `VERDICT: CHANGES` with at least one `F` line
     and an integer `SCORE` in the band of its highest severity: any BLOCKER `0`-`4`, else any MAJOR `5`-`7`,
     else (MINOR or NIT only) `8`-`9`.
@@ -282,7 +321,9 @@ reads the reply in `room-cli thread output <id>` `.reply`.
     final state (not ignored files or reverted edits), so the thread log is checked too.
   - `room-cli thread log <id> --json --all` never has a `fileChange` item. A `diff-only` seat has no
     `fileRead` or `toolCall` item, and no `commandExecution` other than `git rev-parse HEAD`; with
-    `brief-notools.md`, none at all. A `checkout` seat may run only the approved reads above: as a
+    `brief-notools.md` (every `qoder` seat included), none at all. The log cannot show an unasked ACP
+    `fs/read_text_file` from `qoder`, so a `qoder` seat's isolation rests on the tool-free brief, and the
+    report says so (step 8). A `checkout` seat may run only the approved reads above: as a
     `commandExecution` (look inside a shell wrapper such as `/bin/zsh -lc '…'`), as a `fileRead`, or as a
     read-only `toolCall` (for lean-ctx: `ctx_read`, `ctx_search`, `ctx_glob`, `ctx_tree`; a `ctx_shell`
     `arguments.command` is judged like a `commandExecution`; anything else, such as `ctx_patch`, is a
@@ -296,7 +337,11 @@ reads the reply in `room-cli thread output <id>` `.reply`.
     messages-only (in-sandbox Cloud limit)`, step 8).
 
   Any miss makes the reply invalid: re-run the seat once (a second attempt, always on
-  `$RUN/brief-notools.md`), then report it failed.
+  `$RUN/brief-notools.md`), then report it failed. If attempt 1 failed with a limit, 429, quota,
+  auth/login, entitlement/access or unknown-model error (4.1's categories), log it (step 8) and run
+  attempt 2 on the next option or
+  machine in that family's step 3 and 4 order that is still up, with its own step 1.4 and 4 checks. If
+  none is up, report the seat failed without attempt 2.
 
 ## 7. Merge and verify
 
@@ -363,8 +408,10 @@ Report:
   `no score - failed (<reason>)`; never invent a score), raised / verified, tokens or ctx, secs.
 - Each skipped family and why.
 - A table of items: id, severity, file:line, claim, shared or single with raisers, verified, rejected or unclear.
-- `audit: full-log` on a local author; `audit: messages-only (in-sandbox Cloud limit)` on a Cloud author
-  (in-sandbox `thread log` shows no tool calls, so Cloud-child tool checks rest on the tool-free briefs
+- `audit: full-log` on a local author (`audit: full-log (qoder: tool-free brief; unasked ACP fs/read not
+  sandboxed)` when a `qoder` probe or seat ran); `audit: messages-only (in-sandbox Cloud limit)` on a
+  Cloud author (in-sandbox `thread log` shows no tool calls, so Cloud-child tool checks rest on the
+  tool-free briefs
   and reply format).
 - The run verdict (APPROVE, CHANGES or INCOMPLETE), `valid seats: <n>/3`, and the mean score over valid
   seats (`n/a` when none).
