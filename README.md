@@ -1,6 +1,6 @@
 # cloudroom-plugins
 
-More agent harnesses for Cloudroom: Gemini 4 Carbon (Google Antigravity, `agy`), Meta Muse
+More agent harnesses for Cloudroom: Gemini 4 Neon (Google Antigravity, `agy`), Meta Muse
 (Muse Code, Muse Wonder Full) and Qoder (Qwen 4 Max Preview). Gemini is documented first; [Muse](#muse) and
 [Qoder](#qoder) have their own sections below.
 
@@ -34,7 +34,7 @@ aliengaming-wsl-debian join it as machines, so the plugin goes on aipc only.
 
 ```sh
 curl -fsSL https://antigravity.google/cli/install.sh | bash   # skip if `agy --version` works
-agy models                                                   # must list gemini-4-carbon-*; if not, run `agy` and sign in
+agy models                                                   # must list gemini-4-neon-high; auth error: run `agy` and sign in; listing succeeds but lacks gemini-4-neon-high: update agy
 mkdir -p ~/src && git clone https://github.com/danielcor/cloudroom-plugins ~/src/cloudroom-gemini
 npm install -g ~/src/cloudroom-gemini/acp                     # links agy-acp into npm's global bin; keep the clone
 agy-acp --version
@@ -52,8 +52,8 @@ The `command` setting still accepts an absolute path. agy-acp itself finds agy o
 cd ~/src/cloudroom-gemini/plugin && npm ci
 room-cli plugin build .
 room-cli plugin install path:$HOME/src/cloudroom-gemini/plugin --yes
-room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.3  running
-room-cli provider models agy --machine aipc-ubuntu # 21 models: Gemini 4 Carbon High (default), Medium, Low, then Argon, Hydrogen, Orchestrator, Flash, Claude, GPT-OSS
+room-cli plugin list | grep -A1 provider-agy       # provider-agy@0.1.4  running
+room-cli provider models agy --machine aipc-ubuntu # 25 models: Gemini 4 Neon High (default), Medium, Low, then Carbon, Argon, Hydrogen, Orchestrator (Carbon first, then Neon, Argon), Flash, Claude, GPT-OSS
 ```
 
 `room-cli` here is the desktop app's CLI. On aipc it lives inside the mounted AppImage:
@@ -66,12 +66,12 @@ Install step 1 there, then run `room-cli provider models agy --machine <name> --
 
 1. In Cloudroom, start a new thread on a project and pick the machine (aipc-ubuntu, mac or
    aliengaming-wsl-debian).
-2. Pick the **Antigravity** provider and a model: Gemini 4 Carbon High (default), or any other model `agy models` lists except Gemini 4 Hydrogen XHigh, which is omitted on purpose (Gemini 4 Argon and Hydrogen, Orchestrator, Gemini 3.8 Flash, Claude Opus/Sonnet 5.5, GPT-OSS 120B).
+2. Pick the **Antigravity** provider and a model: Gemini 4 Neon High (default), or any other model `agy models` lists except Gemini 4 Neon XHigh and Gemini 4 Hydrogen XHigh, which are omitted on purpose (Gemini 4 Carbon, Argon and Hydrogen, Orchestrator, Gemini 3.8 Flash, Claude Opus/Sonnet 5.5, GPT-OSS 120B).
 3. Pick the permission mode. **Accept edits** lets agy read and edit files in the thread's workspace but
    auto-denies shell commands and file reads outside the workspace (headless agy cannot ask; the reply names what
    it denied). **Full** runs agy with `--dangerously-skip-permissions`. See [Accept edits and reads](#accept-edits-and-reads).
 4. Optional: the reasoning level maps to agy `--effort`, except for models whose id ends in an effort
-   (`gemini-4-carbon-high`, `-medium`, `-low`, ...): agy rejects a conflicting `--effort` for those, so the id wins and
+   (`gemini-4-neon-high`, `-medium`, `-low`, ...): agy rejects a conflicting `--effort` for those, so the id wins and
    the level is ignored. Pick the model with the effort you want instead (the Orchestrator models have no suffix and take the level).
 
 Threads resume after a restart: agy-acp keeps each thread's agy conversation id and restarts agy with `--conversation`.
@@ -98,7 +98,7 @@ Nothing grants "read anywhere, edit only the workspace, no shell" in one switch:
 ```sh
 cd acp && npm test                          # agy-acp unit tests (fake agy replaying recorded transcripts)
 cd plugin && npm ci && npx tsc --noEmit && npx vitest run   # registration + SDK bridge conformance
-AGY_SMOKE=1 npx vitest run test/live-agy.smoke.test.ts      # live: two gemini-4-carbon-low turns through the bridge
+AGY_SMOKE=1 npx vitest run test/live-agy.smoke.test.ts      # live: two gemini-4-neon-low turns through the bridge
 ```
 
 `room-cli plugin install` and `plugin reload` prune the plugin's dev dependencies; run `npm ci`
@@ -118,8 +118,8 @@ One dependency-free Node (>= 20) script: `cli/gemini-relay` (`cli/argon` is a th
 
 | Command | What it does |
 | --- | --- |
-| `gemini-relay setup` | Idempotent. Installs `agy` (official `install.sh`) if missing, gets the login (below), checks `agy models` lists a carbon model. |
-| `gemini-relay run [--model M] [--effort L] [--new \| --conversation ID] [PROMPT]` | One turn in the cwd, permissions skipped. Streams Gemini's text and one line per tool call, ends with `conversation: <id>`. Continues the last conversation for this cwd unless `--new`. The prompt can come from stdin. Non-zero exit with agy's error on failure. Default model `gemini-4-carbon-high`. |
+| `gemini-relay setup` | Idempotent. Installs `agy` (official `install.sh`) if missing, gets the login (below), checks `agy models` lists `gemini-4-neon-high` and prints the Neon model count. |
+| `gemini-relay run [--model M] [--effort L] [--new \| --conversation ID] [PROMPT]` | One turn in the cwd, permissions skipped. Streams Gemini's text and one line per tool call, ends with `conversation: <id>`. Continues the last conversation for this cwd unless `--new`. The prompt can come from stdin. Non-zero exit with agy's error on failure. Default model `gemini-4-neon-high`. |
 | `gemini-relay models` | `agy models`. |
 | `gemini-relay export-token >> .env` | Prints `GEMINI_AGY_TOKEN_B64=...`. Refuses to write to a terminal. |
 

@@ -1,6 +1,6 @@
 ---
 name: gemini
-description: Use when the user wants Gemini 4 Carbon, Gemini or Google Antigravity (agy) to do the work, or asks you to "relay", "hand off" or "ask Gemini". Runs Gemini headless through the `gemini-relay` command and shows its answer.
+description: Use when the user wants Gemini 4 Neon, Gemini or Google Antigravity (agy) to do the work, or asks you to "relay", "hand off" or "ask Gemini". Runs Gemini headless through the `gemini-relay` command and shows its answer.
 ---
 
 # Gemini relay
@@ -15,7 +15,7 @@ GEMINI=$(command -v gemini-relay); for f in /repos/cloudroom-plugins /repos/clou
 ```
 
 `setup` installs `agy` if missing and gets the login from `GEMINI_AGY_TOKEN_B64` (env or the nearest `.env`; the older `ARGON_AGY_TOKEN_B64` still works),
-else from the paired desktop. It ends with `ok: ... carbon models`. If it fails, show the error and stop.
+else from the paired desktop. It ends with `ok: ... neon models`. If it fails, show the error and stop.
 Never print, cat or log the login file or the `GEMINI_AGY_TOKEN_B64` / `ARGON_AGY_TOKEN_B64` value.
 
 ## Relay
@@ -29,7 +29,7 @@ For each user message, run it verbatim, in the project directory:
 - Multi-line or quote-heavy messages: pipe them in instead: `printf '%s' "$MSG" | "$GEMINI" run`.
 - It continues the last Gemini conversation for this directory. Use `--new` only when the user asks for a fresh start,
   `--conversation ID` to resume a specific one (the id is printed on the last line of every run).
-- Defaults to `gemini-4-carbon-high`. Pass `--model` / `--effort low|medium|high|xhigh|max` only if the user asks.
+- Defaults to `gemini-4-neon-high`. Pass `--model` / `--effort low|medium|high|xhigh|max` only if the user asks.
   `"$GEMINI" models` lists the choices.
 - Gemini runs with permissions skipped, in the cwd. It edits files and runs commands there itself.
 - Runs can take minutes. Give the command a long timeout, or run it in the background and read the output when it ends.

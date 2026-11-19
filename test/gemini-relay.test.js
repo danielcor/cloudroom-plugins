@@ -21,7 +21,7 @@ test('parseArgs: run flags and prompt words', () => {
   assert.deepStrictEqual(a.opts, { model: 'gemini-4-carbon-low', effort: 'low', fresh: true, conversation: null });
   assert.strictEqual(a.prompt, 'fix the bug');
   assert.strictEqual(parseArgs(['run']).prompt, null);
-  assert.strictEqual(parseArgs(['run']).opts.model, 'gemini-4-carbon-high');
+  assert.strictEqual(parseArgs(['run']).opts.model, 'gemini-4-neon-high');
   assert.strictEqual(parseArgs(['run', '--', '--new']).prompt, '--new');
 });
 
@@ -121,15 +121,16 @@ setTimeout(() => process.stdout.write(b.subarray(cut)), 100);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-function fakeAgy(tmp, models) {
+function fakeAgy(tmp, models, exitCode = 0) {
   fs.mkdirSync(path.join(tmp, 'bin'));
-  fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/bin/sh\nprintf '%s\\n' ${models}\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(tmp, 'models.txt'), models);
+  fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/bin/sh\ncat "$(dirname "$0")/../models.txt"\nexit ${exitCode}\n`, { mode: 0o755 });
 }
 const LOGIN = JSON.stringify({ token: { refresh_token: 'r' } });
 const b64 = (j) => Buffer.from(j).toString('base64');
-function setupRun(models, { env: extra = {}, dotenv } = {}) {
+function setupRun(models, { env: extra = {}, dotenv, exitCode = 0 } = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
-  fakeAgy(tmp, models);
+  fakeAgy(tmp, models, exitCode);
   if (dotenv) fs.writeFileSync(path.join(tmp, '.env'), dotenv);
   const env = { ...process.env, HOME: tmp, PATH: `${path.join(tmp, 'bin')}:${process.env.PATH}` };
   delete env.GEMINI_AGY_TOKEN_B64; delete env.ARGON_AGY_TOKEN_B64;
@@ -139,37 +140,43 @@ function setupRun(models, { env: extra = {}, dotenv } = {}) {
   fs.rmSync(tmp, { recursive: true, force: true });
   return { r, token };
 }
-const CARBON = "'Gemini 4 Carbon (High)' 'Gemini 4 Carbon (Low)'";
+const NEON = fs.readFileSync(path.join(__dirname, '..', 'acp', 'test', 'fixtures', 'models.txt'), 'utf8');
 
-test('setup reads GEMINI_AGY_TOKEN_B64, falls back to ARGON_AGY_TOKEN_B64, and counts carbon models', () => {
+test('setup reads GEMINI_AGY_TOKEN_B64, falls back to ARGON_AGY_TOKEN_B64, and counts neon models', () => {
   for (const key of ['GEMINI_AGY_TOKEN_B64', 'ARGON_AGY_TOKEN_B64']) {
-    const { r, token } = setupRun(CARBON, { env: { [key]: b64(LOGIN) } });
+    const { r, token } = setupRun(NEON, { env: { [key]: b64(LOGIN) } });
     assert.strictEqual(r.status, 0, r.stderr);
     assert.match(r.stderr, new RegExp(`login: from ${key}`));
-    assert.match(r.stdout, /\(2 carbon models\)/);
+    assert.match(r.stdout, /\(4 neon models\)/);
     assert.strictEqual(token, LOGIN);
   }
 });
 
 test('setup: the Gemini key wins over the legacy key across env and .env', () => {
   const stale = JSON.stringify({ token: { refresh_token: 'stale' } });
-  const { r, token } = setupRun(CARBON, { env: { ARGON_AGY_TOKEN_B64: b64(stale) }, dotenv: `GEMINI_AGY_TOKEN_B64=${b64(LOGIN)}\n` });
+  const { r, token } = setupRun(NEON, { env: { ARGON_AGY_TOKEN_B64: b64(stale) }, dotenv: `GEMINI_AGY_TOKEN_B64=${b64(LOGIN)}\n` });
   assert.strictEqual(r.status, 0, r.stderr);
   assert.strictEqual(token, LOGIN);
 });
 
 test('setup: a malformed token names the key that was used', () => {
   for (const key of ['GEMINI_AGY_TOKEN_B64', 'ARGON_AGY_TOKEN_B64']) {
-    const { r } = setupRun(CARBON, { env: { [key]: 'bm90IGEgbG9naW4=' } });
+    const { r } = setupRun(NEON, { env: { [key]: 'bm90IGEgbG9naW4=' } });
     assert.notStrictEqual(r.status, 0);
     assert.match(r.stderr, new RegExp(`${key} is set but is not base64`));
   }
 });
 
-test('setup: Orchestrator (Carbon) alone is not enough, a carbon model is required', () => {
-  const { r } = setupRun("'Orchestrator (Carbon)' 'Gemini 4 Argon (High)'", { env: { GEMINI_AGY_TOKEN_B64: b64(LOGIN) } });
+test('setup: Orchestrator (Neon) or Carbon alone is not enough, gemini-4-neon-high is required', () => {
+  const { r } = setupRun('gemini-pro-orchestrator-neon\tOrchestrator (Neon)\ngemini-4-carbon-high\tGemini 4 Carbon (High)\ngemini-4-neon-low\tGemini 4 Neon (Low)\n', { env: { GEMINI_AGY_TOKEN_B64: b64(LOGIN) } });
   assert.notStrictEqual(r.status, 0);
-  assert.match(r.stderr, /does not list a carbon model/);
+  assert.match(r.stderr, /does not list gemini-4-neon-high/);
+});
+
+test('setup: agy models that lists the default but exits nonzero fails', () => {
+  const { r } = setupRun('gemini-4-neon-high\tGemini 4 Neon (High)\n', { exitCode: 1, env: { GEMINI_AGY_TOKEN_B64: b64(LOGIN) } });
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.stderr, /agy models failed/);
 });
 
 test('a conversation saved in the old ~/.cache/argon cache still resumes', () => {
@@ -204,7 +211,7 @@ test('export-token writes GEMINI_AGY_TOKEN_B64', () => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('cli/argon shim delegates to gemini-relay (usage and a run with the carbon default)', () => {
+test('cli/argon shim delegates to gemini-relay (usage and a run with the neon default)', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
   fs.mkdirSync(path.join(tmp, 'bin'));
   fs.writeFileSync(path.join(tmp, 'bin', 'agy'), `#!/bin/sh\necho "$@" > "${tmp}/args"\ncat >/dev/null\ncat "${path.join(__dirname, 'fixtures', 'tool-error.ndjson')}"\n`, { mode: 0o755 });
@@ -215,10 +222,10 @@ test('cli/argon shim delegates to gemini-relay (usage and a run with the carbon 
   const help = spawnSync(SHIM, ['--help'], { env, encoding: 'utf8' });
   assert.strictEqual(help.status, 0, help.stderr);
   assert.match(help.stdout, /usage: gemini-relay <command>/);
-  assert.match(help.stdout, /default model: gemini-4-carbon-high/);
+  assert.match(help.stdout, /default model: gemini-4-neon-high/);
   const r = spawnSync(SHIM, ['run', 'hi'], { cwd: tmp, env, encoding: 'utf8' });
   assert.strictEqual(r.status, 0, r.stderr);
-  assert.match(fs.readFileSync(path.join(tmp, 'args'), 'utf8'), /--model gemini-4-carbon-high/);
+  assert.match(fs.readFileSync(path.join(tmp, 'args'), 'utf8'), /--model gemini-4-neon-high/);
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -231,7 +238,7 @@ test('setup: an agy that cannot execute reports the launch error', () => {
   assert.notStrictEqual(r.status, 0);
   assert.match(r.stderr, /could not run agy models/);
   assert.match(r.stderr, /ENOENT|EACCES|spawn/);
-  assert.ok(!/does not list a carbon model/.test(r.stderr), r.stderr);
+  assert.ok(!/does not list gemini-4-neon-high/.test(r.stderr), r.stderr);
   assert.ok(!/undefined|TypeError/.test(r.stderr), r.stderr);
   fs.rmSync(tmp, { recursive: true, force: true });
 });

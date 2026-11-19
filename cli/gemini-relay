@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 'use strict';
-// gemini-relay: run Gemini 4 Carbon (and other agy models) through Google's Antigravity CLI (agy). No dependencies, Node >= 20.
+// gemini-relay: run Gemini 4 Neon (and other agy models) through Google's Antigravity CLI (agy). No dependencies, Node >= 20.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
-const DEFAULT_MODEL = 'gemini-4-carbon-high';
+const DEFAULT_MODEL = 'gemini-4-neon-high';
 const INSTALL_URL = 'https://antigravity.google/cli/install.sh';
 const TOKEN_ENV = 'GEMINI_AGY_TOKEN_B64';
 const LEGACY_TOKEN_ENV = 'ARGON_AGY_TOKEN_B64'; // read-only fallback for older .env files
@@ -237,11 +237,16 @@ function setup() {
   } else console.error('login: already present');
   const m = spawnSync(agyBin(), ['models'], { encoding: 'utf8' });
   if (m.error) throw new Error(`could not run agy models: ${m.error.message}`);
-  const carbon = m.stdout.split('\n').filter((l) => /gemini-4-carbon|gemini 4 carbon/i.test(l));
-  if (m.status !== 0 || !carbon.length) {
-    throw new Error(`agy models does not list a carbon model (login expired? delete ${TOKEN_FILE} and retry):\n${m.stdout}${m.stderr}`);
+  const lines = m.stdout.split('\n');
+  const neon = lines.filter((l) => /gemini-4-neon|gemini 4 neon/i.test(l));
+  const hasDefault = lines.some((l) => l.trim().split(/\s+/)[0] === DEFAULT_MODEL);
+  if (m.status !== 0) {
+    throw new Error(`agy models failed (login expired? delete ${TOKEN_FILE} and retry):\n${m.stdout}${m.stderr}`);
   }
-  console.log(`ok: ${agyBin()} (${carbon.length} carbon models)`);
+  if (!hasDefault) {
+    throw new Error(`agy models does not list ${DEFAULT_MODEL} (this agy may be too old; update agy):\n${m.stdout}`);
+  }
+  console.log(`ok: ${agyBin()} (${neon.length} neon models)`);
 }
 
 function exportToken() {

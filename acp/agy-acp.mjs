@@ -18,9 +18,12 @@ import { fileURLToPath } from "node:url";
 
 export const VERSION = "0.1.0";
 export const PROTOCOL_VERSION = 1;
-// Every model `agy models` listed on 2026-11-18, Gemini 4 first (Carbon High is the default). Pinned order, and the
+// Every model `agy models` listed on 2026-11-18 except the two excluded xhigh rows, Gemini 4 first (Neon High is the default). Pinned order, and the
 // fallback when `agy models` fails.
 export const KNOWN_MODELS = [
+  { modelId: "gemini-4-neon-high", name: "Gemini 4 Neon (High)" },
+  { modelId: "gemini-4-neon-medium", name: "Gemini 4 Neon (Medium)" },
+  { modelId: "gemini-4-neon-low", name: "Gemini 4 Neon (Low)" },
   { modelId: "gemini-4-carbon-high", name: "Gemini 4 Carbon (High)" },
   { modelId: "gemini-4-carbon-medium", name: "Gemini 4 Carbon (Medium)" },
   { modelId: "gemini-4-carbon-low", name: "Gemini 4 Carbon (Low)" },
@@ -31,6 +34,7 @@ export const KNOWN_MODELS = [
   { modelId: "gemini-4-hydrogen-medium", name: "Gemini 4 Hydrogen (Medium)" },
   { modelId: "gemini-4-hydrogen-low", name: "Gemini 4 Hydrogen (Low)" },
   { modelId: "gemini-pro-orchestrator", name: "Orchestrator (Carbon)" },
+  { modelId: "gemini-pro-orchestrator-neon", name: "Orchestrator (Neon)" },
   { modelId: "gemini-pro-orchestrator-argon", name: "Orchestrator (Argon)" },
   { modelId: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)" },
   { modelId: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)" },
@@ -97,8 +101,8 @@ export function findAgy(explicit, env = process.env) {
 }
 
 // `agy models` prints "<id>\t<name>" lines. Known models first in KNOWN_MODELS order, then any new ones in agy's order.
-// agy lists this one but the owner chose not to offer it (no xhigh reasoning level).
-const EXCLUDED_MODELS = new Set(["gemini-4-hydrogen-xhigh"]);
+// agy lists these but the owner chose not to offer them.
+const EXCLUDED_MODELS = new Set(["gemini-4-neon-xhigh", "gemini-4-hydrogen-xhigh"]);
 export function parseModels(stdout) {
   const listed = [];
   for (const line of stdout.split("\n")) {
