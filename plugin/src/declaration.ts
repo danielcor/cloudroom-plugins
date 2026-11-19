@@ -3,8 +3,11 @@ import type { AcpLaunchSpec } from "@get-bb/plugin-sdk/provider-bridge/acp";
 
 export const AGY_PROVIDER_ID = "agy";
 export const DEFAULT_AGY_ACP_COMMAND = "agy-acp";
-// Every model `agy models` listed on 2026-11-18; Carbon High is first (the default).
+// Every model `agy models` listed on 2026-11-18; Neon High is first (the default).
 export const AGY_MODELS = [
+  "gemini-4-neon-high",
+  "gemini-4-neon-medium",
+  "gemini-4-neon-low",
   "gemini-4-carbon-high",
   "gemini-4-carbon-medium",
   "gemini-4-carbon-low",
@@ -15,6 +18,7 @@ export const AGY_MODELS = [
   "gemini-4-hydrogen-medium",
   "gemini-4-hydrogen-low",
   "gemini-pro-orchestrator",
+  "gemini-pro-orchestrator-neon",
   "gemini-pro-orchestrator-argon",
   "gemini-3.8-flash-high",
   "gemini-3.8-flash-medium",

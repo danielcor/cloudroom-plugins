@@ -14,15 +14,16 @@ const launchSpec = (host: ReturnType<typeof createFakePluginHost>) => {
 };
 
 describe("provider-agy", () => {
-  it("registers Antigravity on the ACP bridge, launching agy-acp with Carbon first", async () => {
+  it("registers Antigravity on the ACP bridge, launching agy-acp with Neon first", async () => {
     const { decl, spec } = launchSpec(await load());
     expect(decl.id).toBe("agy");
     expect(decl.displayName).toBe("Antigravity");
     expect(decl.capabilities.permissionModes).toEqual(["accept-edits", "full"]);
-    expect(decl.experimental_bridgeOptions).toMatchObject({ acpDialect: "generic", primaryModels: expect.arrayContaining(["gemini-4-carbon-high", "gemini-4-argon-high", "gemini-4-hydrogen-low"]) });
-    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels).toHaveLength(21);
-    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels[0]).toBe("gemini-4-carbon-high");
-    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels.slice(14, 20)).toEqual(["claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low"]);
+    expect(decl.experimental_bridgeOptions).toMatchObject({ acpDialect: "generic", primaryModels: expect.arrayContaining(["gemini-4-neon-high", "gemini-4-carbon-high", "gemini-4-argon-high", "gemini-4-hydrogen-low"]) });
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels).toHaveLength(25);
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels).toEqual(["gemini-4-neon-high", "gemini-4-neon-medium", "gemini-4-neon-low", "gemini-4-carbon-high", "gemini-4-carbon-medium", "gemini-4-carbon-low", "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low", "gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-low", "gemini-pro-orchestrator", "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-argon", "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low", "claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low", "gpt-oss-120b-medium"]);
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels[0]).toBe("gemini-4-neon-high");
+    expect((decl.experimental_bridgeOptions as { primaryModels: string[] }).primaryModels.slice(18, 24)).toEqual(["claude-opus-5-5-high", "claude-opus-5-5-medium", "claude-opus-5-5-low", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-low"]);
     expect(spec).toEqual({
       displayName: "Antigravity",
       command: "agy-acp",
