@@ -84,7 +84,7 @@ is the caller's loop (sol-loop, review-council or the user).
      must exit 0), and read each target with `git cat-file -p <oid>` (each must exit 0). Skip `qoder` on
      that machine if either command fails (never count it as clean), if any target is absolute or has a
      `..` path segment, if `.worktreeinclude` could copy a symlink, or if `.bb-env-setup.sh` (or a script
-     it calls, read in the bullet above) is itself a tracked symlink or could create one: its bridge
+     it calls, read in the bullet above) is itself a tracked symlink or could create any symlink: its bridge
      checks `fs/write_text_file` paths as
      text and does not follow symlinks (`plugin-qoder/README.md`). These symlink results skip only `qoder`
      on that machine; go on down the Kimi chain (step 3). A failed hook read is the next bullet's case.
