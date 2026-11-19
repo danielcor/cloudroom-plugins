@@ -172,6 +172,12 @@ test('setup: Orchestrator (Neon) or Carbon alone is not enough, gemini-4-neon-hi
   assert.match(r.stderr, /does not list gemini-4-neon-high/);
 });
 
+test('setup: agy models that lists the default but exits nonzero fails', () => {
+  const { r } = setupRun("'gemini-4-neon-high\tGemini 4 Neon (High)'; exit 1 #", { env: { GEMINI_AGY_TOKEN_B64: b64(LOGIN) } });
+  assert.notStrictEqual(r.status, 0);
+  assert.match(r.stderr, /agy models failed/);
+});
+
 test('a conversation saved in the old ~/.cache/argon cache still resumes', () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gemini-relay-test-'));
   fs.mkdirSync(path.join(tmp, 'bin'));
