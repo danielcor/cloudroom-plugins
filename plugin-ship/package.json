@@ -15,7 +15,11 @@
       "icon": "./icons/ship.svg"
     },
     "server": "./server.ts",
-    "host": "./host.ts"
+    "host": "./host.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
   },
   "keywords": [
     "bb-plugin"
@@ -30,11 +34,16 @@
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.6.189",
+    "@testing-library/react": "^16.3.3",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
     "better-sqlite3": "^12.11.1",
     "cron-parser": "^5.10.2",
     "hono": "^4.13.14",
+    "jsdom": "^26.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "typescript": "^5.9.0",
     "vitest": "^4.1.1"
   }

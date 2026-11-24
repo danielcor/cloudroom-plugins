@@ -13,13 +13,23 @@ import {
   type ShipStatus,
 } from "./src/contract.js";
 import { MIGRATIONS, ShipStore, type RepoDefaults } from "./src/db.js";
+import { GitHubBotClient } from "./src/github/bot.js";
+import { fetchPrDiscussion, type FilteredPrDiscussion } from "./src/github/comments.js";
+import { runShipPublish, type ShipPublishResult } from "./src/publish/publisher.js";
 import { isNeverEditPath, isSecretFilename } from "./src/safety/never-edit.js";
 
 export const PLUGIN_VERSION = "0.1.0";
 
 const POSITIVE_INT_SCHEMA = z.number().int();
 
-export default async function shipPlugin(bb: BbPluginApi): Promise<void> {
+export interface ShipServerDeps {
+  nowMs?: () => number;
+  fetchImpl?: typeof fetch;
+  minDwellMs?: number;
+}
+
+export function createShipPlugin(deps: ShipServerDeps = {}) {
+  return async function shipPlugin(bb: BbPluginApi): Promise<void> {
   const settings = bb.settings.define({
     defaultReviewMode: {
       type: "select",
@@ -355,7 +365,215 @@ export default async function shipPlugin(bb: BbPluginApi): Promise<void> {
             return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
           },
         }),
+        publish: cliCommand({
+          summary: "Run safety preflight, confirm, commit/push changes, and open or update a GitHub PR.",
+          options: {
+            path: { type: "string", description: "Absolute path to git checkout on the target host." },
+            host: { type: "string", description: "Cloudroom host id or name." },
+            remote: { type: "string", description: "Git remote name (defaults to origin)." },
+            branch: { type: "string", description: "Target branch name (auto-created when on default branch)." },
+            base: { type: "string", description: "Target base branch for the PR (defaults to repo default branch)." },
+            title: { type: "string", description: "PR title hint." },
+            body: { type: "string", description: "PR description hint." },
+            "commit-message": { type: "string", description: "Commit message to use when staging dirty changes." },
+            draft: { type: "boolean", description: "Create the PR as a draft." },
+            "dry-run": { type: "boolean", description: "Run preflight and preview texts without modifying git or GitHub." },
+            confirm: { type: "boolean", description: "Confirm headless publishing without an interactive thread card." },
+            "allow-public-commit": { type: "boolean", description: "Allow non-interactive staging/committing on public repos." },
+            "no-footer": { type: "boolean", description: "Omit the Cloudroom attribution footer from PR description." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ options }, ctx) {
+            const { hostId, root } = await resolveHostAndRoot(ctx, options.host, options.path);
+            const result: ShipPublishResult = await runShipPublish(
+              {
+                hostId,
+                root,
+                threadId: ctx.threadId,
+                remote: options.remote,
+                requestedBranch: options.branch,
+                baseBranch: options.base,
+                titleHint: options.title,
+                bodyHint: options.body,
+                commitMessageHint: options["commit-message"],
+                draft: options.draft,
+                dryRun: options["dry-run"],
+                confirm: options.confirm,
+                allowPublicCommit: options["allow-public-commit"],
+                includeFooter: !options["no-footer"],
+                minDwellMs: deps.minDwellMs,
+                nowMs: deps.nowMs,
+              },
+              {
+                inspectPublishContext: (input) => hostClient.call("inspectPublishContext", input, { hostId }),
+                publishChanges: (input) => hostClient.call("publishChanges", input, { hostId }),
+                requestInput: (req) => bb.ui.requestInput(req),
+                store,
+              },
+            );
+
+            const exitCode = result.status === "published" || result.status === "dry_run" ? 0 : 1;
+            if (options.json) {
+              return { exitCode, stdout: `${JSON.stringify(result, null, 2)}\n` };
+            }
+            if (result.status === "blocked") {
+              const lines = [
+                "Preflight blocked publishing:",
+                ...result.preflight.blockers.map((b) => `- [${b.code}] ${b.message}`),
+              ];
+              return { exitCode: 1, stderr: `${lines.join("\n")}\n` };
+            }
+            if (result.status === "dry_run") {
+              const plan = result.preflight.plan!;
+              const lines = [
+                `Dry-run OK for ${plan.repoSlug} (${plan.isPrivate ? "private" : "public"})`,
+                `Branch: ${plan.targetBranch} -> ${plan.baseBranch}${plan.createBranch ? " (new)" : ""}`,
+                `Files to stage: ${plan.filesToStage.length} | Ahead commits: ${plan.aheadCount}`,
+                `PR title: ${result.prTitle}`,
+                ...(result.preflight.warnings.map((w) => `Warning [${w.code}]: ${w.message}`)),
+              ];
+              return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+            }
+            if (result.status === "published") {
+              const p = result.publish;
+              const lines = [
+                `Published ${p.branch} (${p.headSha ?? "unknown"})`,
+                ...(p.prUrl ? [`PR #${p.prNumber}: ${p.prUrl}`] : []),
+              ];
+              return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+            }
+            if (result.status === "failed") {
+              return { exitCode: 1, stderr: `Publish failed: ${result.publish.error ?? "unknown error"}\n` };
+            }
+            return { exitCode: 1, stderr: `Publish ${result.status}: ${result.reason}\n` };
+          },
+        }),
+        "pr comments": cliCommand({
+          summary: "Read trust-filtered and markup-sanitized comments on a GitHub pull request.",
+          positionals: [
+            { name: "repo", description: "GitHub repository (owner/repo).", required: true },
+            { name: "pr", description: "Pull request number.", required: true },
+          ],
+          options: {
+            path: { type: "string", description: "Absolute path to git checkout on the target host." },
+            host: { type: "string", description: "Cloudroom host id or name." },
+            "via-bot": { type: "boolean", description: "Read using configured botToken instead of host gh CLI." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ positionals, options }, ctx) {
+            const parsedRepo = repoSlugSchema.safeParse(positionals.repo);
+            if (!parsedRepo.success) {
+              throw new PluginCliError(`Invalid repository "${positionals.repo}": expected owner/repo.`, {
+                code: "invalid_repo",
+              });
+            }
+            if (!/^[1-9]\d*$/u.test(positionals.pr)) {
+              throw new PluginCliError(`Invalid PR number "${positionals.pr}".`, { code: "invalid_pr_number" });
+            }
+            const repo = parsedRepo.data;
+            const prNumber = Number.parseInt(positionals.pr, 10);
+            const repoCfg = store.getRepo(repo);
+
+            let discussion: FilteredPrDiscussion;
+            if (options["via-bot"]) {
+              const s = await settings.get();
+              const token = typeof s.botToken === "string" ? s.botToken.trim() : "";
+              if (!token) {
+                throw new PluginCliError(
+                  "GitHub botToken is not configured. Run `room-cli plugin config ship set botToken <pat>`.",
+                  { code: "bot_not_configured" },
+                );
+              }
+              const bot = new GitHubBotClient({
+                token,
+                botLogin: (s.botLogin ?? "").trim(),
+                fetchImpl: deps.fetchImpl,
+              });
+              discussion = await fetchPrDiscussion({
+                repo,
+                prNumber,
+                trustedBots: repoCfg?.trustedBots ?? [],
+                runGraphql: (query, vars) => bot.graphql(query, vars),
+                fetchCollaboratorPermission: (r, u) => bot.getCollaboratorPermission(r, u),
+              });
+            } else {
+              const { hostId, root } = await resolveHostAndRoot(ctx, options.host, options.path);
+              discussion = await hostClient.call(
+                "readPrDiscussion",
+                {
+                  root,
+                  repo,
+                  prNumber,
+                  trustedBots: repoCfg?.trustedBots ?? [],
+                },
+                { hostId },
+              );
+            }
+
+            if (options.json) {
+              return { exitCode: 0, stdout: `${JSON.stringify(discussion, null, 2)}\n` };
+            }
+            const lines = [
+              `${repo}#${discussion.pr.number}: ${discussion.pr.title} (${discussion.pr.state})`,
+              `Trusted items: ${discussion.items.length} | Excluded: ${discussion.excludedCount} | Collision labels: ${discussion.collisionLabels.length}`,
+              ...discussion.items.map(
+                (item) => `- [${item.kind}:${item.trustReason}${item.mayHide ? ":may-hide" : ""}] @${item.authorLogin}: ${item.body.slice(0, 120)}`,
+              ),
+            ];
+            return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+          },
+        }),
+        "bot check": cliCommand({
+          summary: "Verify the configured Ship GitHub bot token without printing credentials.",
+          options: {
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ options }) {
+            const s = await settings.get();
+            const token = typeof s.botToken === "string" ? s.botToken.trim() : "";
+            const configuredLogin = (s.botLogin ?? "").trim();
+            if (!token) {
+              throw new PluginCliError(
+                "GitHub botToken is not configured. Run `room-cli plugin config ship set botToken <pat>`.",
+                { code: "bot_not_configured" },
+              );
+            }
+            const bot = new GitHubBotClient({
+              token,
+              botLogin: configuredLogin,
+              fetchImpl: deps.fetchImpl,
+            });
+            const viewer = await bot.getViewerLogin();
+            const loginMatches =
+              configuredLogin === "" ? null : viewer.login.toLowerCase() === configuredLogin.toLowerCase();
+            const payload = {
+              configured: true,
+              configuredLogin,
+              actualLogin: viewer.login,
+              viewerId: viewer.id,
+              loginMatches,
+            };
+            if (options.json) {
+              return { exitCode: 0, stdout: `${JSON.stringify(payload, null, 2)}\n` };
+            }
+            const matchNote =
+              loginMatches === null
+                ? "(botLogin setting not set)"
+                : loginMatches
+                  ? "(matches botLogin)"
+                  : `(WARNING: differs from configured botLogin "${configuredLogin}")`;
+            return {
+              exitCode: 0,
+              stdout: `Bot token valid as "${viewer.login}" (id ${viewer.id}) ${matchNote}\n`,
+            };
+          },
+        }),
       },
     }),
   );
+  };
+}
+
+export default async function shipPlugin(bb: BbPluginApi): Promise<void> {
+  return createShipPlugin()(bb);
 }

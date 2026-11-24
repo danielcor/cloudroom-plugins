@@ -41,6 +41,134 @@ export const inspectCheckoutOutputSchema = z
 
 export type CheckoutInspection = z.infer<typeof inspectCheckoutOutputSchema>;
 
+export const repoMetaSchema = z
+  .object({
+    slug: repoSlugSchema,
+    owner: z.string(),
+    name: z.string(),
+    defaultBranch: z.string(),
+    isPrivate: z.boolean(),
+    isFork: z.boolean(),
+    parentSlug: z.string().nullable(),
+    viewerLogin: z.string(),
+    viewerPermission: z.string(),
+  })
+  .strict();
+
+export const pullRequestSummarySchema = z
+  .object({
+    number: z.number().int(),
+    url: z.string(),
+    title: z.string(),
+    state: z.string(),
+    isDraft: z.boolean(),
+    headRefName: z.string(),
+    headRefOid: z.string(),
+    baseRefName: z.string(),
+    baseRefOid: z.string(),
+    authorLogin: z.string(),
+    labels: z.array(z.string()),
+    mergeStateStatus: z.string(),
+    isCrossRepository: z.boolean(),
+  })
+  .strict();
+
+export const inspectPublishContextOutputSchema = z
+  .object({
+    inspection: inspectCheckoutOutputSchema,
+    remoteName: z.string(),
+    remoteUrl: z.string(),
+    repoMeta: repoMetaSchema.nullable(),
+    existingPr: pullRequestSummarySchema.nullable(),
+    aheadCount: z.number().int(),
+    commitSubjects: z.array(z.string()),
+    diffText: z.string(),
+    diffSecretFinding: z.object({ kind: z.string(), line: z.number().int() }).strict().nullable(),
+    localSecretMatchSource: z.string().nullable(),
+  })
+  .strict();
+
+export type InspectPublishContextOutput = z.infer<typeof inspectPublishContextOutputSchema>;
+
+export const publishChangesInputSchema = z
+  .object({
+    root: z.string().min(1).max(4096),
+    remote: z.string().min(1).max(120),
+    repoSlug: repoSlugSchema,
+    targetBranch: z.string().min(1).max(200),
+    createBranch: z.boolean(),
+    baseBranch: z.string().min(1).max(200),
+    filesToStage: z.array(z.string().min(1).max(1024)),
+    commitMessage: z.string().max(8000),
+    prTitle: z.string().min(1).max(500),
+    prBody: z.string().min(1).max(20_000),
+    draft: z.boolean(),
+    createPr: z.boolean(),
+    expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/u),
+  })
+  .strict();
+
+export const publishChangesOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    branch: z.string(),
+    headSha: z.string().nullable(),
+    committed: z.boolean(),
+    pushed: z.boolean(),
+    prNumber: z.number().int().nullable(),
+    prUrl: z.string().nullable(),
+    prCreated: z.boolean(),
+    error: z.string().nullable(),
+  })
+  .strict();
+
+export type PublishChangesOutput = z.infer<typeof publishChangesOutputSchema>;
+
+export const trustedPrCommentSchema = z
+  .object({
+    id: z.string(),
+    kind: z.enum(["issue_comment", "review", "review_comment"]),
+    authorLogin: z.string(),
+    body: z.string(),
+    createdAt: z.string(),
+    path: z.string().nullable(),
+    line: z.number().int().nullable(),
+    reviewId: z.string().nullable(),
+    inReplyToId: z.string().nullable(),
+    mayHide: z.boolean(),
+    truncated: z.boolean(),
+    trustReason: z.enum(["author", "trusted_bot", "collaborator"]),
+  })
+  .strict();
+
+export const filteredPrDiscussionSchema = z
+  .object({
+    pr: z
+      .object({
+        number: z.number().int(),
+        url: z.string(),
+        title: z.string(),
+        body: z.string(),
+        mayHideBody: z.boolean(),
+        state: z.string(),
+        isDraft: z.boolean(),
+        headRefName: z.string(),
+        headRefOid: z.string(),
+        baseRefName: z.string(),
+        baseRefOid: z.string(),
+        authorLogin: z.string(),
+        labels: z.array(z.string()),
+        mergeStateStatus: z.string(),
+      })
+      .strict(),
+    items: z.array(trustedPrCommentSchema),
+    excludedCount: z.number().int(),
+    truncatedCount: z.number().int(),
+    droppedForBudgetCount: z.number().int(),
+    collisionLabels: z.array(z.string()),
+  })
+  .strict();
+
 export const hostContract = defineRpcContract({
   inspectCheckout: {
     experimental_retryable: true,
@@ -109,6 +237,34 @@ export const hostContract = defineRpcContract({
         matchedSource: z.string().nullable(),
       })
       .strict(),
+  },
+  inspectPublishContext: {
+    experimental_retryable: true,
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        remote: z.string().min(1).max(120).optional(),
+        baseBranch: z.string().min(1).max(200).optional(),
+      })
+      .strict(),
+    output: inspectPublishContextOutputSchema,
+  },
+  publishChanges: {
+    input: publishChangesInputSchema,
+    output: publishChangesOutputSchema,
+  },
+  readPrDiscussion: {
+    experimental_retryable: true,
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        repo: repoSlugSchema,
+        prNumber: z.number().int().positive(),
+        trustedBots: z.array(z.string().min(1).max(80)).max(32).default([]),
+        authorLogin: z.string().max(120).optional(),
+      })
+      .strict(),
+    output: filteredPrDiscussionSchema,
   },
 });
 

@@ -64,11 +64,11 @@
 - Create: `plugin-ship/test/{github-comments,publisher}.test.ts`
 
 **Tasks:**
-- [ ] **Step 1:** Implement `host.ts` `gh` author execution (`publishChanges`: branch create if needed, stage named files, commit with repo git hooks ON, `git push --porcelain --no-follow-tags --recurse-submodules=check`, `gh pr create`, head SHA confirmation).
-- [ ] **Step 2:** Implement `src/publish/preflight.ts` (detached HEAD, default branch, fork, active merge/rebase, hardlink `nlink > 1`, secret filename, never-edit, `.git/` symlinks, public-repo auto-commit refusal, and `claude-pr-steward-*`/`claude-ship-*` label collision guard).
-- [ ] **Step 3:** Implement `src/publish/pr-texts.ts` (conversation synthesis + diff fallback validated via `validateGeneratedPrText`) and `bb.ui.requestInput` confirmation card with 3.5-second Allow dwell check.
-- [ ] **Step 4:** Implement `src/github/comments.ts` (GraphQL PR/thread/review reader, collaborator `write`/`admin` permission filter, blockquote stripping, `mayHide` HTML-comment tagging, 4 KB/40 KB/100-item/30-commenter caps) and `src/github/bot.ts` (`botToken` REST client).
-- [ ] **Step 5:** Add `room-cli ship publish` + `skills/ship/SKILL.md` and run full fake-git/fake-gh + UI slot tests.
+- [x] **Step 1:** Implement `host.ts` `gh` author execution (`publishChanges`: branch create if needed, stage named files, commit with repo git hooks ON, `git push --porcelain --no-follow-tags --recurse-submodules=check`, `gh pr create`, head SHA confirmation).
+- [x] **Step 2:** Implement `src/publish/preflight.ts` (detached HEAD, default branch, fork, active merge/rebase, hardlink `nlink > 1`, secret filename, never-edit, `.git/` symlinks, public-repo auto-commit refusal, and `claude-pr-steward-*`/`claude-ship-*` label collision guard).
+- [x] **Step 3:** Implement `src/publish/pr-texts.ts` (conversation synthesis + diff fallback validated via `validateGeneratedPrText`) and `bb.ui.requestInput` confirmation card with 3.5-second Allow dwell check.
+- [x] **Step 4:** Implement `src/github/comments.ts` (GraphQL PR/thread/review reader, collaborator `write`/`admin` permission filter, blockquote stripping, `mayHide` HTML-comment tagging, 4 KB/40 KB/100-item/30-commenter caps) and `src/github/bot.ts` (`botToken` REST client).
+- [x] **Step 5:** Add `room-cli ship publish` + `skills/ship/SKILL.md` and run full fake-git/fake-gh + UI slot tests.
 
 ---
 
