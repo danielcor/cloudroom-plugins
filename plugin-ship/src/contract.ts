@@ -169,6 +169,27 @@ export const filteredPrDiscussionSchema = z
   })
   .strict();
 
+export const inspectReviewContextOutputSchema = z
+  .object({
+    root: z.string(),
+    repoSlug: z.string().nullable(),
+    branch: z.string().nullable(),
+    headSha: z.string(),
+    baseSha: z.string(),
+    priorReviewedIsAncestor: z.boolean(),
+    changedFiles: z.array(z.string()),
+    committedFiles: z.array(z.string()),
+    diffText: z.string(),
+    unsafeWorktreeHooks: z.boolean(),
+    worktreeHookReason: z.string().nullable(),
+    hasEscapingSymlinks: z.boolean(),
+    symlinkReason: z.string().nullable(),
+    secretBlockedReason: z.string().nullable(),
+  })
+  .strict();
+
+export type InspectReviewContextOutput = z.infer<typeof inspectReviewContextOutputSchema>;
+
 export const hostContract = defineRpcContract({
   inspectCheckout: {
     experimental_retryable: true,
@@ -265,6 +286,17 @@ export const hostContract = defineRpcContract({
       })
       .strict(),
     output: filteredPrDiscussionSchema,
+  },
+  inspectReviewContext: {
+    experimental_retryable: true,
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        baseRef: z.string().min(1).max(512).optional(),
+        priorReviewedSha: z.string().regex(/^[0-9a-f]{40}$/u).optional(),
+      })
+      .strict(),
+    output: inspectReviewContextOutputSchema,
   },
 });
 

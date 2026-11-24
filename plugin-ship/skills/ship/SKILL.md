@@ -30,6 +30,15 @@ Publish local work safely using `room-cli ship publish`. Never bypass blockers o
      Pass `--commit-message "<msg>"` when uncommitted changes will be staged, `--base <branch>` to target a non-default base branch, or `--draft` to open a draft PR.
    - Only pass `--confirm` or `--allow-public-commit` when running headless outside a thread with explicit user approval.
 
-4. **Report the outcome concisely:**
-   - Report the PR URL, PR number, target branch, and confirmed head commit SHA.
+4. **Run multi-model code review (`room-cli ship review`):**
+   Before or right after opening a PR, run Cloudroom Ship's read-only multi-model review on the committed branch head (`triad` default, or `--mode sol-loop` / `--mode single`):
+   ```bash
+   room-cli ship review --dry-run --json
+   room-cli ship review --repo owner/repo --pr <number> --post --json
+   ```
+   - `review` deduplicates against existing hosted Claude Code Review checks and prior `<!-- cloudroom-ship reviewed=<sha> -->` markers, using incremental `priorSha..HEAD` diffs when safe.
+   - Use `--post` to publish the bot review summary and committed-file inline findings via the configured `botToken`.
+
+5. **Report the outcome concisely:**
+   - Report the PR URL, PR number, target branch, confirmed head commit SHA, and review verdict / finding count.
    - Never print tokens or `.env` contents.

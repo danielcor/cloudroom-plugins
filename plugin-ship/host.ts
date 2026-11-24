@@ -5,6 +5,7 @@ import {
   hostContract,
   type CheckoutInspection,
   type InspectPublishContextOutput,
+  type InspectReviewContextOutput,
   type PublishChangesOutput,
 } from "./src/contract.js";
 import {
@@ -670,6 +671,225 @@ export async function readPrDiscussionAt(
   });
 }
 
+const WORKTREE_INCLUDE_UNSAFE_RE =
+  /(?:^|\/|\.)env\b|\*\.(?:pem|key|p12|pfx|keystore|jks)|token\.json|auth\.json|credentials|hosts\.yml|id_rsa|id_ed25519|secret|^\s*(?:\*+|\.\*)\s*$/iu;
+
+function parseLsTreeZ(stdout: string): Array<{ mode: string; type: string; oid: string; path: string }> {
+  const out: Array<{ mode: string; type: string; oid: string; path: string }> = [];
+  for (const tok of stdout.split("\0")) {
+    if (!tok) continue;
+    const m = /^(\d{6}) (blob|tree|commit) ([0-9a-f]{40})\t(.+)$/u.exec(tok);
+    if (m) {
+      out.push({ mode: m[1]!, type: m[2]!, oid: m[3]!, path: m[4]! });
+    }
+  }
+  return out;
+}
+
+export async function inspectReviewContextAt(
+  input: { root: string; baseRef?: string; priorReviewedSha?: string },
+  deps: HostDeps = {},
+): Promise<InspectReviewContextOutput> {
+  const execGit = deps.execGit ?? defaultGitExec;
+  const inspection = await inspectCheckoutAt(input.root, execGit);
+  if (!inspection.headSha || !/^[0-9a-f]{40}$/u.test(inspection.headSha)) {
+    throw new Error("Review requires HEAD to resolve to a committed revision.");
+  }
+  const headSha = inspection.headSha;
+  const topRoot = inspection.root;
+  const selected = selectRemote(inspection.remotes);
+  const parsedRemote = parseGitHubRemoteUrl(selected.url);
+  const repoSlug = parsedRemote?.slug ?? null;
+
+  let baseSha: string | null = null;
+  if (input.baseRef && /^[0-9a-f]{40}$/iu.test(input.baseRef.trim())) {
+    const verify = await execGit(topRoot, [
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      "--end-of-options",
+      `${input.baseRef.trim()}^{commit}`,
+    ]);
+    if (verify.code === 0 && /^[0-9a-f]{40}$/u.test(verify.stdout.trim())) {
+      baseSha = verify.stdout.trim();
+    }
+  }
+  if (!baseSha) {
+    const candidates = [
+      ...(input.baseRef ? [`origin/${input.baseRef}`, input.baseRef] : []),
+      "origin/main",
+      "main",
+      "origin/master",
+      "master",
+    ];
+    for (const cand of candidates) {
+      const candRes = await execGit(topRoot, [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        `${cand}^{commit}`,
+      ]);
+      if (candRes.code !== 0) continue;
+      const candSha = candRes.stdout.trim();
+      const mbRes = await execGit(topRoot, ["merge-base", headSha, candSha]);
+      baseSha = mbRes.code === 0 && /^[0-9a-f]{40}$/u.test(mbRes.stdout.trim()) ? mbRes.stdout.trim() : candSha;
+      break;
+    }
+  }
+  if (!baseSha) {
+    const parentRes = await execGit(topRoot, ["rev-parse", "--verify", "--quiet", `${headSha}^`]);
+    baseSha =
+      parentRes.code === 0 && /^[0-9a-f]{40}$/u.test(parentRes.stdout.trim())
+        ? parentRes.stdout.trim()
+        : headSha;
+  }
+
+  let priorReviewedIsAncestor = false;
+  if (input.priorReviewedSha && /^[0-9a-f]{40}$/u.test(input.priorReviewedSha)) {
+    const ancRes = await execGit(topRoot, ["merge-base", "--is-ancestor", input.priorReviewedSha, headSha]);
+    priorReviewedIsAncestor = ancRes.code === 0;
+  }
+
+  const [namesRes, diffRes, hookTreeRes, allTreeRes] = await Promise.all([
+    execGit(topRoot, ["diff", "--name-only", `${baseSha}..${headSha}`]),
+    execGit(topRoot, ["diff", "--unified=3", "--no-color", `${baseSha}..${headSha}`]),
+    execGit(topRoot, [
+      "ls-tree",
+      "-z",
+      headSha,
+      "--",
+      ".worktreeinclude",
+      ".bb-env-setup.sh",
+      ".bb-env-teardown.sh",
+    ]),
+    execGit(topRoot, ["ls-tree", "-r", "-z", headSha]),
+  ]);
+
+  const committedFiles = namesRes.code === 0 ? namesRes.stdout.split("\n").filter(Boolean) : [];
+  const rawDiff = diffRes.code === 0 ? diffRes.stdout : "";
+  const boundedDiff = truncateUtf8(rawDiff, MAX_DIFF_TEXT_BYTES).text;
+
+  // Check worktree hook files at headSha for credential exposure or symlink risks.
+  let unsafeWorktreeHooks = false;
+  let worktreeHookReason: string | null = null;
+  if (hookTreeRes.code !== 0) {
+    unsafeWorktreeHooks = true;
+    worktreeHookReason = "Failed to inspect worktree hook files at HEAD.";
+  } else {
+    const hookEntries = parseLsTreeZ(hookTreeRes.stdout);
+    for (const entry of hookEntries) {
+      if (entry.mode === "120000") {
+        unsafeWorktreeHooks = true;
+        worktreeHookReason = `Hook file ${entry.path} is a tracked symlink at HEAD.`;
+        break;
+      }
+      const showRes = await execGit(topRoot, ["show", `${headSha}:${entry.path}`]);
+      if (showRes.code !== 0) {
+        unsafeWorktreeHooks = true;
+        worktreeHookReason = `Could not read ${entry.path} at HEAD.`;
+        break;
+      }
+      if (entry.path === ".worktreeinclude") {
+        const riskyLine = showRes.stdout
+          .split(/\r?\n/u)
+          .map((l) => l.trim())
+          .find((l) => l !== "" && !l.startsWith("#") && !l.startsWith("!") && WORKTREE_INCLUDE_UNSAFE_RE.test(l));
+        if (riskyLine) {
+          unsafeWorktreeHooks = true;
+          worktreeHookReason = `.worktreeinclude matches sensitive/credential pattern "${riskyLine}".`;
+          break;
+        }
+      } else {
+        if (/\bln\s+-s\b|\bsymlink\b/u.test(showRes.stdout)) {
+          unsafeWorktreeHooks = true;
+          worktreeHookReason = `${entry.path} creates symlinks during environment setup.`;
+          break;
+        }
+      }
+    }
+  }
+
+  // Check all tracked symlinks at headSha (escaping targets or unreadable blobs).
+  let hasEscapingSymlinks = false;
+  let symlinkReason: string | null = null;
+  const allEntries = allTreeRes.code === 0 ? parseLsTreeZ(allTreeRes.stdout) : [];
+  if (allTreeRes.code !== 0) {
+    hasEscapingSymlinks = true;
+    symlinkReason = "Failed to enumerate tracked tree entries at HEAD.";
+  } else {
+    for (const entry of allEntries) {
+      if (entry.mode !== "120000") continue;
+      const catRes = await execGit(topRoot, ["cat-file", "-p", entry.oid]);
+      if (catRes.code !== 0) {
+        hasEscapingSymlinks = true;
+        symlinkReason = `Could not inspect symlink target for ${entry.path}.`;
+        break;
+      }
+      const target = catRes.stdout.trim();
+      if (target.startsWith("/") || /(?:^|\/)\.\.(?:\/|$)/u.test(target)) {
+        hasEscapingSymlinks = true;
+        symlinkReason = `Tracked symlink ${entry.path} resolves to unsafe target "${target}".`;
+        break;
+      }
+    }
+  }
+
+  // Scan diff added content + any committed `.env*` blobs at headSha against secret rules & local secrets.
+  const localSecrets = await collectLocalSecrets(topRoot);
+  const addedContent = extractAddedDiffContent(rawDiff);
+  let secretBlockedReason: string | null = null;
+  const diffSecret = findSecrets(addedContent)[0];
+  if (diffSecret) {
+    secretBlockedReason = `Potential ${diffSecret.kind} detected in committed diff (line ${diffSecret.line}).`;
+  } else {
+    const localHit = findLocalSecretMatch(addedContent, localSecrets);
+    if (localHit) {
+      secretBlockedReason = `Committed diff matches local secret (${localHit}).`;
+    }
+  }
+
+  if (!secretBlockedReason) {
+    const committedEnvPaths = allEntries
+      .map((e) => e.path)
+      .filter((p) => /(?:^|\/)\.env/iu.test(p) && isSecretFilename(p));
+    for (const envPath of committedEnvPaths) {
+      const showRes = await execGit(topRoot, ["show", `${headSha}:${envPath}`]);
+      if (showRes.code !== 0) {
+        secretBlockedReason = `Could not inspect committed ${envPath} blob at HEAD.`;
+        break;
+      }
+      const envHit = findSecrets(showRes.stdout)[0];
+      if (envHit) {
+        secretBlockedReason = `Committed ${envPath} contains ${envHit.kind}.`;
+        break;
+      }
+      const envLocalHit = findLocalSecretMatch(showRes.stdout, localSecrets);
+      if (envLocalHit) {
+        secretBlockedReason = `Committed ${envPath} matches local credential (${envLocalHit}).`;
+        break;
+      }
+    }
+  }
+
+  return {
+    root: topRoot,
+    repoSlug,
+    branch: inspection.branch,
+    headSha,
+    baseSha,
+    priorReviewedIsAncestor,
+    changedFiles: committedFiles,
+    committedFiles,
+    diffText: secretBlockedReason ? "" : boundedDiff,
+    unsafeWorktreeHooks,
+    worktreeHookReason,
+    hasEscapingSymlinks,
+    symlinkReason,
+    secretBlockedReason,
+  };
+}
+
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
@@ -698,5 +918,6 @@ export default experimental_defineHostEntry({
     inspectPublishContext: async (input) => inspectPublishContextAt(input),
     publishChanges: async (input) => publishChangesAt(input),
     readPrDiscussion: async (input) => readPrDiscussionAt(input),
+    inspectReviewContext: async (input) => inspectReviewContextAt(input),
   },
 });

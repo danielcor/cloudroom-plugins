@@ -16,6 +16,13 @@ import { MIGRATIONS, ShipStore, type RepoDefaults } from "./src/db.js";
 import { GitHubBotClient } from "./src/github/bot.js";
 import { fetchPrDiscussion, type FilteredPrDiscussion } from "./src/github/comments.js";
 import { runShipPublish, type ShipPublishResult } from "./src/publish/publisher.js";
+import type { DispatchExec } from "./src/review/dispatch.js";
+import {
+  createCloudroomSeatExecutor,
+  runShipReview,
+  type SettledThreadWaiter,
+} from "./src/review/runner.js";
+import { ReviewerGatekeeper } from "./src/review/types.js";
 import { isNeverEditPath, isSecretFilename } from "./src/safety/never-edit.js";
 
 export const PLUGIN_VERSION = "0.1.0";
@@ -26,6 +33,8 @@ export interface ShipServerDeps {
   nowMs?: () => number;
   fetchImpl?: typeof fetch;
   minDwellMs?: number;
+  execDispatch?: DispatchExec;
+  seatTimeoutMs?: number;
 }
 
 export function createShipPlugin(deps: ShipServerDeps = {}) {
@@ -84,6 +93,24 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
   bb.storage.migrate(db, MIGRATIONS);
   const store = new ShipStore(db);
   const hostClient = bb.hosts.experimental_client({ contract: hostContract });
+  const gatekeeper = new ReviewerGatekeeper();
+  const settledWaiters = new Map<string, SettledThreadWaiter>();
+
+  bb.events.on("interaction.pending", async ({ interaction }) => {
+    const resolution = gatekeeper.evaluateInteraction(interaction);
+    if (!resolution) return;
+    await bb.sdk.threads.interactions
+      .resolve({
+        threadId: interaction.threadId,
+        interactionId: interaction.id,
+        resolution,
+      })
+      .catch(() => undefined);
+  });
+
+  bb.events.on("experimental_thread.settled", (event) => {
+    settledWaiters.get(event.thread.id)?.resolve(event);
+  });
 
   async function currentDefaults(): Promise<{ status: ShipStatus; repoDefaults: RepoDefaults }> {
     const s = await settings.get();
@@ -117,13 +144,15 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
     ctx: PluginCliContext,
     hostOverride?: string,
     pathOverride?: string,
-  ): Promise<{ hostId: string; root: string }> {
+  ): Promise<{ hostId: string; root: string; projectId: string | null }> {
     let hostId = hostOverride?.trim() || undefined;
     let root = pathOverride?.trim() || ctx.cwd?.trim() || undefined;
+    let projectId = ctx.projectId?.trim() || null;
 
-    if ((!hostId || !root) && ctx.threadId) {
+    if ((!hostId || !root || !projectId) && ctx.threadId) {
       try {
         const thread = await bb.sdk.threads.get({ threadId: ctx.threadId });
+        projectId ??= thread.projectId ?? null;
         if (thread.environmentId) {
           const env = await bb.sdk.environments.get({ environmentId: thread.environmentId });
           if (!hostId && env.hostId) hostId = env.hostId;
@@ -142,8 +171,8 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
       }
     }
 
-    if ((!hostId || !root) && ctx.projectId) {
-      const project = await bb.sdk.projects.get({ projectId: ctx.projectId });
+    if ((!hostId || !root) && projectId) {
+      const project = await bb.sdk.projects.get({ projectId });
       const src = project.sources.find((x) => x.isDefault) ?? project.sources[0];
       if (src) {
         hostId ??= src.hostId;
@@ -174,7 +203,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
       });
     }
 
-    return { hostId, root };
+    return { hostId, root, projectId };
   }
 
   bb.rpc.register(rpcContract, {
@@ -566,6 +595,144 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
               exitCode: 0,
               stdout: `Bot token valid as "${viewer.login}" (id ${viewer.id}) ${matchNote}\n`,
             };
+          },
+        }),
+        review: cliCommand({
+          summary: "Run a multi-model code review (triad default, sol-loop, or single) on committed HEAD.",
+          options: {
+            path: { type: "string", description: "Absolute path to git checkout on the target host." },
+            host: { type: "string", description: "Cloudroom host id or name." },
+            repo: { type: "string", description: "GitHub repository (owner/repo) for PR dedup/posting." },
+            pr: { type: "integer", min: 1, max: 9_999_999, description: "Optional pull request number." },
+            base: { type: "string", description: "Base ref or commit SHA to diff from." },
+            mode: {
+              type: "enum",
+              values: ["triad", "sol-loop", "single"],
+              description: "Review mode override.",
+            },
+            effort: {
+              type: "enum",
+              values: ["low", "medium", "high", "max"],
+              description: "Reasoning effort override.",
+            },
+            intent: { type: "string", description: "Concise statement of change intent for reviewers." },
+            "out-of-scope": { type: "string", description: "Notes on out-of-scope items reviewers should ignore." },
+            checks: { type: "string", description: "Summary of local typecheck/test results." },
+            round: { type: "integer", min: 1, max: 10, description: "Sol-loop / review round number." },
+            force: { type: "boolean", description: "Force review even if hosted or prior Ship review exists." },
+            post: { type: "boolean", description: "Post summary and inline comments to GitHub using botToken." },
+            "dry-run": { type: "boolean", description: "Resolve dedup, risk, and seat routes without spawning threads." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ options }, ctx) {
+            if (options.repo) {
+              const parsedRepo = repoSlugSchema.safeParse(options.repo);
+              if (!parsedRepo.success) {
+                throw new PluginCliError(`Invalid repository "${options.repo}": expected owner/repo.`, {
+                  code: "invalid_repo",
+                });
+              }
+            }
+            const { hostId, root, projectId } = await resolveHostAndRoot(ctx, options.host, options.path);
+            if (!options["dry-run"] && !projectId) {
+              throw new PluginCliError("Could not determine projectId to spawn reviewer child threads.", {
+                code: "no_project_id",
+                hint: "Run from inside a Cloudroom project or thread.",
+              });
+            }
+
+            const s = await settings.get();
+            const token = typeof s.botToken === "string" ? s.botToken.trim() : "";
+            const botClient = token
+              ? new GitHubBotClient({
+                  token,
+                  botLogin: (s.botLogin ?? "").trim(),
+                  fetchImpl: deps.fetchImpl,
+                })
+              : null;
+
+            const defaults = await currentDefaults();
+            const mode = options.mode
+              ? reviewModeSchema.parse(options.mode)
+              : undefined;
+            const effort = options.effort
+              ? reviewEffortSchema.parse(options.effort)
+              : undefined;
+
+            let cachedHeadSha = "0".repeat(40);
+            const result = await runShipReview(
+              {
+                hostId,
+                root,
+                repo: options.repo,
+                prNumber: options.pr,
+                baseRef: options.base,
+                mode,
+                effort,
+                defaultMode: defaults.repoDefaults.reviewMode,
+                defaultEffort: defaults.repoDefaults.reviewEffort,
+                intent: options.intent,
+                outOfScope: options["out-of-scope"],
+                checks: options.checks,
+                round: options.round,
+                force: options.force,
+                post: options.post,
+                dryRun: options["dry-run"],
+                nowMs: deps.nowMs,
+              },
+              {
+                store,
+                inspectReviewContext: async (input) => {
+                  const res = await hostClient.call("inspectReviewContext", input, { hostId });
+                  cachedHeadSha = res.headSha;
+                  return res;
+                },
+                scanOutboundForLocalSecrets: (input) => hostClient.call("scanOutboundForLocalSecrets", input, { hostId }),
+                readPrDiscussion: (input) =>
+                  hostClient.call("readPrDiscussion", { root: input.root, repo: input.repo, prNumber: input.prNumber, trustedBots: input.trustedBots }, { hostId }),
+                botClient,
+                execDispatch: deps.execDispatch,
+                executor: createCloudroomSeatExecutor({
+                  bb,
+                  projectId: projectId ?? "dry-run",
+                  parentThreadId: ctx.threadId,
+                  get headSha() {
+                    return cachedHeadSha;
+                  },
+                  gatekeeper,
+                  settledWaiters,
+                  seatTimeoutMs: deps.seatTimeoutMs,
+                }),
+              },
+            );
+
+            const exitCode =
+              result.status === "blocked" || (result.status === "completed" && result.postError !== null) ? 1 : 0;
+            if (options.json) {
+              return { exitCode, stdout: `${JSON.stringify(result, null, 2)}\n` };
+            }
+            if (result.status === "blocked") {
+              return { exitCode: 1, stderr: `Review blocked: ${result.reason}\n` };
+            }
+            if (result.status === "skipped") {
+              return { exitCode: 0, stdout: `Review skipped: ${result.reason}\n` };
+            }
+            if (result.status === "dry_run") {
+              const lines = [
+                `Review dry-run: mode=${result.mode} (${result.effort}) risk=${result.riskTier} checkout=${result.allowCheckout}`,
+                `HEAD: ${result.headSha} | Base: ${result.baseSha}`,
+                `Seats (${result.seats.length}): ${result.seats.map((seat) => `${seat.family}:${seat.model}@${seat.hostId ?? "cloud"}`).join(", ") || "none"}`,
+              ];
+              return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+            }
+            const lines = [
+              `Review ${result.reviewRunId}: verdict=${result.verdict} (${result.validSeats}/${result.targetSeats} seats, score=${result.meanScore ?? "n/a"}, risk=${result.riskTier})`,
+              `Findings: ${result.findings.length}${result.stopReason ? ` | Stop notice: ${result.stopReason}` : ""}`,
+              ...result.findings.map((f) => `- ${f.id} [${f.severity}] ${f.file}${f.line ? `:${f.line}` : ""} ${f.claim}`),
+              ...(result.postedReviewId ? [`Posted GitHub review id=${result.postedReviewId}`] : []),
+              ...(result.postError ? [`Post error: ${result.postError}`] : []),
+            ];
+            return { exitCode, stdout: `${lines.join("\n")}\n` };
           },
         }),
       },

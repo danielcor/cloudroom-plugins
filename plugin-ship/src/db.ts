@@ -159,7 +159,7 @@ interface WatchRow {
   stop_reason: string | null;
 }
 
-interface AuditRow {
+export interface AuditRow {
   id: number;
   watch_id: string | null;
   ts: number;
@@ -167,6 +167,58 @@ interface AuditRow {
   action: string;
   outcome: string;
   detail_json: string;
+}
+
+export interface ReviewRunRecord {
+  id: string;
+  watchId: string | null;
+  repo: string;
+  prNumber: number;
+  headSha: string;
+  mode: ReviewMode;
+  round: number;
+  seatsJson: string;
+  verdict: string;
+  meanScore: number | null;
+  createdAt: number;
+}
+
+export interface ReviewFindingRecord {
+  id: string;
+  reviewRunId: string;
+  severity: string;
+  file: string;
+  line: number | null;
+  claim: string;
+  raisersJson: string;
+  status: string;
+  resolutionSha: string | null;
+}
+
+interface ReviewRunRow {
+  id: string;
+  watch_id: string | null;
+  repo: string;
+  pr_number: number;
+  head_sha: string;
+  mode: ReviewMode;
+  round: number;
+  seats_json: string;
+  verdict: string;
+  mean_score: number | null;
+  created_at: number;
+}
+
+interface ReviewFindingRow {
+  id: string;
+  review_run_id: string;
+  severity: string;
+  file: string;
+  line: number | null;
+  claim: string;
+  raisers_json: string;
+  status: string;
+  resolution_sha: string | null;
 }
 
 function toRepoConfig(row: RepoRow): RepoConfig {
@@ -339,6 +391,100 @@ export class ShipStore {
       action: r.action,
       outcome: r.outcome,
       detailJson: r.detail_json,
+    }));
+  }
+
+  insertReviewRun(run: ReviewRunRecord, findings: readonly ReviewFindingRecord[]): void {
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO review_runs (
+            id, watch_id, repo, pr_number, head_sha, mode, round, seats_json, verdict, mean_score, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          run.id,
+          run.watchId,
+          run.repo,
+          run.prNumber,
+          run.headSha,
+          run.mode,
+          run.round,
+          run.seatsJson,
+          run.verdict,
+          run.meanScore,
+          run.createdAt,
+        );
+
+      const insertFinding = this.db.prepare(
+        `INSERT INTO review_findings (
+          id, review_run_id, severity, file, line, claim, raisers_json, status, resolution_sha
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const f of findings) {
+        insertFinding.run(
+          f.id,
+          f.reviewRunId,
+          f.severity,
+          f.file,
+          f.line,
+          f.claim,
+          f.raisersJson,
+          f.status,
+          f.resolutionSha,
+        );
+      }
+    });
+    tx();
+  }
+
+  listReviewRuns(opts: { repo?: string; prNumber?: number; limit?: number } = {}): ReviewRunRecord[] {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+    let rows: ReviewRunRow[];
+    if (opts.repo && opts.prNumber !== undefined) {
+      rows = this.db
+        .prepare("SELECT * FROM review_runs WHERE repo = ? AND pr_number = ? ORDER BY created_at DESC LIMIT ?")
+        .all(opts.repo, opts.prNumber, limit) as ReviewRunRow[];
+    } else if (opts.repo) {
+      rows = this.db
+        .prepare("SELECT * FROM review_runs WHERE repo = ? ORDER BY created_at DESC LIMIT ?")
+        .all(opts.repo, limit) as ReviewRunRow[];
+    } else {
+      rows = this.db.prepare("SELECT * FROM review_runs ORDER BY created_at DESC LIMIT ?").all(limit) as ReviewRunRow[];
+    }
+    return rows.map((r) => ({
+      id: r.id,
+      watchId: r.watch_id,
+      repo: r.repo,
+      prNumber: r.pr_number,
+      headSha: r.head_sha,
+      mode: r.mode,
+      round: r.round,
+      seatsJson: r.seats_json,
+      verdict: r.verdict,
+      meanScore: r.mean_score,
+      createdAt: r.created_at,
+    }));
+  }
+
+  getLastReviewRun(repo: string, prNumber: number): ReviewRunRecord | null {
+    return this.listReviewRuns({ repo, prNumber, limit: 1 })[0] ?? null;
+  }
+
+  listReviewFindings(reviewRunId: string): ReviewFindingRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM review_findings WHERE review_run_id = ?")
+      .all(reviewRunId) as ReviewFindingRow[];
+    return rows.map((r) => ({
+      id: r.id,
+      reviewRunId: r.review_run_id,
+      severity: r.severity,
+      file: r.file,
+      line: r.line,
+      claim: r.claim,
+      raisersJson: r.raisers_json,
+      status: r.status,
+      resolutionSha: r.resolution_sha,
     }));
   }
 }

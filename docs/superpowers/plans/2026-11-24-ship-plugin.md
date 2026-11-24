@@ -80,11 +80,11 @@
 - Create: `plugin-ship/test/{review-dedup,review-runner}.test.ts`
 
 **Tasks:**
-- [ ] **Step 1:** Implement `dedup.ts` (check hosted `Claude Code Review` check-run status and prior `<!-- cloudroom-ship reviewed=<40-hex> -->` comments; incremental `SHA..HEAD` scoping when safe).
-- [ ] **Step 2:** Implement `dispatch.ts` (query `room-cli dispatch preview <profile> --json` when Dispatch is active; fall back to ordered family list respecting market-hours local/cloud preference and cooldowns).
-- [ ] **Step 3:** Implement `triad.ts` (default), `sol-loop.ts`, and `single.ts` runners spawning read-only child threads via `bb.sdk.threads.spawn` pinned to `--baseBranch <HEAD_SHA>` with worktree hook/symlink safety checks and read-only `interaction.pending` gatekeeping.
-- [ ] **Step 4:** Implement `runner.ts` persistence (`review_runs`, `review_findings`) and bot review posting (summary comment + sanitized inline findings without leaking uncommitted files).
-- [ ] **Step 5:** Add `room-cli ship review` and unit tests covering all three modes, invalid-reply retries, stop-and-split triggers, and child cleanup.
+- [x] **Step 1:** Implement `dedup.ts` (check hosted `Claude Code Review` check-run status and prior `<!-- cloudroom-ship reviewed=<40-hex> -->` comments; incremental `SHA..HEAD` scoping when safe).
+- [x] **Step 2:** Implement `dispatch.ts` (query `room-cli dispatch preview <profile> --json` when Dispatch is active; fall back to ordered family list respecting market-hours local/cloud preference and cooldowns).
+- [x] **Step 3:** Implement `triad.ts` (default), `sol-loop.ts`, and `single.ts` runners spawning read-only child threads via `bb.sdk.threads.spawn` pinned to `--baseBranch <HEAD_SHA>` with worktree hook/symlink safety checks and read-only `interaction.pending` gatekeeping.
+- [x] **Step 4:** Implement `runner.ts` persistence (`review_runs`, `review_findings`) and bot review posting (summary comment + sanitized inline findings without leaking uncommitted files).
+- [x] **Step 5:** Add `room-cli ship review` and unit tests covering all three modes, invalid-reply retries, stop-and-split triggers, and child cleanup.
 
 ---
 
