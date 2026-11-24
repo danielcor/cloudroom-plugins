@@ -36,19 +36,19 @@
 
 **Manifest Note:** Keep `"app"` and `"skills"` omitted from `plugin-ship/package.json` in PR 1 so the package compiles and builds cleanly before PR 2 adds `app.tsx` and `skills/`.
 
-- [ ] **Step 1: Scaffold package & install dependencies**
+- [x] **Step 1: Scaffold package & install dependencies**
   Create `package.json`, `tsconfig.json`, `vitest.config.ts`, `icons/ship.svg`. Pin `@get-bb/plugin-sdk` at `0.6.189`, `yaml` at `2.9.1`, `zod` at `^4.3.6`, and run `npm install`.
 
-- [ ] **Step 2: Implement & test `src/safety/never-edit.ts`, `src/safety/secrets.ts`, `src/safety/outbound-text.ts`**
+- [x] **Step 2: Implement & test `src/safety/never-edit.ts`, `src/safety/secrets.ts`, `src/safety/outbound-text.ts`**
   Port `isNeverEditPath`, `isProtectedMergePath`, `isSecretFilename`, strict line + YAML/JSON secret scanning, `collectLocalSecrets`/`findLocalSecretMatch`, `validateCommentText`, `validateCommitMessage`, and `validateGeneratedPrText` (including 8-word n-gram diff-parroting filter). Cover evasion attempts (Unicode confusables, invisible characters, trailing dots, backup suffixes, `.tmp.*`) in unit tests.
 
-- [ ] **Step 3: Implement & test `src/safety/merge-guard.ts` and `src/safety/pins.ts`**
+- [x] **Step 3: Implement & test `src/safety/merge-guard.ts` and `src/safety/pins.ts`**
   Run `git merge-tree --write-tree` + `git diff-tree -r -z` in real `/tmp` git repositories to verify `mode: "base"` and `mode: "head"` protection, `expectedTipSha` mismatch rejection, `merge.*.driver` rejection, and tamper-pinning drift detection across git config, hooks, `.claude/settings*.json`, and `.mcp.json`.
 
-- [ ] **Step 4: Implement `src/contract.ts`, `src/db.ts`, `host.ts`, and `server.ts`**
+- [x] **Step 4: Implement `src/contract.ts`, `src/db.ts`, `host.ts`, and `server.ts`**
   Wire `hostContract` (`inspectCheckout`, `computePins`, `verifyPins`, `checkMergeSafe`, `scanOutboundForLocalSecrets`), `rpcContract` (`status`, `listRepos`, `upsertRepo`, `listWatches`, `listAudit`), append-only SQLite migrations, `bb.settings.define`, and initial `room-cli ship status|repos|safety-check` CLI subcommands.
 
-- [ ] **Step 5: Verify host & server harnesses and run repository gates**
+- [x] **Step 5: Verify host & server harnesses and run repository gates**
   Test `host.ts` with `experimental_createHostEntryHarness` (`@get-bb/plugin-sdk/testing/host`) and `server.ts` with `createFakePluginHost` (`@get-bb/plugin-sdk/testing`), confirming `botToken` and raw `.env` secrets never leak across RPC or CLI output. Run `npx tsc --noEmit && npx vitest run`.
 
 ---
