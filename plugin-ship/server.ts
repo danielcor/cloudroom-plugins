@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { BbPluginApi, PluginCliContext } from "@get-bb/plugin-sdk";
 import { cliCommand, defineCli, PluginCliError } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -11,8 +12,9 @@ import {
   rpcContract,
   type RepoConfig,
   type ShipStatus,
+  type WatchRecord,
 } from "./src/contract.js";
-import { MIGRATIONS, ShipStore, type RepoDefaults } from "./src/db.js";
+import { MIGRATIONS, ShipStore, toPublicWatchRecord, type RepoDefaults } from "./src/db.js";
 import { GitHubBotClient } from "./src/github/bot.js";
 import { fetchPrDiscussion, type FilteredPrDiscussion } from "./src/github/comments.js";
 import { runShipPublish, type ShipPublishResult } from "./src/publish/publisher.js";
@@ -24,8 +26,12 @@ import {
 } from "./src/review/runner.js";
 import { ReviewerGatekeeper } from "./src/review/types.js";
 import { isNeverEditPath, isSecretFilename } from "./src/safety/never-edit.js";
+import { StewardWorkerGatekeeper } from "./src/steward/gatekeeper.js";
+import { StewardPoller, type DiscoveredPrCandidate } from "./src/steward/poller.js";
+import { registerStewardTools } from "./src/steward/tools.js";
 
 export const PLUGIN_VERSION = "0.1.0";
+export const STEWARD_TERMS_KV_KEY = "steward_terms_accepted_at";
 
 const POSITIVE_INT_SCHEMA = z.number().int();
 
@@ -35,6 +41,10 @@ export interface ShipServerDeps {
   minDwellMs?: number;
   execDispatch?: DispatchExec;
   seatTimeoutMs?: number;
+  pollIntervalMs?: number;
+  disableBackgroundPoller?: boolean;
+  discoverRepoPrs?: (repo: string) => Promise<DiscoveredPrCandidate[]>;
+  onPollerReady?: (poller: StewardPoller) => void;
 }
 
 export function createShipPlugin(deps: ShipServerDeps = {}) {
@@ -94,10 +104,80 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
   const store = new ShipStore(db);
   const hostClient = bb.hosts.experimental_client({ contract: hostContract });
   const gatekeeper = new ReviewerGatekeeper();
+  const stewardGatekeeper = new StewardWorkerGatekeeper(store);
   const settledWaiters = new Map<string, SettledThreadWaiter>();
 
+  async function currentBotClient(): Promise<GitHubBotClient | null> {
+    const s = await settings.get();
+    const token = typeof s.botToken === "string" ? s.botToken.trim() : "";
+    if (!token) return null;
+    return new GitHubBotClient({
+      token,
+      botLogin: (s.botLogin ?? "").trim(),
+      fetchImpl: deps.fetchImpl,
+    });
+  }
+
+  function publishWatchesSignal(payload: Record<string, unknown>): void {
+    try {
+      bb.realtime.publish("watches", payload);
+    } catch {
+      // Ignore realtime errors in detached harnesses.
+    }
+  }
+
+  function publishNotificationSignal(payload: Record<string, unknown>): void {
+    try {
+      bb.realtime.publish("notifications", payload);
+    } catch {
+      // Ignore realtime errors in detached harnesses.
+    }
+  }
+
+  const poller = new StewardPoller({
+    bb,
+    store,
+    hostClient,
+    getPollIntervalMs: async () => {
+      if (deps.pollIntervalMs !== undefined) return deps.pollIntervalMs;
+      const { status } = await currentDefaults();
+      return status.pollIntervalSeconds * 1000;
+    },
+    getMaxPushesPerCause: async (repo) => {
+      const repoCfg = store.getRepo(repo);
+      if (repoCfg) return repoCfg.maxPushesPerCause;
+      const { status } = await currentDefaults();
+      return status.defaultMaxPushesPerCause;
+    },
+    getWatchMaxDays: async () => (await currentDefaults()).status.watchMaxDays,
+    discoverRepoPrs: deps.discoverRepoPrs,
+    nowMs: deps.nowMs,
+  });
+
+  registerStewardTools(bb, {
+    store,
+    hostClient,
+    getBotClient: currentBotClient,
+    getMaxPushesPerCause: async (repo) => {
+      const repoCfg = store.getRepo(repo);
+      if (repoCfg) return repoCfg.maxPushesPerCause;
+      const { status } = await currentDefaults();
+      return status.defaultMaxPushesPerCause;
+    },
+    publishWatchUpdate: (watchId) => publishWatchesSignal({ type: "watch.updated", watchId }),
+    publishNotification: (payload) => publishNotificationSignal(payload),
+  });
+
+  if (!deps.disableBackgroundPoller) {
+    bb.background.service("ship-poller", {
+      start: (signal) => poller.start(signal),
+    });
+  }
+  deps.onPollerReady?.(poller);
+
   bb.events.on("interaction.pending", async ({ interaction }) => {
-    const resolution = gatekeeper.evaluateInteraction(interaction);
+    const resolution =
+      gatekeeper.evaluateInteraction(interaction) ?? stewardGatekeeper.evaluateInteraction(interaction);
     if (!resolution) return;
     await bb.sdk.threads.interactions
       .resolve({
@@ -110,6 +190,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
 
   bb.events.on("experimental_thread.settled", (event) => {
     settledWaiters.get(event.thread.id)?.resolve(event);
+    poller.handleWorkerSettled(event.thread.id);
   });
 
   async function currentDefaults(): Promise<{ status: ShipStatus; repoDefaults: RepoDefaults }> {
@@ -206,6 +287,38 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
     return { hostId, root, projectId };
   }
 
+  async function applyWatchControl(
+    id: string,
+    action: "stop" | "pause" | "resume",
+    actor: string,
+  ): Promise<WatchRecord> {
+    const current = store.getWatch(id);
+    if (!current) {
+      throw new PluginCliError(`Watch "${id}" was not found.`, { code: "watch_not_found" });
+    }
+    let updated = current;
+    if (action === "stop") {
+      if (current.workerThreadId) {
+        await bb.sdk.threads.stop({ threadId: current.workerThreadId }).catch(() => undefined);
+        await bb.sdk.threads.archive({ threadId: current.workerThreadId }).catch(() => undefined);
+      }
+      updated = store.stopWatch(id, `stopped by ${actor}`, "stopped")!;
+    } else if (action === "pause") {
+      updated = store.pauseWatch(id)!;
+    } else {
+      updated = store.resumeWatch(id)!;
+    }
+    store.appendAudit({
+      watchId: id,
+      actor,
+      action: `steward.${action}`,
+      outcome: "ok",
+      detail: { state: updated.state },
+    });
+    publishWatchesSignal({ type: "watch.updated", watchId: id, state: updated.state });
+    return toPublicWatchRecord(updated);
+  }
+
   bb.rpc.register(rpcContract, {
     status: async () => (await currentDefaults()).status,
     listRepos: async () => store.listRepos(),
@@ -221,8 +334,157 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
       return updated;
     },
     listWatches: async (input) => store.listWatches(input),
+    controlWatch: async (input) => applyWatchControl(input.id, input.action, "rpc"),
     listAudit: async (input) => store.listAudit(input),
   });
+
+  async function startStewardWatch(
+    ctx: PluginCliContext,
+    options: {
+      path?: string;
+      host?: string;
+      repo?: string;
+      pr?: number;
+      remote?: string;
+      base?: string;
+      "accept-terms"?: boolean;
+      json?: boolean;
+    },
+  ) {
+    const nowMs = (deps.nowMs ?? Date.now)();
+    let acceptedAt = await bb.storage.kv.get<number>(STEWARD_TERMS_KV_KEY);
+    if (!acceptedAt) {
+      if (options["accept-terms"]) {
+        acceptedAt = nowMs;
+        await bb.storage.kv.set(STEWARD_TERMS_KV_KEY, acceptedAt);
+      } else {
+        throw new PluginCliError(
+          "PR Steward terms must be accepted before starting a watch. Run `room-cli ship terms --accept` or pass `--accept-terms`.",
+          { code: "steward_terms_required" },
+        );
+      }
+    }
+
+    if (options.repo) {
+      const parsedRepo = repoSlugSchema.safeParse(options.repo);
+      if (!parsedRepo.success) {
+        throw new PluginCliError(`Invalid repository "${options.repo}": expected owner/repo.`, {
+          code: "invalid_repo",
+        });
+      }
+    }
+
+    const { hostId, root, projectId } = await resolveHostAndRoot(ctx, options.host, options.path);
+    if (!projectId) {
+      throw new PluginCliError("Could not determine projectId for starting a Steward watch.", {
+        code: "no_project_id",
+        hint: "Run inside a Cloudroom project or thread.",
+      });
+    }
+
+    const inspectCtx = await hostClient.call(
+      "inspectPublishContext",
+      {
+        root,
+        ...(options.remote ? { remote: options.remote } : {}),
+        ...(options.base ? { baseBranch: options.base } : {}),
+      },
+      { hostId },
+    );
+
+    const repo = options.repo ?? inspectCtx.repoMeta?.slug ?? null;
+    if (!repo) {
+      throw new PluginCliError("Could not determine GitHub repository. Pass --repo <owner/repo>.", {
+        code: "no_repo",
+      });
+    }
+    const prNumber = options.pr ?? inspectCtx.existingPr?.number ?? null;
+    if (!prNumber) {
+      throw new PluginCliError(
+        "No open PR found for the current branch. Pass --pr <number> or publish with `room-cli ship publish` first.",
+        { code: "no_pr" },
+      );
+    }
+
+    const repoCfg = store.getRepo(repo);
+    const trustedBots = repoCfg?.trustedBots ?? [];
+    const polled = await hostClient.call(
+      "pollPrState",
+      { root, repo, prNumber, trustedBots },
+      { hostId },
+    );
+
+    if (polled.discussion.collisionLabels.length > 0) {
+      throw new PluginCliError(
+        `PR #${prNumber} carries steward collision label(s): ${polled.discussion.collisionLabels.join(", ")}`,
+        { code: "collision_label" },
+      );
+    }
+
+    const existing = store.getActiveWatchByRepoPr(repo, prNumber);
+    if (existing) {
+      const pub = toPublicWatchRecord(existing);
+      if (options.json) {
+        return { exitCode: 0, stdout: `${JSON.stringify({ alreadyWatching: true, watch: pub }, null, 2)}\n` };
+      }
+      return { exitCode: 0, stdout: `Already watching ${repo}#${prNumber} (${existing.id}, state=${existing.state})\n` };
+    }
+
+    const pinSnap = await hostClient.call("computePins", { root }, { hostId });
+    if (!pinSnap.ok) {
+      throw new PluginCliError(`Failed to snapshot checkout tamper pins: ${pinSnap.error}`, {
+        code: "pins_failed",
+      });
+    }
+
+    const { status } = await currentDefaults();
+    const watchId = `watch_${randomUUID()}`;
+    const created = store.createWatch({
+      id: watchId,
+      projectId,
+      hostId,
+      worktreePath: inspectCtx.inspection.root,
+      repo,
+      prNumber,
+      headBranch: polled.discussion.pr.headRefName,
+      headRemote: inspectCtx.remoteName || "origin",
+      baseBranch: options.base?.trim() || polled.discussion.pr.baseRefName,
+      baseRemote: inspectCtx.remoteName || "origin",
+      authorLogin: polled.discussion.pr.authorLogin,
+      state: "watching",
+      lastHeadSha: polled.discussion.pr.headRefOid,
+      lastStateHash: null,
+      startedAt: nowMs,
+      expiresAt: nowMs + status.watchMaxDays * 24 * 60 * 60 * 1000,
+      lastWokeAt: null,
+      workerThreadId: null,
+      pins: pinSnap.pins,
+      trustedBots,
+      seenCommentIds: [],
+      causePushCounts: {},
+      rerunJobIds: [],
+      behindMergesCount: 0,
+      stopReason: null,
+    });
+
+    store.appendAudit({
+      watchId,
+      actor: "cli",
+      action: "steward.started",
+      outcome: "ok",
+      detail: { repo, prNumber, headBranch: created.headBranch, baseBranch: created.baseBranch },
+    });
+    publishWatchesSignal({ type: "watch.created", watchId, state: "watching" });
+
+    const pub = toPublicWatchRecord(created);
+    if (options.json) {
+      return { exitCode: 0, stdout: `${JSON.stringify({ alreadyWatching: false, watch: pub }, null, 2)}\n` };
+    }
+    return {
+      exitCode: 0,
+      stdout: `Started watch ${watchId} for ${repo}#${prNumber} (${created.headBranch} -> ${created.baseBranch})\n`,
+    };
+  }
 
   bb.cli.register(
     defineCli({
@@ -733,6 +995,123 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
               ...(result.postError ? [`Post error: ${result.postError}`] : []),
             ];
             return { exitCode, stdout: `${lines.join("\n")}\n` };
+          },
+        }),
+        terms: cliCommand({
+          summary: "View or accept PR Steward autonomous background watch terms.",
+          options: {
+            accept: { type: "boolean", description: "Accept PR Steward terms." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ options }) {
+            let acceptedAt = await bb.storage.kv.get<number>(STEWARD_TERMS_KV_KEY);
+            if (options.accept && !acceptedAt) {
+              acceptedAt = (deps.nowMs ?? Date.now)();
+              await bb.storage.kv.set(STEWARD_TERMS_KV_KEY, acceptedAt);
+              store.appendAudit({
+                actor: "cli",
+                action: "steward.terms_accepted",
+                outcome: "ok",
+                detail: { acceptedAt },
+              });
+            }
+            const accepted = typeof acceptedAt === "number";
+            if (options.json) {
+              return { exitCode: 0, stdout: `${JSON.stringify({ accepted, acceptedAt: acceptedAt ?? null }, null, 2)}\n` };
+            }
+            return {
+              exitCode: 0,
+              stdout: accepted
+                ? `PR Steward terms accepted at ${new Date(acceptedAt!).toISOString()}\n`
+                : "PR Steward terms not accepted yet. Run `room-cli ship terms --accept`.\n",
+            };
+          },
+        }),
+        start: cliCommand({
+          summary: "Start persistent PR Steward watching on a pull request.",
+          options: {
+            path: { type: "string", description: "Absolute path to git checkout on the target host." },
+            host: { type: "string", description: "Cloudroom host id or name." },
+            repo: { type: "string", description: "GitHub repository (owner/repo)." },
+            pr: { type: "integer", min: 1, max: 9_999_999, description: "Pull request number." },
+            remote: { type: "string", description: "Git remote name (defaults to origin)." },
+            base: { type: "string", description: "Base branch override." },
+            "accept-terms": { type: "boolean", description: "Accept PR Steward terms if not yet accepted." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ options }, ctx) {
+            return startStewardWatch(ctx, options);
+          },
+        }),
+        steward: cliCommand({
+          summary: "Start persistent PR Steward watching on a pull request (alias for ship start).",
+          options: {
+            path: { type: "string", description: "Absolute path to git checkout on the target host." },
+            host: { type: "string", description: "Cloudroom host id or name." },
+            repo: { type: "string", description: "GitHub repository (owner/repo)." },
+            pr: { type: "integer", min: 1, max: 9_999_999, description: "Pull request number." },
+            remote: { type: "string", description: "Git remote name (defaults to origin)." },
+            base: { type: "string", description: "Base branch override." },
+            "accept-terms": { type: "boolean", description: "Accept PR Steward terms if not yet accepted." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ options }, ctx) {
+            return startStewardWatch(ctx, options);
+          },
+        }),
+        watches: cliCommand({
+          summary: "List active or historical PR Steward watches.",
+          options: {
+            all: { type: "boolean", description: "Include stopped, merged, and closed watches." },
+            state: { type: "string", description: "Filter by exact watch state." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ options }) {
+            const list = options.state
+              ? store.listWatches({ state: options.state, limit: 200 })
+              : store
+                  .listWatches({ limit: 200 })
+                  .filter((w) => options.all || (w.state !== "stopped" && w.state !== "merged" && w.state !== "closed"));
+            if (options.json) {
+              return { exitCode: 0, stdout: `${JSON.stringify(list, null, 2)}\n` };
+            }
+            if (list.length === 0) {
+              return { exitCode: 0, stdout: "No PR watches matching filter.\n" };
+            }
+            const lines = list.map(
+              (w) => `${w.id}\t${w.repo}#${w.prNumber}\t${w.headBranch}->${w.baseBranch}\tstate=${w.state}\t${w.stopReason ?? ""}`,
+            );
+            return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+          },
+        }),
+        stop: cliCommand({
+          summary: "Stop a PR Steward watch and archive any running worker.",
+          positionals: [{ name: "watchId", description: "Watch id to stop.", required: true }],
+          options: { json: { type: "boolean", description: "Print JSON output." } },
+          async run({ positionals, options }) {
+            const updated = await applyWatchControl(positionals.watchId, "stop", "cli");
+            if (options.json) return { exitCode: 0, stdout: `${JSON.stringify(updated, null, 2)}\n` };
+            return { exitCode: 0, stdout: `Stopped watch ${updated.id} (${updated.repo}#${updated.prNumber})\n` };
+          },
+        }),
+        pause: cliCommand({
+          summary: "Pause a PR Steward watch.",
+          positionals: [{ name: "watchId", description: "Watch id to pause.", required: true }],
+          options: { json: { type: "boolean", description: "Print JSON output." } },
+          async run({ positionals, options }) {
+            const updated = await applyWatchControl(positionals.watchId, "pause", "cli");
+            if (options.json) return { exitCode: 0, stdout: `${JSON.stringify(updated, null, 2)}\n` };
+            return { exitCode: 0, stdout: `Paused watch ${updated.id} (${updated.repo}#${updated.prNumber})\n` };
+          },
+        }),
+        resume: cliCommand({
+          summary: "Resume a paused PR Steward watch.",
+          positionals: [{ name: "watchId", description: "Watch id to resume.", required: true }],
+          options: { json: { type: "boolean", description: "Print JSON output." } },
+          async run({ positionals, options }) {
+            const updated = await applyWatchControl(positionals.watchId, "resume", "cli");
+            if (options.json) return { exitCode: 0, stdout: `${JSON.stringify(updated, null, 2)}\n` };
+            return { exitCode: 0, stdout: `Resumed watch ${updated.id} (${updated.repo}#${updated.prNumber})\n` };
           },
         }),
       },

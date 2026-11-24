@@ -1,4 +1,4 @@
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import {
@@ -6,6 +6,8 @@ import {
   type CheckoutInspection,
   type InspectPublishContextOutput,
   type InspectReviewContextOutput,
+  type PolledCheckRunOutput,
+  type PollPrStateOutput,
   type PublishChangesOutput,
 } from "./src/contract.js";
 import {
@@ -20,9 +22,9 @@ import {
 } from "./src/github/client.js";
 import { fetchPrDiscussion, truncateUtf8, type FilteredPrDiscussion } from "./src/github/comments.js";
 import { isValidGitBranchName } from "./src/publish/preflight.js";
-import { defaultGitExec, type GitExec } from "./src/safety/git-exec.js";
+import { defaultGitExec, runProcess, SAFE_GIT_FLAGS, type ExecResult, type GitExec } from "./src/safety/git-exec.js";
 import { checkGitDirPlain, checkMergeSafe } from "./src/safety/merge-guard.js";
-import { isNeverEditPath, isSecretFilename, normalizePathForCheck } from "./src/safety/never-edit.js";
+import { isNeverEditPath, isSecretFilename, normalizePathForCheck, stripInvisible } from "./src/safety/never-edit.js";
 import { validateCommitMessage } from "./src/safety/outbound-text.js";
 import { computeCheckoutPins, diffPins } from "./src/safety/pins.js";
 import { collectLocalSecrets, findLocalSecretMatch, findSecrets } from "./src/safety/secrets.js";
@@ -890,6 +892,608 @@ export async function inspectReviewContextAt(
   };
 }
 
+/** Git runner used by automated PR Steward operations: always disables repository hooks. */
+export function defaultStewardGitExec(cwd: string, args: readonly string[]): Promise<ExecResult> {
+  return runProcess("git", [...SAFE_GIT_FLAGS, "-c", "core.hooksPath=/dev/null", ...args], {
+    cwd,
+    timeoutMs: 60_000,
+    env: {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_TEST_COMMIT_GRAPH: "0",
+    },
+  });
+}
+
+async function verifyExpectedPinsAt(
+  root: string,
+  expectedPins: Readonly<Record<string, string>>,
+): Promise<{ ok: boolean; reason: string | null }> {
+  const snap = await computeCheckoutPins(root);
+  if (!snap.ok) {
+    return { ok: false, reason: snap.error ?? "failed to verify checkout pins" };
+  }
+  const drift = diffPins(expectedPins, snap.pins);
+  if (drift) {
+    return { ok: false, reason: drift.reason };
+  }
+  return { ok: true, reason: null };
+}
+
+export async function pollPrStateAt(
+  input: {
+    root: string;
+    repo: string;
+    prNumber: number;
+    trustedBots?: readonly string[];
+    authorLogin?: string;
+  },
+  deps: HostDeps = {},
+): Promise<PollPrStateOutput> {
+  const execGh = deps.execGh ?? defaultGhExec;
+  const discussion = await readPrDiscussionAt(input, { execGh });
+  const [owner, name] = input.repo.split("/");
+  const checkRes = await execGh(input.root, [
+    "api",
+    `repos/${encodeURIComponent(owner!)}/${encodeURIComponent(name!)}/commits/${encodeURIComponent(discussion.pr.headRefOid)}/check-runs?per_page=100`,
+  ]);
+
+  let checkRuns: PolledCheckRunOutput[] = [];
+  if (checkRes.code === 0 && checkRes.stdout.trim()) {
+    try {
+      const parsed = JSON.parse(checkRes.stdout) as {
+        check_runs?: Array<{
+          id: number;
+          name: string;
+          status: string;
+          conclusion: string | null;
+          details_url?: string | null;
+          html_url?: string | null;
+        }>;
+      };
+      checkRuns = (parsed.check_runs ?? []).map((r) => ({
+        id: r.id,
+        name: r.name,
+        status: r.status,
+        conclusion: r.conclusion ?? null,
+        detailsUrl: r.details_url ?? r.html_url ?? null,
+      }));
+    } catch {
+      checkRuns = [];
+    }
+  }
+
+  return { discussion, checkRuns };
+}
+
+const MAX_REPO_SKILL_BYTES = 32_768;
+
+export async function readRepoStewardSkillAt(input: { root: string }): Promise<{
+  found: boolean;
+  sourcePath: string | null;
+  content: string | null;
+  truncated: boolean;
+}> {
+  let rootReal: string;
+  try {
+    rootReal = await realpath(input.root);
+  } catch {
+    return { found: false, sourcePath: null, content: null, truncated: false };
+  }
+
+  for (const rel of [".claude/skills/steward/SKILL.md", ".claude/skills/babysit/SKILL.md"] as const) {
+    const abs = join(input.root, rel);
+    try {
+      await lstat(abs);
+    } catch {
+      continue;
+    }
+    try {
+      const resolved = await realpath(abs);
+      const fromRoot = relative(rootReal, resolved);
+      if (!fromRoot || fromRoot.startsWith("..") || isAbsolute(fromRoot)) {
+        continue;
+      }
+      const raw = await readFile(resolved, "utf8");
+      const clean = stripInvisible(raw);
+      const bounded = truncateUtf8(clean, MAX_REPO_SKILL_BYTES);
+      return {
+        found: true,
+        sourcePath: rel,
+        content: bounded.text,
+        truncated: bounded.truncated,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return { found: false, sourcePath: null, content: null, truncated: false };
+}
+
+export async function stewardFetchAndCheckBaseAt(
+  input: {
+    root: string;
+    baseRemote: string;
+    baseBranch: string;
+    expectedPins: Record<string, string>;
+  },
+  deps: HostDeps = {},
+): Promise<{
+  ok: boolean;
+  pinsOk: boolean;
+  driftReason: string | null;
+  fetchedSha: string | null;
+  safe: boolean;
+  alreadyMerged: boolean;
+  blockedPaths: string[];
+  noticePaths: string[];
+  reason: string | null;
+}> {
+  const execGit = deps.execGit ?? defaultStewardGitExec;
+  const pinCheck = await verifyExpectedPinsAt(input.root, input.expectedPins);
+  if (!pinCheck.ok) {
+    return {
+      ok: false,
+      pinsOk: false,
+      driftReason: pinCheck.reason,
+      fetchedSha: null,
+      safe: false,
+      alreadyMerged: false,
+      blockedPaths: [],
+      noticePaths: [],
+      reason: pinCheck.reason,
+    };
+  }
+
+  const fetchRes = await execGit(input.root, ["fetch", "--no-tags", "--", input.baseRemote, input.baseBranch]);
+  if (fetchRes.code !== 0) {
+    return {
+      ok: false,
+      pinsOk: true,
+      driftReason: null,
+      fetchedSha: null,
+      safe: false,
+      alreadyMerged: false,
+      blockedPaths: [],
+      noticePaths: [],
+      reason: `git fetch failed: ${fetchRes.stderr.trim() || fetchRes.stdout.trim()}`,
+    };
+  }
+
+  const revRes = await execGit(input.root, ["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"]);
+  const fetchedSha = revRes.stdout.trim();
+  if (revRes.code !== 0 || !/^[0-9a-f]{40}$/u.test(fetchedSha)) {
+    return {
+      ok: false,
+      pinsOk: true,
+      driftReason: null,
+      fetchedSha: null,
+      safe: false,
+      alreadyMerged: false,
+      blockedPaths: [],
+      noticePaths: [],
+      reason: "Could not resolve FETCH_HEAD after base fetch.",
+    };
+  }
+
+  const mergeCheck = await checkMergeSafe(input.root, fetchedSha, {
+    mode: "base",
+    expectedTipSha: fetchedSha,
+    execGit,
+  });
+
+  return {
+    ok: mergeCheck.safe,
+    pinsOk: true,
+    driftReason: null,
+    fetchedSha,
+    safe: mergeCheck.safe,
+    alreadyMerged: mergeCheck.alreadyMerged,
+    blockedPaths: mergeCheck.blockedPaths,
+    noticePaths: mergeCheck.noticePaths,
+    reason: mergeCheck.reason,
+  };
+}
+
+export async function stewardMergeBaseAt(
+  input: {
+    root: string;
+    baseRemote: string;
+    baseBranch: string;
+    headRemote?: string;
+    headBranch?: string;
+    expectedBaseSha: string;
+    expectedPins: Record<string, string>;
+  },
+  deps: HostDeps = {},
+): Promise<{
+  ok: boolean;
+  headSha: string | null;
+  pushed: boolean;
+  noticePaths: string[];
+  reason: string | null;
+}> {
+  const execGit = deps.execGit ?? defaultStewardGitExec;
+  const pinCheck = await verifyExpectedPinsAt(input.root, input.expectedPins);
+  if (!pinCheck.ok) {
+    return { ok: false, headSha: null, pushed: false, noticePaths: [], reason: pinCheck.reason };
+  }
+
+  const inspection = await inspectCheckoutAt(input.root, execGit);
+  if (inspection.inProgressOp || inspection.gitDirLinkIssue) {
+    return {
+      ok: false,
+      headSha: inspection.headSha,
+      pushed: false,
+      noticePaths: [],
+      reason: inspection.gitDirLinkIssue
+        ? `Invalid git control file: ${inspection.gitDirLinkIssue}`
+        : `Active git ${inspection.inProgressOp} blocks automated merge.`,
+    };
+  }
+  if (input.headBranch && (inspection.isDetached || inspection.branch !== input.headBranch)) {
+    return {
+      ok: false,
+      headSha: inspection.headSha,
+      pushed: false,
+      noticePaths: [],
+      reason: `Expected branch "${input.headBranch}", found "${inspection.branch ?? "(detached)"}".`,
+    };
+  }
+
+  const fetchRes = await execGit(input.root, ["fetch", "--no-tags", "--", input.baseRemote, input.baseBranch]);
+  if (fetchRes.code !== 0) {
+    return {
+      ok: false,
+      headSha: inspection.headSha,
+      pushed: false,
+      noticePaths: [],
+      reason: `git fetch failed: ${fetchRes.stderr.trim() || fetchRes.stdout.trim()}`,
+    };
+  }
+  const revRes = await execGit(input.root, ["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"]);
+  const fetchedSha = revRes.stdout.trim();
+  if (revRes.code !== 0 || fetchedSha !== input.expectedBaseSha) {
+    return {
+      ok: false,
+      headSha: inspection.headSha,
+      pushed: false,
+      noticePaths: [],
+      reason: `Base tip moved (expected ${input.expectedBaseSha}, got ${fetchedSha || "none"}).`,
+    };
+  }
+
+  const safeCheck = await checkMergeSafe(input.root, input.expectedBaseSha, {
+    mode: "base",
+    expectedTipSha: input.expectedBaseSha,
+    execGit,
+  });
+  if (!safeCheck.safe) {
+    return {
+      ok: false,
+      headSha: inspection.headSha,
+      pushed: false,
+      noticePaths: safeCheck.noticePaths,
+      reason: safeCheck.reason,
+    };
+  }
+  if (safeCheck.alreadyMerged) {
+    return {
+      ok: true,
+      headSha: inspection.headSha,
+      pushed: false,
+      noticePaths: safeCheck.noticePaths,
+      reason: null,
+    };
+  }
+
+  const mergeRes = await execGit(input.root, ["merge", "--no-edit", input.expectedBaseSha]);
+  if (mergeRes.code !== 0) {
+    await execGit(input.root, ["merge", "--abort"]).catch(() => undefined);
+    return {
+      ok: false,
+      headSha: inspection.headSha,
+      pushed: false,
+      noticePaths: safeCheck.noticePaths,
+      reason: `git merge had conflicts or failed: ${mergeRes.stderr.trim() || mergeRes.stdout.trim()}`,
+    };
+  }
+
+  const newHead = await execGit(input.root, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+  const newHeadSha = newHead.stdout.trim();
+  if (newHead.code !== 0 || !/^[0-9a-f]{40}$/u.test(newHeadSha)) {
+    return {
+      ok: false,
+      headSha: null,
+      pushed: false,
+      noticePaths: safeCheck.noticePaths,
+      reason: "Could not resolve HEAD after base merge.",
+    };
+  }
+
+  let pushed = false;
+  if (input.headRemote && input.headBranch) {
+    const pushRes = await execGit(input.root, [
+      "push",
+      "--porcelain",
+      "--no-follow-tags",
+      "--recurse-submodules=check",
+      input.headRemote,
+      `refs/heads/${input.headBranch}:refs/heads/${input.headBranch}`,
+    ]);
+    if (pushRes.code !== 0) {
+      return {
+        ok: false,
+        headSha: newHeadSha,
+        pushed: false,
+        noticePaths: safeCheck.noticePaths,
+        reason: `git push failed after merge: ${pushRes.stderr.trim() || pushRes.stdout.trim()}`,
+      };
+    }
+
+    const lsRemoteRes = await execGit(input.root, [
+      "ls-remote",
+      "--heads",
+      input.headRemote,
+      `refs/heads/${input.headBranch}`,
+    ]);
+    const remoteSha = /^([0-9a-f]{40})\s/mu.exec(lsRemoteRes.stdout)?.[1] ?? "";
+    if (lsRemoteRes.code !== 0 || remoteSha !== newHeadSha) {
+      return {
+        ok: false,
+        headSha: newHeadSha,
+        pushed: true,
+        noticePaths: safeCheck.noticePaths,
+        reason: `Remote SHA mismatch after merge push (${remoteSha || "missing"} !== ${newHeadSha}).`,
+      };
+    }
+    pushed = true;
+  }
+
+  return {
+    ok: true,
+    headSha: newHeadSha,
+    pushed,
+    noticePaths: safeCheck.noticePaths,
+    reason: null,
+  };
+}
+
+export async function stewardCommitAndPushAt(
+  input: {
+    root: string;
+    headRemote: string;
+    headBranch: string;
+    files: string[];
+    commitMessage: string;
+    expectedPins: Record<string, string>;
+  },
+  deps: HostDeps = {},
+): Promise<{
+  ok: boolean;
+  headSha: string | null;
+  committed: boolean;
+  pushed: boolean;
+  error: string | null;
+}> {
+  const execGit = deps.execGit ?? defaultStewardGitExec;
+  const fail = (error: string, headSha: string | null = null, committed = false, pushed = false) => ({
+    ok: false,
+    headSha,
+    committed,
+    pushed,
+    error,
+  });
+
+  const pinCheck = await verifyExpectedPinsAt(input.root, input.expectedPins);
+  if (!pinCheck.ok) {
+    return fail(pinCheck.reason ?? "tamper pins drifted");
+  }
+
+  const inspection = await inspectCheckoutAt(input.root, execGit);
+  if (inspection.isDetached || inspection.branch !== input.headBranch) {
+    return fail(`Expected branch "${input.headBranch}", found "${inspection.branch ?? "(detached)"}".`, inspection.headSha);
+  }
+  if (inspection.inProgressOp || inspection.gitDirLinkIssue) {
+    return fail(
+      inspection.gitDirLinkIssue
+        ? `Invalid git control file: ${inspection.gitDirLinkIssue}`
+        : `Active git ${inspection.inProgressOp} blocks commit.`,
+      inspection.headSha,
+    );
+  }
+
+  const rootAbs = resolve(inspection.root);
+  for (const rel of input.files) {
+    if (isAbsolute(rel)) return fail(`Refusing non-relative path "${rel}".`, inspection.headSha);
+    const relFromRoot = relative(rootAbs, resolve(rootAbs, rel)).replace(/\\/gu, "/");
+    if (!relFromRoot || relFromRoot.startsWith("../") || normalizePathForCheck(rel).startsWith("../")) {
+      return fail(`Refusing path outside repository root "${rel}".`, inspection.headSha);
+    }
+    if (isSecretFilename(rel) || isNeverEditPath(rel)) {
+      return fail(`Refusing protected or secret file "${rel}".`, inspection.headSha);
+    }
+    try {
+      const st = await lstat(join(rootAbs, rel));
+      if (st.isFile() && st.nlink > 1) {
+        return fail(`Refusing hard-linked file "${rel}" (nlink=${st.nlink}).`, inspection.headSha);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        return fail(`Could not stat file "${rel}".`, inspection.headSha);
+      }
+    }
+  }
+
+  const msgCheck = validateCommitMessage(input.commitMessage);
+  if (!msgCheck.ok) {
+    return fail(`Invalid commit message: ${msgCheck.reason}`, inspection.headSha);
+  }
+  const localSecrets = await collectLocalSecrets(rootAbs);
+  const msgLocalHit = findLocalSecretMatch(input.commitMessage, localSecrets);
+  if (msgLocalHit) {
+    return fail(`Commit message matches local secret (${msgLocalHit}).`, inspection.headSha);
+  }
+
+  const addRes = await execGit(rootAbs, ["add", "--", ...input.files]);
+  if (addRes.code !== 0) {
+    return fail(`git add failed: ${addRes.stderr.trim() || addRes.stdout.trim()}`, inspection.headSha);
+  }
+
+  const cachedDiffRes = await execGit(rootAbs, ["diff", "--cached", "--unified=0", "--no-color"]);
+  const stagedAdded = cachedDiffRes.code === 0 ? extractAddedDiffContent(cachedDiffRes.stdout) : "";
+  const stagedSecret = findSecrets(stagedAdded)[0];
+  const stagedLocalSecret = findLocalSecretMatch(stagedAdded, localSecrets);
+  if (stagedSecret || stagedLocalSecret) {
+    await execGit(rootAbs, ["reset", "-q", "HEAD", "--", ...input.files]).catch(() => undefined);
+    return fail(
+      stagedSecret
+        ? `Refused to commit staged secret (${stagedSecret.kind} on line ${stagedSecret.line}).`
+        : `Refused to commit staged local credential (${stagedLocalSecret}).`,
+      inspection.headSha,
+    );
+  }
+
+  const commitRes = await execGit(rootAbs, ["commit", "-m", input.commitMessage]);
+  if (commitRes.code !== 0) {
+    return fail(`git commit failed: ${commitRes.stderr.trim() || commitRes.stdout.trim()}`, inspection.headSha);
+  }
+
+  const newHeadRes = await execGit(rootAbs, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+  const newHeadSha = newHeadRes.stdout.trim();
+  if (newHeadRes.code !== 0 || !/^[0-9a-f]{40}$/u.test(newHeadSha)) {
+    return fail("Could not resolve HEAD after commit.", null, true, false);
+  }
+
+  const pushRes = await execGit(rootAbs, [
+    "push",
+    "--porcelain",
+    "--no-follow-tags",
+    "--recurse-submodules=check",
+    input.headRemote,
+    `refs/heads/${input.headBranch}:refs/heads/${input.headBranch}`,
+  ]);
+  if (pushRes.code !== 0) {
+    return fail(`git push failed: ${pushRes.stderr.trim() || pushRes.stdout.trim()}`, newHeadSha, true, false);
+  }
+
+  const lsRemoteRes = await execGit(rootAbs, ["ls-remote", "--heads", input.headRemote, `refs/heads/${input.headBranch}`]);
+  const remoteSha = /^([0-9a-f]{40})\s/mu.exec(lsRemoteRes.stdout)?.[1] ?? "";
+  if (lsRemoteRes.code !== 0 || remoteSha !== newHeadSha) {
+    return fail(`Remote SHA mismatch after push (${remoteSha || "missing"} !== ${newHeadSha}).`, newHeadSha, true, true);
+  }
+
+  return { ok: true, headSha: newHeadSha, committed: true, pushed: true, error: null };
+}
+
+export async function stewardRerunJobAt(
+  input: {
+    root: string;
+    repo: string;
+    jobId: number;
+    expectedPins: Record<string, string>;
+  },
+  deps: HostDeps = {},
+): Promise<{ ok: boolean; error: string | null }> {
+  const execGh = deps.execGh ?? defaultGhExec;
+  const pinCheck = await verifyExpectedPinsAt(input.root, input.expectedPins);
+  if (!pinCheck.ok) {
+    return { ok: false, error: pinCheck.reason };
+  }
+  const res = await execGh(input.root, [
+    "run",
+    "rerun",
+    "--repo",
+    input.repo,
+    "--job",
+    String(input.jobId),
+  ]);
+  if (res.code !== 0) {
+    return { ok: false, error: res.stderr.trim() || res.stdout.trim() || `gh run rerun exited ${res.code}` };
+  }
+  return { ok: true, error: null };
+}
+
+const LOG_SECRET_PATTERNS_RE =
+  /(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})|\bsk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}|\bxox[abposr]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{35}\b|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|\bbearer\s+[A-Za-z0-9._~+/-]{24,}=*)/giu;
+
+export async function stewardFetchJobLogsAt(
+  input: {
+    root: string;
+    repo: string;
+    jobId: number;
+    maxBytes?: number;
+  },
+  deps: HostDeps = {},
+): Promise<{
+  ok: boolean;
+  logs: string;
+  truncated: boolean;
+  redactedCount: number;
+  error: string | null;
+}> {
+  const execGh = deps.execGh ?? defaultGhExec;
+  const maxBytes = input.maxBytes ?? 16_384;
+  const res = await execGh(input.root, [
+    "run",
+    "view",
+    "--repo",
+    input.repo,
+    "--job",
+    String(input.jobId),
+    "--log-failed",
+  ]);
+  if (res.code !== 0) {
+    return {
+      ok: false,
+      logs: "",
+      truncated: false,
+      redactedCount: 0,
+      error: res.stderr.trim() || res.stdout.trim() || `gh run view exited ${res.code}`,
+    };
+  }
+
+  let redactedCount = 0;
+  let cleaned = stripInvisible(res.stdout);
+  const localSecrets = await collectLocalSecrets(input.root);
+  for (const s of localSecrets) {
+    if (cleaned.includes(s.value)) {
+      const parts = cleaned.split(s.value);
+      redactedCount += parts.length - 1;
+      cleaned = parts.join("[REDACTED]");
+    }
+  }
+  cleaned = cleaned.replace(LOG_SECRET_PATTERNS_RE, () => {
+    redactedCount += 1;
+    return "[REDACTED]";
+  });
+
+  const remainingFindings = findSecrets(cleaned);
+  if (remainingFindings.length > 0) {
+    const flaggedLines = new Set(remainingFindings.map((f) => f.line));
+    const lines = cleaned.split(/\r?\n/u);
+    cleaned = lines
+      .map((line, idx) => {
+        if (flaggedLines.has(idx + 1)) {
+          redactedCount += 1;
+          return "[REDACTED POTENTIAL SECRET LINE]";
+        }
+        return line;
+      })
+      .join("\n");
+  }
+
+  const bounded = truncateUtf8(cleaned, maxBytes);
+  return {
+    ok: true,
+    logs: bounded.text,
+    truncated: bounded.truncated,
+    redactedCount,
+    error: null,
+  };
+}
+
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
@@ -919,5 +1523,12 @@ export default experimental_defineHostEntry({
     publishChanges: async (input) => publishChangesAt(input),
     readPrDiscussion: async (input) => readPrDiscussionAt(input),
     inspectReviewContext: async (input) => inspectReviewContextAt(input),
+    pollPrState: async (input) => pollPrStateAt(input),
+    readRepoStewardSkill: async (input) => readRepoStewardSkillAt(input),
+    stewardFetchAndCheckBase: async (input) => stewardFetchAndCheckBaseAt(input),
+    stewardMergeBase: async (input) => stewardMergeBaseAt(input),
+    stewardCommitAndPush: async (input) => stewardCommitAndPushAt(input),
+    stewardRerunJob: async (input) => stewardRerunJobAt(input),
+    stewardFetchJobLogs: async (input) => stewardFetchJobLogsAt(input),
   },
 });

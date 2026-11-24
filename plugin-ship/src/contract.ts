@@ -1,4 +1,4 @@
-import { defineRpcContract } from "@get-bb/plugin-sdk";
+import { defineRpcContract, type ExperimentalHostClient } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 export const reviewModeSchema = z.enum(["triad", "sol-loop", "single"]);
@@ -190,6 +190,27 @@ export const inspectReviewContextOutputSchema = z
 
 export type InspectReviewContextOutput = z.infer<typeof inspectReviewContextOutputSchema>;
 
+export const polledCheckRunSchema = z
+  .object({
+    id: z.number().int(),
+    name: z.string(),
+    status: z.string(),
+    conclusion: z.string().nullable(),
+    detailsUrl: z.string().nullable(),
+  })
+  .strict();
+
+export type PolledCheckRunOutput = z.infer<typeof polledCheckRunSchema>;
+
+export const pollPrStateOutputSchema = z
+  .object({
+    discussion: filteredPrDiscussionSchema,
+    checkRuns: z.array(polledCheckRunSchema),
+  })
+  .strict();
+
+export type PollPrStateOutput = z.infer<typeof pollPrStateOutputSchema>;
+
 export const hostContract = defineRpcContract({
   inspectCheckout: {
     experimental_retryable: true,
@@ -298,9 +319,138 @@ export const hostContract = defineRpcContract({
       .strict(),
     output: inspectReviewContextOutputSchema,
   },
+  pollPrState: {
+    experimental_retryable: true,
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        repo: repoSlugSchema,
+        prNumber: z.number().int().positive(),
+        trustedBots: z.array(z.string().min(1).max(80)).max(32).default([]),
+        authorLogin: z.string().max(120).optional(),
+      })
+      .strict(),
+    output: pollPrStateOutputSchema,
+  },
+  readRepoStewardSkill: {
+    experimental_retryable: true,
+    input: z.object({ root: z.string().min(1).max(4096) }).strict(),
+    output: z
+      .object({
+        found: z.boolean(),
+        sourcePath: z.string().nullable(),
+        content: z.string().nullable(),
+        truncated: z.boolean(),
+      })
+      .strict(),
+  },
+  stewardFetchAndCheckBase: {
+    experimental_retryable: true,
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        baseRemote: z.string().min(1).max(120),
+        baseBranch: z.string().min(1).max(200),
+        expectedPins: z.record(z.string(), z.string()),
+      })
+      .strict(),
+    output: z
+      .object({
+        ok: z.boolean(),
+        pinsOk: z.boolean(),
+        driftReason: z.string().nullable(),
+        fetchedSha: z.string().nullable(),
+        safe: z.boolean(),
+        alreadyMerged: z.boolean(),
+        blockedPaths: z.array(z.string()),
+        noticePaths: z.array(z.string()),
+        reason: z.string().nullable(),
+      })
+      .strict(),
+  },
+  stewardMergeBase: {
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        baseRemote: z.string().min(1).max(120),
+        baseBranch: z.string().min(1).max(200),
+        headRemote: z.string().min(1).max(120).optional(),
+        headBranch: z.string().min(1).max(200).optional(),
+        expectedBaseSha: z.string().regex(/^[0-9a-f]{40}$/u),
+        expectedPins: z.record(z.string(), z.string()),
+      })
+      .strict(),
+    output: z
+      .object({
+        ok: z.boolean(),
+        headSha: z.string().nullable(),
+        pushed: z.boolean(),
+        noticePaths: z.array(z.string()),
+        reason: z.string().nullable(),
+      })
+      .strict(),
+  },
+  stewardCommitAndPush: {
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        headRemote: z.string().min(1).max(120),
+        headBranch: z.string().min(1).max(200),
+        files: z.array(z.string().min(1).max(1024)).min(1),
+        commitMessage: z.string().min(1).max(8000),
+        expectedPins: z.record(z.string(), z.string()),
+      })
+      .strict(),
+    output: z
+      .object({
+        ok: z.boolean(),
+        headSha: z.string().nullable(),
+        committed: z.boolean(),
+        pushed: z.boolean(),
+        error: z.string().nullable(),
+      })
+      .strict(),
+  },
+  stewardRerunJob: {
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        repo: repoSlugSchema,
+        jobId: z.number().int().positive(),
+        expectedPins: z.record(z.string(), z.string()),
+      })
+      .strict(),
+    output: z
+      .object({
+        ok: z.boolean(),
+        error: z.string().nullable(),
+      })
+      .strict(),
+  },
+  stewardFetchJobLogs: {
+    experimental_retryable: true,
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        repo: repoSlugSchema,
+        jobId: z.number().int().positive(),
+        maxBytes: z.number().int().min(512).max(65_536).optional(),
+      })
+      .strict(),
+    output: z
+      .object({
+        ok: z.boolean(),
+        logs: z.string(),
+        truncated: z.boolean(),
+        redactedCount: z.number().int(),
+        error: z.string().nullable(),
+      })
+      .strict(),
+  },
 });
 
 export type ShipHostContract = typeof hostContract;
+export type ShipHostClient = ExperimentalHostClient<ShipHostContract>;
 
 export const repoConfigSchema = z
   .object({
@@ -412,6 +562,15 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
     output: z.array(watchRecordSchema),
+  },
+  controlWatch: {
+    input: z
+      .object({
+        id: z.string().min(1).max(120),
+        action: z.enum(["stop", "pause", "resume"]),
+      })
+      .strict(),
+    output: watchRecordSchema,
   },
   listAudit: {
     input: z

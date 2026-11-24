@@ -39,6 +39,7 @@ describe("ship server plugin", () => {
     await shipPlugin(host.bb);
 
     expect([...host.harness.inspection.registrations.rpcMethods].sort()).toEqual([
+      "controlWatch",
       "listAudit",
       "listRepos",
       "listWatches",

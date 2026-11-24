@@ -98,11 +98,11 @@
 - Create: `plugin-ship/test/{poller,steward-tools,gatekeeper,lifecycle}.test.ts`
 
 **Tasks:**
-- [ ] **Step 1:** Implement `poller.ts` (`bb.background.service("ship-poller")`) ticking every 120s with zero LLM tokens: tamper pins → collision labels → PR/checks/trust-filtered comments → SHA-256 fingerprint diff → wake on change with 10m cooldown, 7d TTL, 3 pushes/cause, 1 rerun/job, 2 `BEHIND` merges.
-- [ ] **Step 2:** Register the 8 native fenced tools via `bb.agents.registerTool` + `bb.agents.configure` scoped to `pluginMetadata.shipRole === "steward-worker"`, backed by `host.ts` (`-c core.hooksPath=/dev/null`, `merge-guard`, `never-edit`, live secret checks).
-- [ ] **Step 3:** Implement `gatekeeper.ts` on `bb.events.on("interaction.pending")` for worker/reviewer threads, plus repo `.claude/skills/steward/SKILL.md` (and `babysit` fallback) loader.
-- [ ] **Step 4:** Add `room-cli ship start|steward|status|stop|pause|resume|terms`, opt-in repo-wide auto-watch discovery, push notifications on `Ready`/`Needs Human`, and minimal `ShipPage`.
-- [ ] **Step 5:** Run end-to-end fake lifecycle tests, `room-cli plugin build .`, and live `aipc-ubuntu` install/smoke test against a private test PR.
+- [x] **Step 1:** Implement `poller.ts` (`bb.background.service("ship-poller")`) ticking every 120s with zero LLM tokens: tamper pins → collision labels → PR/checks/trust-filtered comments → SHA-256 fingerprint diff → wake on change with 10m cooldown, 7d TTL, 3 pushes/cause, 1 rerun/job, 2 `BEHIND` merges.
+- [x] **Step 2:** Register the 8 native fenced tools via `bb.agents.registerTool` + `bb.agents.configure` scoped to `pluginMetadata.shipRole === "steward-worker"`, backed by `host.ts` (`-c core.hooksPath=/dev/null`, `merge-guard`, `never-edit`, live secret checks).
+- [x] **Step 3:** Implement `gatekeeper.ts` on `bb.events.on("interaction.pending")` for worker/reviewer threads, plus repo `.claude/skills/steward/SKILL.md` (and `babysit` fallback) loader.
+- [x] **Step 4:** Add `room-cli ship start|steward|status|stop|pause|resume|terms`, opt-in repo-wide auto-watch discovery, push notifications on `Ready`/`Needs Human`, and minimal `ShipPage`.
+- [ ] **Step 5:** End-to-end fake lifecycle tests (`vitest`) and isolated `room-cli plugin build .` on `aipc-ubuntu` passed; live `aipc-ubuntu` install/smoke test against a private test PR awaits Daniel's approval.
 
 ---
 

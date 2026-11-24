@@ -138,6 +138,30 @@ interface RepoRow {
   updated_at: number;
 }
 
+export type WatchState =
+  | "watching"
+  | "waking"
+  | "working"
+  | "paused"
+  | "ready"
+  | "needs_human"
+  | "stopped"
+  | "merged"
+  | "closed";
+
+export const TERMINAL_WATCH_STATES: ReadonlySet<string> = new Set(["stopped", "merged", "closed"]);
+
+export interface WatchFullRecord extends WatchRecord {
+  state: WatchState;
+  lastStateHash: string | null;
+  pins: Record<string, string>;
+  trustedBots: string[];
+  seenCommentIds: string[];
+  causePushCounts: Record<string, number>;
+  rerunJobIds: number[];
+  behindMergesCount: number;
+}
+
 interface WatchRow {
   id: string;
   project_id: string | null;
@@ -150,12 +174,19 @@ interface WatchRow {
   base_branch: string;
   base_remote: string;
   author_login: string;
-  state: string;
+  state: WatchState;
   last_head_sha: string | null;
+  last_state_hash: string | null;
   started_at: number;
   expires_at: number;
   last_woke_at: number | null;
   worker_thread_id: string | null;
+  pins_json: string;
+  bots_json: string;
+  seen_comments_json: string;
+  cause_push_counts_json: string;
+  rerun_job_ids_json: string;
+  behind_merges_count: number;
   stop_reason: string | null;
 }
 
@@ -244,7 +275,55 @@ function toRepoConfig(row: RepoRow): RepoConfig {
   };
 }
 
-function toWatchRecord(row: WatchRow): WatchRecord {
+function parseJsonSafe<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+export function toPublicWatchRecord(full: WatchFullRecord): WatchRecord {
+  return {
+    id: full.id,
+    projectId: full.projectId,
+    hostId: full.hostId,
+    worktreePath: full.worktreePath,
+    repo: full.repo,
+    prNumber: full.prNumber,
+    headBranch: full.headBranch,
+    headRemote: full.headRemote,
+    baseBranch: full.baseBranch,
+    baseRemote: full.baseRemote,
+    authorLogin: full.authorLogin,
+    state: full.state,
+    lastHeadSha: full.lastHeadSha,
+    startedAt: full.startedAt,
+    expiresAt: full.expiresAt,
+    lastWokeAt: full.lastWokeAt,
+    workerThreadId: full.workerThreadId,
+    stopReason: full.stopReason,
+  };
+}
+
+function toWatchFullRecord(row: WatchRow): WatchFullRecord {
+  const rawPins = parseJsonSafe<Record<string, unknown>>(row.pins_json, {});
+  const pins: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rawPins)) {
+    if (typeof v === "string") pins[k] = v;
+  }
+  const rawBots = parseJsonSafe<unknown[]>(row.bots_json, []);
+  const trustedBots = Array.isArray(rawBots) ? rawBots.filter((x): x is string => typeof x === "string") : [];
+  const rawSeen = parseJsonSafe<unknown[]>(row.seen_comments_json, []);
+  const seenCommentIds = Array.isArray(rawSeen) ? rawSeen.filter((x): x is string => typeof x === "string") : [];
+  const rawCounts = parseJsonSafe<Record<string, unknown>>(row.cause_push_counts_json, {});
+  const causePushCounts: Record<string, number> = {};
+  for (const [k, v] of Object.entries(rawCounts)) {
+    if (typeof v === "number" && Number.isFinite(v)) causePushCounts[k] = v;
+  }
+  const rawReruns = parseJsonSafe<unknown[]>(row.rerun_job_ids_json, []);
+  const rerunJobIds = Array.isArray(rawReruns) ? rawReruns.filter((x): x is number => typeof x === "number") : [];
+
   return {
     id: row.id,
     projectId: row.project_id,
@@ -259,12 +338,23 @@ function toWatchRecord(row: WatchRow): WatchRecord {
     authorLogin: row.author_login,
     state: row.state,
     lastHeadSha: row.last_head_sha,
+    lastStateHash: row.last_state_hash,
     startedAt: row.started_at,
     expiresAt: row.expires_at,
     lastWokeAt: row.last_woke_at,
     workerThreadId: row.worker_thread_id,
+    pins,
+    trustedBots,
+    seenCommentIds,
+    causePushCounts,
+    rerunJobIds,
+    behindMergesCount: row.behind_merges_count ?? 0,
     stopReason: row.stop_reason,
   };
+}
+
+function toWatchRecord(row: WatchRow): WatchRecord {
+  return toPublicWatchRecord(toWatchFullRecord(row));
 }
 
 export class ShipStore {
@@ -351,6 +441,185 @@ export class ShipStore {
           .all(opts.state, limit) as WatchRow[])
       : (this.db.prepare("SELECT * FROM watches ORDER BY started_at DESC LIMIT ?").all(limit) as WatchRow[]);
     return rows.map(toWatchRecord);
+  }
+
+  createWatch(watch: WatchFullRecord): WatchFullRecord {
+    this.db
+      .prepare(
+        `INSERT INTO watches (
+          id, project_id, host_id, worktree_path, repo, pr_number,
+          head_branch, head_remote, base_branch, base_remote, author_login, state,
+          last_head_sha, last_state_hash, last_woke_at, started_at, expires_at,
+          worker_thread_id, pins_json, bots_json, seen_comments_json,
+          cause_push_counts_json, rerun_job_ids_json, behind_merges_count, stop_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        watch.id,
+        watch.projectId,
+        watch.hostId,
+        watch.worktreePath,
+        watch.repo,
+        watch.prNumber,
+        watch.headBranch,
+        watch.headRemote,
+        watch.baseBranch,
+        watch.baseRemote,
+        watch.authorLogin,
+        watch.state,
+        watch.lastHeadSha,
+        watch.lastStateHash,
+        watch.lastWokeAt,
+        watch.startedAt,
+        watch.expiresAt,
+        watch.workerThreadId,
+        JSON.stringify(watch.pins),
+        JSON.stringify(watch.trustedBots),
+        JSON.stringify(watch.seenCommentIds),
+        JSON.stringify(watch.causePushCounts),
+        JSON.stringify(watch.rerunJobIds),
+        watch.behindMergesCount,
+        watch.stopReason,
+      );
+    return this.getWatch(watch.id)!;
+  }
+
+  getWatch(id: string): WatchFullRecord | null {
+    const row = this.db.prepare("SELECT * FROM watches WHERE id = ?").get(id) as WatchRow | undefined;
+    return row ? toWatchFullRecord(row) : null;
+  }
+
+  getActiveWatchByRepoPr(repo: string, prNumber: number): WatchFullRecord | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM watches WHERE repo = ? AND pr_number = ? AND state NOT IN ('stopped', 'merged', 'closed') ORDER BY started_at DESC LIMIT 1",
+      )
+      .get(repo, prNumber) as WatchRow | undefined;
+    return row ? toWatchFullRecord(row) : null;
+  }
+
+  getWatchByWorkerThreadId(threadId: string): WatchFullRecord | null {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM watches WHERE worker_thread_id = ? AND state NOT IN ('stopped', 'merged', 'closed') LIMIT 1",
+      )
+      .get(threadId) as WatchRow | undefined;
+    return row ? toWatchFullRecord(row) : null;
+  }
+
+  listFullWatches(opts: { state?: string; activeOnly?: boolean; limit?: number } = {}): WatchFullRecord[] {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+    let rows: WatchRow[];
+    if (opts.state) {
+      rows = this.db
+        .prepare("SELECT * FROM watches WHERE state = ? ORDER BY started_at DESC LIMIT ?")
+        .all(opts.state, limit) as WatchRow[];
+    } else if (opts.activeOnly) {
+      rows = this.db
+        .prepare("SELECT * FROM watches WHERE state NOT IN ('stopped', 'merged', 'closed') ORDER BY started_at DESC LIMIT ?")
+        .all(limit) as WatchRow[];
+    } else {
+      rows = this.db.prepare("SELECT * FROM watches ORDER BY started_at DESC LIMIT ?").all(limit) as WatchRow[];
+    }
+    return rows.map(toWatchFullRecord);
+  }
+
+  updateWatch(id: string, patch: Partial<WatchFullRecord>): WatchFullRecord | null {
+    const current = this.getWatch(id);
+    if (!current) return null;
+    const next: WatchFullRecord = {
+      ...current,
+      ...patch,
+      id: current.id,
+      pins: patch.pins ?? current.pins,
+      trustedBots: patch.trustedBots ?? current.trustedBots,
+      seenCommentIds: patch.seenCommentIds ?? current.seenCommentIds,
+      causePushCounts: patch.causePushCounts ?? current.causePushCounts,
+      rerunJobIds: patch.rerunJobIds ?? current.rerunJobIds,
+    };
+    this.db
+      .prepare(
+        `UPDATE watches SET
+          project_id = ?,
+          host_id = ?,
+          worktree_path = ?,
+          repo = ?,
+          pr_number = ?,
+          head_branch = ?,
+          head_remote = ?,
+          base_branch = ?,
+          base_remote = ?,
+          author_login = ?,
+          state = ?,
+          last_head_sha = ?,
+          last_state_hash = ?,
+          last_woke_at = ?,
+          expires_at = ?,
+          worker_thread_id = ?,
+          pins_json = ?,
+          bots_json = ?,
+          seen_comments_json = ?,
+          cause_push_counts_json = ?,
+          rerun_job_ids_json = ?,
+          behind_merges_count = ?,
+          stop_reason = ?
+        WHERE id = ?`,
+      )
+      .run(
+        next.projectId,
+        next.hostId,
+        next.worktreePath,
+        next.repo,
+        next.prNumber,
+        next.headBranch,
+        next.headRemote,
+        next.baseBranch,
+        next.baseRemote,
+        next.authorLogin,
+        next.state,
+        next.lastHeadSha,
+        next.lastStateHash,
+        next.lastWokeAt,
+        next.expiresAt,
+        next.workerThreadId,
+        JSON.stringify(next.pins),
+        JSON.stringify(next.trustedBots),
+        JSON.stringify(next.seenCommentIds),
+        JSON.stringify(next.causePushCounts),
+        JSON.stringify(next.rerunJobIds),
+        next.behindMergesCount,
+        next.stopReason,
+        id,
+      );
+    return this.getWatch(id);
+  }
+
+  stopWatch(
+    id: string,
+    reason: string,
+    terminalState: "stopped" | "merged" | "closed" = "stopped",
+  ): WatchFullRecord | null {
+    return this.updateWatch(id, {
+      state: terminalState,
+      stopReason: reason,
+      workerThreadId: null,
+    });
+  }
+
+  pauseWatch(id: string): WatchFullRecord | null {
+    const cur = this.getWatch(id);
+    if (!cur || TERMINAL_WATCH_STATES.has(cur.state)) return cur;
+    return this.updateWatch(id, { state: "paused" });
+  }
+
+  resumeWatch(id: string): WatchFullRecord | null {
+    const cur = this.getWatch(id);
+    if (!cur || TERMINAL_WATCH_STATES.has(cur.state)) return cur;
+    return this.updateWatch(id, {
+      state: "watching",
+      lastStateHash: null,
+      stopReason: null,
+    });
   }
 
   appendAudit(entry: {
