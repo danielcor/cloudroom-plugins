@@ -9,14 +9,23 @@ Publish local work safely using `room-cli ship publish`. Never bypass blockers o
 
 ## Workflow
 
-1. **Preflight dry-run first:**
+1. **Preflight dry-run & container gate check first:**
    Run:
    ```bash
    room-cli ship publish --dry-run --json
+   room-cli ship gate inspect --json
    ```
-   Review blockers and warnings:
+   Review blockers, container gates, and warnings:
    - If `status === "blocked"`, explain every blocker clearly (detached HEAD, fork repo, steward label collision, secret filename, protected `never-edit` path, secret content in diff, hardlinked file, dirty submodule, or `.git` symlink issue) and stop without pushing.
    - Notice which branch will be used (`createBranch: true` auto-creates a feature branch if currently on the default branch).
+   - **Container Merge-Guard Gate:** If `hasBootstrapCloudroom === true` and `supportedForBase === true`:
+     - Notice repo constraints (e.g. `pmzbot` sandbox bootstrap supports base branch `dev` only, NEVER `beta`/`master`; `/var/tmp` is `noexec` so `PMZBOT_UNIT_TMP_ROOT=/tmp`; `/dev/shm` is 256 MiB; 8 GiB RAM cgroup).
+     - Inside a Cloudroom Cloud sandbox (`inCloudSandbox === true`), run the container merge-guard gate and post or capture its canonical `Gate receipt`:
+       ```bash
+       room-cli ship gate run --mode smoke --json
+       ```
+     - On a non-container host (`inCloudSandbox === false`), never run `bootstrap-cloudroom.sh` locally — push the branch first or delegate to an ephemeral Cloudroom Cloud sandbox child thread with `room-cli ship gate run --cloud --json`.
+     - If an open PR is behind its base branch and `hasMergeEligibilityScript === true`, run `room-cli ship gate eligibility <pr> --json` before merging base.
 
 2. **Prepare clean commit & PR text:**
    - Synthesize a clear commit message, PR title, and concise PR description from the task context.

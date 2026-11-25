@@ -123,14 +123,15 @@
 
 ---
 
-### PR 6: Full Ship Dashboard, Thread Header Bar & Optional GitHub Webhook
+### PR 6: Full Ship Dashboard, Thread Header Bar, Optional Webhook & Container Merge-Guard Gates
 
 **Files:**
-- Create: `plugin-ship/src/ui/{WatchDetail,RepoSettings,ThreadBar}.tsx`, `plugin-ship/app.css`
-- Modify: `plugin-ship/app.tsx`, `src/ui/ShipPage.tsx`, `server.ts`
-- Create: `plugin-ship/test/{ui,webhook}.test.ts`
+- Create: `plugin-ship/src/gates/container-gates.ts`, `plugin-ship/src/webhook.ts`, `plugin-ship/app.css`
+- Create: `plugin-ship/src/ui/{badge-helpers.ts,WatchDetail.tsx,RepoSettings.tsx,ThreadBar.tsx}`
+- Modify: `plugin-ship/{app.tsx,server.ts,host.ts}`, `plugin-ship/src/contract.ts`, `plugin-ship/src/approvals/{parser,facts,evaluator}.ts`, `plugin-ship/src/steward/{poller,prompts}.ts`, `plugin-ship/src/ui/{ShipPage,PublishConfirmCard}.tsx`, `plugin-ship/skills/{ship,steward,ship-approvals}/SKILL.md`
+- Create: `plugin-ship/test/{container-gates,webhook}.test.ts`, `plugin-ship/test/ui.test.tsx`
 
 **Tasks:**
-- [ ] **Step 1:** Add `WatchDetail` (expandable `audit_log`, review findings, approval verdicts), `RepoSettings` (per-repo review mode, effort, caps, auto-steward, approvals mode), `ThreadBar` (`experimental_threadHeaderRow`), composer `+` menu ("Ship this branch…"), and `experimental_threadAction`.
-- [ ] **Step 2:** Add optional HMAC-SHA256-verified `bb.http.route("POST", "webhook/github", ..., { auth: "none" })` for instant poll wakeups when a tunnel URL is configured.
-- [ ] **Step 3:** Render UI mockups/screenshots, run `@get-bb/plugin-sdk/testing/app` slot tests, and verify full suite + live plugin reload on `aipc-ubuntu`.
+- [x] **Step 1:** Add `WatchDetail` (expandable `audit_log`, budgets/pins strip, review findings, approval verdicts), `RepoSettings` (per-repo review mode, effort, caps, auto-steward, approvals mode, `allowDevAutomerge` with non-`dev` warning), `ThreadBar` (`experimental_threadHeaderRow`), composer `+` menu (`/ship`, `/steward`, `/ship-approvals`), and `experimental_threadAction`.
+- [x] **Step 2:** Add optional HMAC-SHA256-verified `bb.http.route("POST", "/webhook/github", ..., { auth: "none" })` (`webhookSecret` setting) for instant poll wakeups, plus Container Merge-Guard Gate integration (`inspectContainerGates`, `runMergeEligibility` conflict-only Steward bypass, sandbox `runContainerGate` + `room-cli ship gate run --cloud`, exact-SHA `Gate receipt` parsing & `gate_receipt_pass` approvals integration with `pmzbot` `dev`-only enforcement).
+- [x] **Step 3:** Render UI mockups/screenshots (`docs/superpowers/specs/2026-11-25-ship-plugin-ui-mockup.{html,png}`), run full `@get-bb/plugin-sdk/testing/app` + container-gate + webhook suites (`72 passed (72)` across 20 test files), and verify live build + reload on `aipc-ubuntu`.

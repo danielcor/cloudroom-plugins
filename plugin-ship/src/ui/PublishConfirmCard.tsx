@@ -121,59 +121,64 @@ export function PublishConfirmCard({ interaction, submit, cancel }: PluginPendin
   const dwellSeconds = Math.ceil(remainingMs / 1000);
 
   return (
-    <div data-testid="ship-publish-confirm-card" style={{ display: "grid", gap: "10px", padding: "12px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" }}>
+    <div data-testid="ship-publish-confirm-card" className="ship-confirm-card">
+      <div className="ship-confirm-hdr">
         <strong>Publish to GitHub: {parsed.repoSlug}</strong>
-        <span>{parsed.isPrivate ? "Private repo" : "Public repo"}</span>
+        <span className={`ship-pill ${parsed.isPrivate ? "is-neu" : "is-warn"}`}>
+          {parsed.isPrivate ? "Private repo" : "Public repo"}
+        </span>
       </div>
 
       {!parsed.isPrivate && hasFilesToCommit && (
-        <div role="alert" style={{ padding: "8px", border: "1px solid currentColor", borderRadius: "4px" }}>
+        <div role="alert" className="ship-banner-err" style={{ margin: 0 }}>
           Warning: this is a <strong>public repository</strong>. Confirm you intend to commit and push {parsed.filesToStage.length} file(s).
         </div>
       )}
 
-      <div>
+      <div className="ship-confirm-meta">
         <span>
           Branch: <code>{parsed.targetBranch}</code> → <code>{parsed.baseBranch}</code> ({parsed.remote})
         </span>
-        {parsed.createBranch && <span> · (new branch)</span>}
-        {parsed.existingPrNumber !== null && <span> · Updating PR #{parsed.existingPrNumber}</span>}
+        {parsed.createBranch && <span className="ship-pill is-info">new branch</span>}
+        {parsed.existingPrNumber !== null && (
+          <span className="ship-pill is-neu">Updating PR #{parsed.existingPrNumber}</span>
+        )}
       </div>
 
       {parsed.warnings.length > 0 && (
-        <ul>
-          {parsed.warnings.map((w) => (
-            <li key={w.code}>{w.message}</li>
-          ))}
-        </ul>
-      )}
-
-      {hasFilesToCommit && (
-        <div>
-          <div>Files to stage &amp; commit ({parsed.filesToStage.length}):</div>
-          <ul>
-            {shownFiles.map((f) => (
-              <li key={f}>
-                <code>{f}</code>
-              </li>
+        <div className="ship-banner-warn">
+          <ul style={{ margin: 0, paddingLeft: "18px" }}>
+            {parsed.warnings.map((w) => (
+              <li key={w.code}>{w.message}</li>
             ))}
-            {hiddenCount > 0 && <li>+{hiddenCount} more</li>}
           </ul>
         </div>
       )}
 
-      {!hasFilesToCommit && (
-        <div>
+      {hasFilesToCommit ? (
+        <div className="ship-field">
+          <span className="ship-field-label">Files to stage &amp; commit ({parsed.filesToStage.length})</span>
+          <div className="ship-confirm-files">
+            {shownFiles.map((f) => (
+              <span key={f} className="ship-confirm-file-chip">
+                {f}
+              </span>
+            ))}
+            {hiddenCount > 0 && <span className="ship-dim">+{hiddenCount} more</span>}
+          </div>
+        </div>
+      ) : (
+        <div className="ship-dim">
           Pushing {parsed.aheadCount} existing commit(s); working tree has no new file changes.
         </div>
       )}
 
       {hasFilesToCommit && (
-        <label style={{ display: "grid", gap: "4px" }}>
-          <span>Commit message</span>
+        <label className="ship-field">
+          <span className="ship-field-label">Commit message</span>
           <input
             type="text"
+            className="ship-input"
             aria-label="Commit message"
             value={commitMessage}
             onChange={(e) => setCommitMessage(e.target.value)}
@@ -181,20 +186,22 @@ export function PublishConfirmCard({ interaction, submit, cancel }: PluginPendin
         </label>
       )}
 
-      <label style={{ display: "grid", gap: "4px" }}>
-        <span>PR title</span>
+      <label className="ship-field">
+        <span className="ship-field-label">PR title</span>
         <input
           type="text"
+          className="ship-input"
           aria-label="PR title"
           value={prTitle}
           onChange={(e) => setPrTitle(e.target.value)}
         />
       </label>
 
-      <label style={{ display: "grid", gap: "4px" }}>
-        <span>PR description</span>
+      <label className="ship-field">
+        <span className="ship-field-label">PR description</span>
         <textarea
           rows={5}
+          className="ship-textarea"
           aria-label="PR description"
           value={prBody}
           onChange={(e) => setPrBody(e.target.value)}
@@ -202,7 +209,7 @@ export function PublishConfirmCard({ interaction, submit, cancel }: PluginPendin
       </label>
 
       {parsed.existingPrNumber === null && (
-        <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+        <label className="ship-chk-row">
           <input
             type="checkbox"
             checked={draft}
@@ -212,11 +219,16 @@ export function PublishConfirmCard({ interaction, submit, cancel }: PluginPendin
         </label>
       )}
 
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-        <button type="button" onClick={() => void handleCancel()} disabled={submitting}>
+      <div className="ship-actions-row" style={{ justifyContent: "flex-end" }}>
+        <button type="button" className="ship-btn" onClick={() => void handleCancel()} disabled={submitting}>
           Cancel
         </button>
-        <button type="button" onClick={() => void handleAllow()} disabled={submitting || remainingMs > 0 || !canSubmit}>
+        <button
+          type="button"
+          className="ship-btn is-primary"
+          onClick={() => void handleAllow()}
+          disabled={submitting || remainingMs > 0 || !canSubmit}
+        >
           {remainingMs > 0 ? `Allow & Publish (${dwellSeconds}s…)` : "Allow & Publish"}
         </button>
       </div>

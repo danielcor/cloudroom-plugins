@@ -1,8 +1,7 @@
 import type { InspectApprovalContextOutput, PolledCheckRunOutput } from "../contract.js";
+import { evaluateEffectiveGateStatus, type ParsedGateReceipt } from "../gates/container-gates.js";
 import { isNeverEditPath, isSecretFilename, normalizePathForCheck } from "../safety/never-edit.js";
 import type { ApprovalWhen } from "./parser.js";
-
-const PASSING_CHECK_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
 
 export type ApprovalPrInfo = NonNullable<InspectApprovalContextOutput["pr"]>;
 
@@ -21,6 +20,10 @@ export interface ApprovalFacts {
   pendingChecks: number;
   totalChecks: number;
   ciGreen: boolean;
+  sandboxGateReceipt: ParsedGateReceipt | null;
+  gateSource: "github_checks" | "sandbox_receipt" | "none";
+  gateSatisfied: boolean;
+  hasCloudroomBootstrap: boolean;
 }
 
 function matchSingleSegment(pattern: string, segment: string): boolean {
@@ -98,21 +101,12 @@ export function matchGlobPath(globPattern: string, filePath: string): boolean {
 export function buildApprovalFacts(
   pr: ApprovalPrInfo,
   checkRuns: readonly PolledCheckRunOutput[],
+  options: { sandboxGateReceipt?: ParsedGateReceipt | null; hasCloudroomBootstrap?: boolean } = {},
 ): ApprovalFacts {
   const changedPaths = pr.changedFiles.map((f) => f.path);
   const totalChangedLines = pr.changedFiles.reduce((acc, f) => acc + f.additions + f.deletions, 0);
   const touchedNeverEditPaths = changedPaths.filter((p) => isNeverEditPath(p) || isSecretFilename(p));
-
-  const pendingChecks = checkRuns.filter(
-    (c) => c.conclusion === null || c.status.toLowerCase() !== "completed",
-  ).length;
-  const failingChecks = checkRuns.filter(
-    (c) =>
-      c.status.toLowerCase() === "completed" &&
-      c.conclusion !== null &&
-      !PASSING_CHECK_CONCLUSIONS.has(c.conclusion.toLowerCase()),
-  ).length;
-  const totalChecks = checkRuns.length;
+  const gate = evaluateEffectiveGateStatus(checkRuns, options.sandboxGateReceipt ?? null);
 
   return {
     changedPaths,
@@ -125,15 +119,14 @@ export function buildApprovalFacts(
     collisionLabels: pr.collisionLabels,
     isDraft: pr.isDraft,
     touchedNeverEditPaths,
-    failingChecks,
-    pendingChecks,
-    totalChecks,
-    ciGreen:
-      totalChecks > 0 &&
-      pendingChecks === 0 &&
-      checkRuns.every(
-        (c) => c.conclusion !== null && PASSING_CHECK_CONCLUSIONS.has(c.conclusion.toLowerCase()),
-      ),
+    failingChecks: gate.failingChecks,
+    pendingChecks: gate.pendingChecks,
+    totalChecks: gate.totalChecks,
+    ciGreen: gate.ciGreen,
+    sandboxGateReceipt: gate.receipt,
+    gateSource: gate.gateSource,
+    gateSatisfied: gate.gateSatisfied,
+    hasCloudroomBootstrap: Boolean(options.hasCloudroomBootstrap),
   };
 }
 
@@ -228,8 +221,15 @@ export function evaluateDeterministicWhen(
 
   if (when.ci_green !== undefined && facts.ciGreen !== when.ci_green) {
     failedReasons.push(
-      `ci_green: expected ${when.ci_green}, got ${facts.ciGreen} (total=${facts.totalChecks}, failing=${facts.failingChecks}, pending=${facts.pendingChecks})`,
+      `ci_green: expected ${when.ci_green}, got ${facts.ciGreen} (source=${facts.gateSource}, total=${facts.totalChecks}, failing=${facts.failingChecks}, pending=${facts.pendingChecks})`,
     );
+  }
+
+  if (when.gate_receipt_pass !== undefined) {
+    const hasPassingReceipt = facts.sandboxGateReceipt !== null && facts.sandboxGateReceipt.result === "PASS";
+    if (hasPassingReceipt !== when.gate_receipt_pass) {
+      failedReasons.push(`gate_receipt_pass: expected ${when.gate_receipt_pass}, got ${hasPassingReceipt}`);
+    }
   }
 
   if (when.no_never_edit_paths && facts.touchedNeverEditPaths.length > 0) {

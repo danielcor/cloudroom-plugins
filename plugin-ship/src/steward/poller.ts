@@ -235,6 +235,67 @@ export class StewardPoller {
             break;
 
           case "wake_worker": {
+            if (
+              action.causeKey === "behind" &&
+              action.isBehind &&
+              !action.isDirty &&
+              action.failingChecks.length === 0 &&
+              action.unseenComments.length === 0
+            ) {
+              const gates = await this.deps.hostClient
+                .call(
+                  "inspectContainerGates",
+                  {
+                    root: watch.worktreePath,
+                    baseBranch: watch.baseBranch,
+                    repoSlug: watch.repo,
+                  },
+                  { hostId: watch.hostId },
+                )
+                .catch(() => null);
+
+              if (gates?.hasMergeEligibilityScript) {
+                const elig = await this.deps.hostClient
+                  .call(
+                    "runMergeEligibility",
+                    {
+                      root: watch.worktreePath,
+                      prNumber: watch.prNumber,
+                      baseRef: watch.baseBranch,
+                      repo: watch.repo,
+                      behindPolicy: "conflict-only",
+                    },
+                    { hostId: watch.hostId },
+                  )
+                  .catch(() => null);
+
+                if (elig?.ok && elig.eligible && elig.conflictFree) {
+                  const nextState = action.pendingChecks.length === 0 ? "ready" : "watching";
+                  this.deps.store.updateWatch(watch.id, {
+                    state: nextState,
+                    lastStateHash: action.nextHash,
+                    lastHeadSha: action.headSha,
+                    stopReason: null,
+                  });
+                  this.deps.store.appendAudit({
+                    watchId: watch.id,
+                    actor: "poller",
+                    action: "steward.behind_conflict_free_skipped",
+                    outcome: "ok",
+                    detail: {
+                      repo: watch.repo,
+                      prNumber: watch.prNumber,
+                      headSha: action.headSha,
+                      reason: elig.reason,
+                      overlapFiles: elig.overlapFiles,
+                    },
+                  });
+                  this.publishWatches({ type: "watch.updated", watchId: watch.id, state: nextState });
+                  if (nextState === "ready") ready += 1;
+                  break;
+                }
+              }
+            }
             const spawnedOk = await this.wakeWorker(watch, action, maxPushesPerCause, now);
             if (spawnedOk) woken += 1;
             break;
@@ -341,14 +402,24 @@ export class StewardPoller {
       lastHeadSha: action.headSha,
     });
 
-    const repoSkill = await this.deps.hostClient
-      .call("readRepoStewardSkill", { root: watch.worktreePath }, { hostId: watch.hostId })
-      .catch(() => null);
+    const [repoSkill, containerGates] = await Promise.all([
+      this.deps.hostClient
+        .call("readRepoStewardSkill", { root: watch.worktreePath }, { hostId: watch.hostId })
+        .catch(() => null),
+      this.deps.hostClient
+        .call(
+          "inspectContainerGates",
+          { root: watch.worktreePath, baseBranch: watch.baseBranch, repoSlug: watch.repo },
+          { hostId: watch.hostId },
+        )
+        .catch(() => null),
+    ]);
 
     const prompt = buildStewardWakePrompt({
       watch,
       transition: action,
       repoSkill,
+      containerGates,
       maxPushesPerCause,
     });
 

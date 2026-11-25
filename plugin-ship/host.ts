@@ -1,17 +1,21 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { hostname } from "node:os";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import {
   hostContract,
   type CheckoutInspection,
+  type ContainerGateInspectionOutput,
   type InspectApprovalContextOutput,
   type InspectPublishContextOutput,
   type InspectReviewContextOutput,
   type MergeDevPrOutput,
+  type MergeEligibilityOutput,
   type PolledCheckRunOutput,
   type PollPrStateOutput,
   type PublishChangesOutput,
+  type RunContainerGateOutput,
 } from "./src/contract.js";
 import {
   defaultAuthorGitExec,
@@ -24,6 +28,14 @@ import {
   type RepoMeta,
 } from "./src/github/client.js";
 import { fetchPrDiscussion, findCollisionLabels, truncateUtf8, type FilteredPrDiscussion } from "./src/github/comments.js";
+import {
+  detectContainerGatePlan,
+  findPassingGateReceiptForSha,
+  formatGateReceipt,
+  parseGateReceipts,
+  type ParsedGateReceipt,
+  type TrustedReceiptSource,
+} from "./src/gates/container-gates.js";
 import { isValidGitBranchName } from "./src/publish/preflight.js";
 import { defaultGitExec, runProcess, SAFE_GIT_FLAGS, type ExecResult, type GitExec } from "./src/safety/git-exec.js";
 import { checkGitDirPlain, checkMergeSafe } from "./src/safety/merge-guard.js";
@@ -34,9 +46,20 @@ import { collectLocalSecrets, findLocalSecretMatch, findSecrets } from "./src/sa
 
 const MAX_DIFF_TEXT_BYTES = 65_536;
 
+export type ShellExec = (
+  cwd: string,
+  command: string,
+  args: readonly string[],
+  opts?: { env?: NodeJS.ProcessEnv; timeoutMs?: number },
+) => Promise<ExecResult>;
+
 export interface HostDeps {
   execGit?: GitExec;
   execGh?: GhExec;
+  execShell?: ShellExec;
+  isContainerSandbox?: () => Promise<boolean> | boolean;
+  nowMs?: () => number;
+  hostname?: string;
 }
 
 function parsePorcelainV2Z(stdout: string): {
@@ -1516,6 +1539,7 @@ const APPROVAL_META_GRAPHQL = `query($owner: String!, $name: String!, $pr: Int!)
     pullRequest(number: $pr) {
       number
       title
+      body
       state
       isDraft
       headRefOid
@@ -1524,6 +1548,13 @@ const APPROVAL_META_GRAPHQL = `query($owner: String!, $name: String!, $pr: Int!)
       author { login }
       authorAssociation
       labels(first: 50) { nodes { name } }
+      comments(last: 30) {
+        nodes {
+          author { login }
+          authorAssociation
+          body
+        }
+      }
       files(first: 100) {
         nodes {
           path
@@ -1542,6 +1573,7 @@ interface ApprovalMetaGraphqlPayload {
       pullRequest?: {
         number: number;
         title: string;
+        body?: string | null;
         state: string;
         isDraft: boolean;
         headRefOid: string;
@@ -1550,6 +1582,13 @@ interface ApprovalMetaGraphqlPayload {
         author?: { login?: string | null } | null;
         authorAssociation?: string | null;
         labels?: { nodes?: Array<{ name?: string | null }> } | null;
+        comments?: {
+          nodes?: Array<{
+            author?: { login?: string | null } | null;
+            authorAssociation?: string | null;
+            body?: string | null;
+          }>;
+        } | null;
         files?: {
           nodes?: Array<{ path?: string | null; additions?: number | null; deletions?: number | null }>;
         } | null;
@@ -1557,6 +1596,344 @@ interface ApprovalMetaGraphqlPayload {
     } | null;
   };
   errors?: Array<{ message?: string }>;
+}
+
+const TRUSTED_RECEIPT_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+const KIRI_RUNNER_CANDIDATES: readonly string[] = [
+  "scripts/ci/self-hosted-runner/Dockerfile",
+  "scripts/ci/self-hosted-runner/host/pmzbot-kiri-dispatcher",
+  "scripts/ci/self-hosted-runner/host/kiri-dispatch-repos.json",
+  ".github/workflows/merge-guard.yml",
+];
+
+async function isRegularRepoFile(root: string, relPath: string): Promise<boolean> {
+  let rootReal: string;
+  try {
+    rootReal = await realpath(root);
+  } catch {
+    return false;
+  }
+  const abs = join(root, relPath);
+  let st;
+  try {
+    st = await lstat(abs);
+  } catch {
+    return false;
+  }
+  if (st.isSymbolicLink() || !st.isFile()) {
+    return false;
+  }
+  try {
+    const resolved = await realpath(abs);
+    const fromRoot = relative(rootReal, resolved);
+    return Boolean(fromRoot) && !fromRoot.startsWith("..") && !isAbsolute(fromRoot);
+  } catch {
+    return false;
+  }
+}
+
+export async function detectInCloudSandbox(deps: HostDeps = {}): Promise<boolean> {
+  if (deps.isContainerSandbox) {
+    return Boolean(await deps.isContainerSandbox());
+  }
+  const hasDockerEnv = await lstat("/.dockerenv").then(
+    () => true,
+    () => false,
+  );
+  if (!hasDockerEnv) return false;
+  if (!process.env.CLOUDROOM_WORKLOAD || process.env.CLOUDROOM_WORKLOAD.trim().length === 0) {
+    return false;
+  }
+  const pid1Comm = await readFile("/proc/1/comm", "utf8").then(
+    (s) => s.trim(),
+    () => "",
+  );
+  return pid1Comm !== "" && pid1Comm !== "systemd";
+}
+
+export async function inspectContainerGatesAt(
+  input: {
+    root: string;
+    baseBranch?: string;
+    repoSlug?: string;
+  },
+  deps: HostDeps = {},
+): Promise<ContainerGateInspectionOutput> {
+  const bootstrapRel = "scripts/ci/bootstrap-cloudroom.sh";
+  const eligibilityRel = "scripts/ci/merge-eligibility.sh";
+
+  const [hasBootstrap, hasEligibility, kiriChecks, inCloudSandbox] = await Promise.all([
+    isRegularRepoFile(input.root, bootstrapRel),
+    isRegularRepoFile(input.root, eligibilityRel),
+    Promise.all(KIRI_RUNNER_CANDIDATES.map(async (rel) => ((await isRegularRepoFile(input.root, rel)) ? rel : null))),
+    detectInCloudSandbox(deps),
+  ]);
+
+  const kiriFiles = kiriChecks.filter((x): x is string => x !== null);
+  return detectContainerGatePlan({
+    repoSlug: input.repoSlug ?? null,
+    repoDirName: basename(input.root),
+    baseBranch: input.baseBranch ?? null,
+    hasBootstrapCloudroom: hasBootstrap,
+    bootstrapScriptPath: bootstrapRel,
+    hasMergeEligibilityScript: hasEligibility,
+    mergeEligibilityScriptPath: eligibilityRel,
+    kiriFiles,
+    inCloudSandbox,
+  });
+}
+
+function defaultShellExec(
+  cwd: string,
+  command: string,
+  args: readonly string[],
+  opts: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
+): Promise<ExecResult> {
+  return runProcess(command, args, {
+    cwd,
+    env: opts.env,
+    timeoutMs: opts.timeoutMs ?? 30_000,
+  });
+}
+
+export async function runMergeEligibilityAt(
+  input: {
+    root: string;
+    prNumber: number;
+    baseRef?: string;
+    repo?: string;
+    behindPolicy?: "conflict-only" | "strict";
+  },
+  deps: HostDeps = {},
+): Promise<MergeEligibilityOutput> {
+  const scriptRel = "scripts/ci/merge-eligibility.sh";
+  const emptyFail = (scriptFound: boolean, error: string, rawJson: string | null = null): MergeEligibilityOutput => ({
+    ok: false,
+    scriptFound,
+    eligible: false,
+    behind: false,
+    behindCount: null,
+    conflictFree: false,
+    sharedContractOverlap: false,
+    overlapFiles: [],
+    nondocsOverlap: [],
+    alwaysOverlapHits: [],
+    docsOnlyPr: false,
+    reason: null,
+    rawJson,
+    error,
+  });
+
+  if (!(await isRegularRepoFile(input.root, scriptRel))) {
+    return emptyFail(false, `Non-symlink ${scriptRel} not found in ${input.root}.`);
+  }
+
+  const execShell = deps.execShell ?? defaultShellExec;
+  const policy = input.behindPolicy ?? "conflict-only";
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    BEHIND_POLICY: policy,
+    ...(input.repo ? { MERGE_ELIGIBILITY_REPO: input.repo } : {}),
+    ...(input.baseRef ? { BASE_REF: input.baseRef } : {}),
+  };
+
+  const res = await execShell(input.root, "bash", [scriptRel, String(input.prNumber)], {
+    env,
+    timeoutMs: 30_000,
+  });
+  const trimmed = res.stdout.trim();
+  const lastLine = trimmed.split(/\r?\n/u).filter(Boolean).pop() ?? "";
+  let parsed: Record<string, unknown> | null = null;
+  for (const candidate of [trimmed, lastLine]) {
+    if (!candidate) continue;
+    try {
+      const obj = JSON.parse(candidate);
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+        parsed = obj as Record<string, unknown>;
+        break;
+      }
+    } catch {
+      // Try next candidate
+    }
+  }
+
+  if (!parsed) {
+    return emptyFail(
+      true,
+      res.stderr.trim() || trimmed || `merge-eligibility.sh exited ${res.code} without valid JSON`,
+      trimmed || null,
+    );
+  }
+
+  const toStrings = (val: unknown): string[] =>
+    Array.isArray(val) ? val.filter((x): x is string => typeof x === "string") : [];
+
+  const eligible = Boolean(parsed.eligible);
+  const conflictFree = Boolean(parsed.conflict_free ?? parsed.conflictFree);
+  const overlapFiles = toStrings(parsed.overlap_files ?? parsed.overlapFiles);
+  const nondocsOverlap = toStrings(parsed.nondocs_overlap ?? parsed.nondocsOverlap);
+  const alwaysOverlapHits = toStrings(parsed.always_overlap_hits ?? parsed.alwaysOverlapHits);
+  const docsOnlyPr = Boolean(parsed.docs_only_pr ?? parsed.docsOnlyPr);
+  const reason = typeof parsed.reason === "string" ? parsed.reason : null;
+  const rawBehindCount = parsed.behind_count ?? parsed.behindCount;
+  const behindCount = typeof rawBehindCount === "number" && Number.isFinite(rawBehindCount) ? rawBehindCount : null;
+  const behind =
+    typeof parsed.behind === "boolean"
+      ? parsed.behind
+      : behindCount !== null
+        ? behindCount > 0
+        : reason === "behind_dev_strict";
+
+  const sharedContractOverlap = alwaysOverlapHits.length > 0 || nondocsOverlap.length > 0;
+  const ok = res.code === 0 || conflictFree === false;
+
+  return {
+    ok,
+    scriptFound: true,
+    eligible,
+    behind,
+    behindCount,
+    conflictFree,
+    sharedContractOverlap,
+    overlapFiles,
+    nondocsOverlap,
+    alwaysOverlapHits,
+    docsOnlyPr,
+    reason,
+    rawJson: JSON.stringify(parsed),
+    error: res.code === 0 ? null : reason ?? (res.stderr.trim() || null),
+  };
+}
+
+export async function runContainerGateAt(
+  input: {
+    root: string;
+    repoSlug: string;
+    baseBranch: string;
+    headSha: string;
+    mode?: "smoke" | "full";
+    hostLabel?: string;
+    timeoutMs?: number;
+  },
+  deps: HostDeps = {},
+): Promise<RunContainerGateOutput> {
+  const plan = await inspectContainerGatesAt(
+    { root: input.root, baseBranch: input.baseBranch, repoSlug: input.repoSlug },
+    deps,
+  );
+
+  if (!plan.inCloudSandbox) {
+    return {
+      ok: false,
+      passed: false,
+      refused: true,
+      exitCode: null,
+      wallSeconds: 0,
+      receipt: null,
+      outputTail: "",
+      error: "Refused to run container gate on a non-container host (must run inside a Cloudroom Cloud sandbox).",
+    };
+  }
+
+  if (!plan.hasBootstrapCloudroom || !plan.bootstrapScriptPath) {
+    return {
+      ok: false,
+      passed: false,
+      refused: true,
+      exitCode: null,
+      wallSeconds: 0,
+      receipt: null,
+      outputTail: "",
+      error: "Non-symlink scripts/ci/bootstrap-cloudroom.sh was not found in checkout.",
+    };
+  }
+
+  if (!plan.supportedForBase || !plan.recommendedGateCommand) {
+    return {
+      ok: false,
+      passed: false,
+      refused: true,
+      exitCode: null,
+      wallSeconds: 0,
+      receipt: null,
+      outputTail: "",
+      error: plan.unsupportedReason ?? `Container gate is unsupported for base branch "${input.baseBranch}".`,
+    };
+  }
+
+  const mode = input.mode ?? "smoke";
+  const execShell = deps.execShell ?? defaultShellExec;
+  const nowMs = deps.nowMs ?? Date.now;
+  const startedAt = nowMs();
+  const cmd =
+    mode === "smoke" && plan.repoKind === "pmzbot"
+      ? "PMZBOT_UNIT_TMP_ROOT=/tmp bash scripts/ci/bootstrap-cloudroom.sh && source /etc/profile.d/pmzbot-ci.sh && bash scripts/ci/self-hosted-runner/guest/container-smoke.sh smoke"
+      : plan.recommendedGateCommand;
+
+  const res = await execShell(input.root, "bash", ["-lc", cmd], {
+    env: {
+      ...process.env,
+      PMZBOT_UNIT_TMP_ROOT: "/tmp",
+      SHIP_GATE_MODE: mode,
+      SHIP_BASE_BRANCH: input.baseBranch,
+    },
+    timeoutMs: input.timeoutMs ?? 600_000,
+  });
+
+  const finishedAt = nowMs();
+  const wallSeconds = Math.max(0, Math.round(((finishedAt - startedAt) / 1000) * 10) / 10);
+  const combinedRaw = [res.stdout, res.stderr].filter(Boolean).join("\n");
+  const redacted = await redactSensitiveOutput(input.root, combinedRaw, 16_384);
+  const passed = res.code === 0;
+
+  const parsedReceipts = parseGateReceipts(combinedRaw, { authorLogin: "cloudroom-sandbox", kind: "gate_runner" });
+  const exactReceipt = parsedReceipts.find((r) => r.commit.toLowerCase() === input.headSha.toLowerCase());
+  const hostName = input.hostLabel?.trim() || deps.hostname || hostname();
+  const gateName = `${plan.repoKind}:${mode}`;
+
+  const receipt: ParsedGateReceipt = exactReceipt ?? {
+    repo: input.repoSlug,
+    base: input.baseBranch,
+    commit: input.headSha.toLowerCase(),
+    gate: gateName,
+    result: passed ? "PASS" : "FAIL",
+    passedCount: null,
+    failedCount: passed ? 0 : 1,
+    skippedCount: null,
+    wall: `${wallSeconds}s`,
+    host: `cloudroom-sandbox (${hostName})`,
+    bootstrap: plan.bootstrapScriptPath,
+    notRun: passed && mode === "smoke" ? "full integration suite (smoke mode requested)" : "none",
+    sourceAuthor: "cloudroom-sandbox",
+    sourceKind: "gate_runner",
+  };
+
+  const formattedReceiptText = formatGateReceipt({
+    repo: receipt.repo,
+    base: receipt.base,
+    commit: receipt.commit,
+    gate: receipt.gate,
+    result: receipt.result,
+    passedCount: receipt.passedCount,
+    failedCount: receipt.failedCount,
+    skippedCount: receipt.skippedCount,
+    wall: receipt.wall ?? `${wallSeconds}s`,
+    host: receipt.host ?? `cloudroom-sandbox (${hostName})`,
+    bootstrap: receipt.bootstrap ?? plan.bootstrapScriptPath,
+    notRun: receipt.notRun ?? "none",
+  });
+
+  return {
+    ok: true,
+    passed,
+    refused: false,
+    exitCode: res.code,
+    wallSeconds,
+    receipt,
+    outputTail: redacted.text || formattedReceiptText,
+    error: passed ? null : `Container gate exited with code ${res.code}`,
+  };
 }
 
 const CLASSIFIER_FILE_RE = /^\.claude\/classifiers\/([a-z0-9][a-z0-9_-]{0,63})\/def\.yml$/u;
@@ -1590,6 +1967,8 @@ export async function inspectApprovalContextAt(
     checkRuns: [],
     diffText: "",
     diffTruncated: false,
+    sandboxGateReceipt: null,
+    containerGates: null,
   });
 
   if (baseRemote.startsWith("-")) {
@@ -1737,6 +2116,34 @@ export async function inspectApprovalContextAt(
       deletions: Math.max(0, Math.trunc(f.deletions ?? 0)),
     }));
 
+  const trustedReceiptSources: TrustedReceiptSource[] = [];
+  if (typeof prNode.body === "string" && prNode.body.trim().length > 0) {
+    trustedReceiptSources.push({
+      text: prNode.body,
+      authorLogin: prNode.author?.login ?? null,
+      kind: "pr_body",
+    });
+  }
+  const prAuthorLower = (prNode.author?.login ?? "").trim().toLowerCase();
+  for (const comment of prNode.comments?.nodes ?? []) {
+    if (!comment || typeof comment.body !== "string" || !comment.body.trim()) continue;
+    const commentAuthor = comment.author?.login ?? null;
+    const commentAssoc = (comment.authorAssociation ?? "NONE").toUpperCase();
+    const isPrAuthor = Boolean(commentAuthor && prAuthorLower && commentAuthor.toLowerCase() === prAuthorLower);
+    if (isPrAuthor || TRUSTED_RECEIPT_ASSOCIATIONS.has(commentAssoc)) {
+      trustedReceiptSources.push({
+        text: comment.body,
+        authorLogin: commentAuthor,
+        kind: "comment",
+      });
+    }
+  }
+  const sandboxGateReceipt = findPassingGateReceiptForSha(trustedReceiptSources, prNode.headRefOid);
+  const containerGates = await inspectContainerGatesAt(
+    { root: input.root, baseBranch: prNode.baseRefName, repoSlug: input.repo },
+    deps,
+  );
+
   return {
     ok: true,
     error: null,
@@ -1763,6 +2170,8 @@ export async function inspectApprovalContextAt(
     checkRuns,
     diffText: boundedDiff.text,
     diffTruncated: boundedDiff.truncated,
+    sandboxGateReceipt,
+    containerGates,
   };
 }
 
@@ -1851,5 +2260,8 @@ export default experimental_defineHostEntry({
     stewardFetchJobLogs: async (input) => stewardFetchJobLogsAt(input),
     inspectApprovalContext: async (input) => inspectApprovalContextAt(input),
     mergeDevPr: async (input) => mergeDevPrAt(input),
+    inspectContainerGates: async (input) => inspectContainerGatesAt(input),
+    runMergeEligibility: async (input) => runMergeEligibilityAt(input),
+    runContainerGate: async (input) => runContainerGateAt(input),
   },
 });

@@ -40,11 +40,17 @@ describe("ship server plugin", () => {
 
     expect([...host.harness.inspection.registrations.rpcMethods].sort()).toEqual([
       "controlWatch",
+      "getThreadWatch",
+      "getWatchDetail",
+      "listApprovalRuns",
       "listAudit",
       "listRepos",
+      "listReviewRuns",
       "listWatches",
+      "startWatch",
       "status",
       "upsertRepo",
+      "verifyBot",
     ]);
 
     const status = (await host.harness.callRpc("status", {})) as Record<string, unknown>;
@@ -52,6 +58,8 @@ describe("ship server plugin", () => {
       pluginVersion: "0.1.0",
       botConfigured: true,
       botLogin: "cloudroom-ship-bot",
+      webhookConfigured: false,
+      webhookPath: "/api/v1/plugins/ship/http/webhook/github",
       defaultReviewMode: "triad",
       defaultReviewEffort: "high",
       pollIntervalSeconds: 120,

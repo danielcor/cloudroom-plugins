@@ -10,7 +10,11 @@ import {
   reviewEffortSchema,
   reviewModeSchema,
   rpcContract,
+  type ApprovalRunSummary,
   type RepoConfig,
+  type ReviewFindingSummary,
+  type ReviewMode,
+  type ReviewRunSummary,
   type ShipStatus,
   type WatchRecord,
 } from "./src/contract.js";
@@ -18,7 +22,16 @@ import { createCloudroomClassifierExecutor, type ClassifierExecutor } from "./sr
 import { evaluateApprovalsPolicy, evaluateDevAutoMergeGuard } from "./src/approvals/evaluator.js";
 import { computePolicyBundleSha, loadAndValidateClassifiers, parseApprovalsPolicy } from "./src/approvals/parser.js";
 import { reportApprovalDecision, type ApprovalReportResult } from "./src/approvals/reporter.js";
-import { MIGRATIONS, ShipStore, toPublicWatchRecord, type RepoDefaults } from "./src/db.js";
+import {
+  MIGRATIONS,
+  ShipStore,
+  toPublicWatchRecord,
+  type ApprovalRunRecord,
+  type RepoDefaults,
+  type ReviewFindingRecord,
+  type ReviewRunRecord,
+} from "./src/db.js";
+import { formatGateReceipt } from "./src/gates/container-gates.js";
 import { GitHubBotClient } from "./src/github/bot.js";
 import { fetchPrDiscussion, type FilteredPrDiscussion } from "./src/github/comments.js";
 import { runShipPublish, type ShipPublishResult } from "./src/publish/publisher.js";
@@ -30,21 +43,31 @@ import {
   type ThreadSettlementEvent,
 } from "./src/review/runner.js";
 import { ReviewerGatekeeper } from "./src/review/types.js";
+import { runProcess } from "./src/safety/git-exec.js";
 import { isNeverEditPath, isSecretFilename } from "./src/safety/never-edit.js";
+import { SHIP_MARKER_PREFIX, validateCommentText } from "./src/safety/outbound-text.js";
 import { StewardWorkerGatekeeper } from "./src/steward/gatekeeper.js";
 import { StewardPoller, type DiscoveredPrCandidate } from "./src/steward/poller.js";
+import { MAX_BEHIND_MERGES } from "./src/steward/state-machine.js";
 import { registerStewardTools } from "./src/steward/tools.js";
+import { SUPPORTED_GITHUB_WEBHOOK_EVENTS, verifyGitHubWebhookSignature } from "./src/webhook.js";
 
 export const PLUGIN_VERSION = "0.1.0";
 export const STEWARD_TERMS_KV_KEY = "steward_terms_accepted_at";
+export const SHIP_WEBHOOK_PATH = "/api/v1/plugins/ship/http/webhook/github";
 
 const POSITIVE_INT_SCHEMA = z.number().int();
+
+export type CloudSpawnExec = (
+  args: readonly string[],
+) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 export interface ShipServerDeps {
   nowMs?: () => number;
   fetchImpl?: typeof fetch;
   minDwellMs?: number;
   execDispatch?: DispatchExec;
+  execCloudSpawn?: CloudSpawnExec;
   seatTimeoutMs?: number;
   classifierExecutor?: ClassifierExecutor;
   pollIntervalMs?: number;
@@ -102,6 +125,12 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
       description: "Cap on Steward push rounds for a single failing check, conflict, or comment.",
       experimental_schema: POSITIVE_INT_SCHEMA.min(1).max(10),
       default: 3,
+    },
+    webhookSecret: {
+      type: "string",
+      label: "GitHub webhook secret",
+      description: "Optional HMAC-SHA256 secret for instant GitHub webhook wakeups at /api/v1/plugins/ship/http/webhook/github.",
+      secret: true,
     },
   });
 
@@ -247,6 +276,8 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
         pluginVersion: PLUGIN_VERSION,
         botConfigured: typeof s.botToken === "string" && s.botToken.trim().length > 0,
         botLogin: (s.botLogin ?? "").trim(),
+        webhookConfigured: typeof s.webhookSecret === "string" && s.webhookSecret.trim().length > 0,
+        webhookPath: SHIP_WEBHOOK_PATH,
         defaultReviewMode,
         defaultReviewEffort,
         pollIntervalSeconds,
@@ -383,43 +414,131 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
     return toPublicWatchRecord(updated);
   }
 
-  bb.rpc.register(rpcContract, {
-    status: async () => (await currentDefaults()).status,
-    listRepos: async () => store.listRepos(),
-    upsertRepo: async (input) => {
-      const { repoDefaults } = await currentDefaults();
-      const updated = store.upsertRepo(input, repoDefaults);
-      store.appendAudit({
-        actor: "rpc",
-        action: "repo.upsert",
-        outcome: "ok",
-        detail: { repo: updated.repo, reviewMode: updated.reviewMode, approvalsMode: updated.approvalsMode },
-      });
-      return updated;
-    },
-    listWatches: async (input) => store.listWatches(input),
-    controlWatch: async (input) => applyWatchControl(input.id, input.action, "rpc"),
-    listAudit: async (input) => store.listAudit(input),
-  });
+  function parseStringArrayJson(raw: string): string[] {
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  }
 
-  async function startStewardWatch(
-    ctx: PluginCliContext,
-    options: {
-      path?: string;
-      host?: string;
-      project?: string;
-      repo?: string;
-      pr?: number;
-      remote?: string;
-      base?: string;
-      "accept-terms"?: boolean;
-      json?: boolean;
-    },
-  ) {
+  function toReviewRunSummary(row: ReviewRunRecord): ReviewRunSummary {
+    const parsedMode = reviewModeSchema.catch("triad").parse(row.mode);
+    return {
+      id: row.id,
+      watchId: row.watchId,
+      repo: row.repo,
+      prNumber: row.prNumber,
+      headSha: row.headSha,
+      mode: parsedMode as ReviewMode,
+      round: row.round,
+      seats: parseStringArrayJson(row.seatsJson),
+      verdict: row.verdict,
+      meanScore: row.meanScore,
+      createdAt: row.createdAt,
+    };
+  }
+
+  function toReviewFindingSummary(row: ReviewFindingRecord): ReviewFindingSummary {
+    return {
+      id: row.id,
+      reviewRunId: row.reviewRunId,
+      severity: row.severity,
+      file: row.file,
+      line: row.line,
+      claim: row.claim,
+      raisers: parseStringArrayJson(row.raisersJson),
+      status: row.status,
+      resolutionSha: row.resolutionSha,
+    };
+  }
+
+  function toApprovalRunSummary(row: ApprovalRunRecord): ApprovalRunSummary {
+    let verdict = "comment";
+    let requiredSeats = 1;
+    let matchedRuleIds: string[] = [];
+    let classifierErrors: string[] = [];
+    try {
+      const parsed = JSON.parse(row.verdictJson) as {
+        verdict?: unknown;
+        requiredSeats?: unknown;
+        matchedRuleIds?: unknown;
+        classifierErrors?: unknown;
+      };
+      if (typeof parsed.verdict === "string") verdict = parsed.verdict;
+      if (typeof parsed.requiredSeats === "number" && Number.isFinite(parsed.requiredSeats)) {
+        requiredSeats = parsed.requiredSeats;
+      }
+      if (Array.isArray(parsed.matchedRuleIds)) {
+        matchedRuleIds = parsed.matchedRuleIds.filter((x): x is string => typeof x === "string");
+      }
+      if (Array.isArray(parsed.classifierErrors)) {
+        classifierErrors = parsed.classifierErrors.filter((x): x is string => typeof x === "string");
+      }
+    } catch {
+      // Keep safe defaults for legacy/malformed rows.
+    }
+    return {
+      id: row.id,
+      repo: row.repo,
+      prNumber: row.prNumber,
+      headSha: row.headSha,
+      policySha: row.policySha,
+      mode: approvalsModeSchema.catch("observe").parse(row.mode),
+      verdict,
+      requiredSeats,
+      matchedRuleIds,
+      classifierErrors,
+      statusPosted: row.statusPosted,
+      reviewPosted: row.reviewPosted,
+      createdAt: row.createdAt,
+    };
+  }
+
+  async function resolveProjectForRepo(repoSlug: string): Promise<{
+    hostId?: string;
+    root?: string;
+    projectId?: string;
+  }> {
+    const shortName = repoSlug.split("/")[1]?.toLowerCase() ?? "";
+    if (!shortName) return {};
+    try {
+      const projects = await bb.sdk.projects.list();
+      for (const proj of projects) {
+        const src = proj.sources.find((s) => s.isDefault) ?? proj.sources[0];
+        if (!src) continue;
+        const pathTail = src.path?.replace(/\/+$/u, "").split("/").pop()?.toLowerCase() ?? "";
+        if (proj.name.toLowerCase() === shortName || pathTail === shortName) {
+          return {
+            ...(src.hostId ? { hostId: src.hostId } : {}),
+            ...(src.path ? { root: src.path } : {}),
+            projectId: proj.id,
+          };
+        }
+      }
+    } catch {
+      // Fall back to explicit overrides.
+    }
+    return {};
+  }
+
+  async function createOrReuseWatch(params: {
+    actor: "cli" | "rpc";
+    ctx: PluginCliContext;
+    host?: string;
+    path?: string;
+    project?: string;
+    repo?: string;
+    pr?: number;
+    remote?: string;
+    base?: string;
+    acceptTerms?: boolean;
+  }): Promise<{ alreadyWatching: boolean; watch: WatchRecord }> {
     const nowMs = (deps.nowMs ?? Date.now)();
     let acceptedAt = await bb.storage.kv.get<number>(STEWARD_TERMS_KV_KEY);
     if (!acceptedAt) {
-      if (options["accept-terms"]) {
+      if (params.acceptTerms) {
         acceptedAt = nowMs;
         await bb.storage.kv.set(STEWARD_TERMS_KV_KEY, acceptedAt);
       } else {
@@ -430,39 +549,44 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
       }
     }
 
-    if (options.repo) {
-      const parsedRepo = repoSlugSchema.safeParse(options.repo);
+    if (params.repo) {
+      const parsedRepo = repoSlugSchema.safeParse(params.repo);
       if (!parsedRepo.success) {
-        throw new PluginCliError(`Invalid repository "${options.repo}": expected owner/repo.`, {
+        throw new PluginCliError(`Invalid repository "${params.repo}": expected owner/repo.`, {
           code: "invalid_repo",
         });
       }
     }
 
+    const inferred =
+      params.repo && (!params.path || !params.host)
+        ? await resolveProjectForRepo(params.repo)
+        : {};
+
     const { hostId, root, projectId } = await resolveHostAndRoot(
-      ctx,
-      options.host,
-      options.path,
-      options.project,
+      params.ctx,
+      params.host ?? inferred.hostId,
+      params.path ?? inferred.root,
+      params.project ?? inferred.projectId,
     );
 
     const inspectCtx = await hostClient.call(
       "inspectPublishContext",
       {
         root,
-        ...(options.remote ? { remote: options.remote } : {}),
-        ...(options.base ? { baseBranch: options.base } : {}),
+        ...(params.remote ? { remote: params.remote } : {}),
+        ...(params.base ? { baseBranch: params.base } : {}),
       },
       { hostId },
     );
 
-    const repo = options.repo ?? inspectCtx.repoMeta?.slug ?? null;
+    const repo = params.repo ?? inspectCtx.repoMeta?.slug ?? null;
     if (!repo) {
       throw new PluginCliError("Could not determine GitHub repository. Pass --repo <owner/repo>.", {
         code: "no_repo",
       });
     }
-    const prNumber = options.pr ?? inspectCtx.existingPr?.number ?? null;
+    const prNumber = params.pr ?? inspectCtx.existingPr?.number ?? null;
     if (!prNumber) {
       throw new PluginCliError(
         "No open PR found for the current branch. Pass --pr <number> or publish with `room-cli ship publish` first.",
@@ -487,11 +611,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
 
     const existing = store.getActiveWatchByRepoPr(repo, prNumber);
     if (existing) {
-      const pub = toPublicWatchRecord(existing);
-      if (options.json) {
-        return { exitCode: 0, stdout: `${JSON.stringify({ alreadyWatching: true, watch: pub }, null, 2)}\n` };
-      }
-      return { exitCode: 0, stdout: `Already watching ${repo}#${prNumber} (${existing.id}, state=${existing.state})\n` };
+      return { alreadyWatching: true, watch: toPublicWatchRecord(existing) };
     }
 
     const pinSnap = await hostClient.call("computePins", { root }, { hostId });
@@ -512,7 +632,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
       prNumber,
       headBranch: polled.discussion.pr.headRefName,
       headRemote: inspectCtx.remoteName || "origin",
-      baseBranch: options.base?.trim() || polled.discussion.pr.baseRefName,
+      baseBranch: params.base?.trim() || polled.discussion.pr.baseRefName,
       baseRemote: inspectCtx.remoteName || "origin",
       authorLogin: polled.discussion.pr.authorLogin,
       state: "watching",
@@ -533,20 +653,235 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
 
     store.appendAudit({
       watchId,
-      actor: "cli",
+      actor: params.actor,
       action: "steward.started",
       outcome: "ok",
       detail: { repo, prNumber, headBranch: created.headBranch, baseBranch: created.baseBranch },
     });
     publishWatchesSignal({ type: "watch.created", watchId, state: "watching" });
 
-    const pub = toPublicWatchRecord(created);
+    return { alreadyWatching: false, watch: toPublicWatchRecord(created) };
+  }
+
+  bb.rpc.register(rpcContract, {
+    status: async () => (await currentDefaults()).status,
+    listRepos: async () => store.listRepos(),
+    upsertRepo: async (input) => {
+      const { repoDefaults } = await currentDefaults();
+      const updated = store.upsertRepo(input, repoDefaults);
+      store.appendAudit({
+        actor: "rpc",
+        action: "repo.upsert",
+        outcome: "ok",
+        detail: { repo: updated.repo, reviewMode: updated.reviewMode, approvalsMode: updated.approvalsMode },
+      });
+      return updated;
+    },
+    listWatches: async (input) => store.listWatches(input),
+    getWatchDetail: async ({ id }) => {
+      const full = store.getWatch(id);
+      if (!full) {
+        throw new Error(`Watch "${id}" was not found.`);
+      }
+      const { repoDefaults } = await currentDefaults();
+      const repoCfg = store.getRepo(full.repo);
+      const latestRevRow = store.getLastReviewRun(full.repo, full.prNumber);
+      const latestReview = latestRevRow ? toReviewRunSummary(latestRevRow) : null;
+      const findings = latestRevRow
+        ? store.listReviewFindings(latestRevRow.id).map(toReviewFindingSummary)
+        : [];
+      const latestAprRow = store.getLatestApprovalRun(full.repo, full.prNumber);
+      const latestApproval = latestAprRow ? toApprovalRunSummary(latestAprRow) : null;
+      const audits = store.listAudit({ watchId: id, limit: 25 });
+
+      return {
+        watch: toPublicWatchRecord(full),
+        budgets: {
+          causePushCounts: full.causePushCounts,
+          maxPushesPerCause: repoCfg?.maxPushesPerCause ?? repoDefaults.maxPushesPerCause,
+          behindMergesCount: full.behindMergesCount,
+          maxBehindMerges: MAX_BEHIND_MERGES,
+          rerunJobIds: full.rerunJobIds,
+          pinsCount: Object.keys(full.pins).length,
+          trustedBots: full.trustedBots,
+          seenCommentsCount: full.seenCommentIds.length,
+        },
+        latestReview,
+        findings,
+        latestApproval,
+        audits,
+      };
+    },
+    startWatch: async (input) =>
+      createOrReuseWatch({
+        actor: "rpc",
+        ctx: { cwd: input.worktreePath, projectId: input.projectId },
+        host: input.hostId,
+        path: input.worktreePath,
+        project: input.projectId,
+        repo: input.repo,
+        pr: input.prNumber,
+        base: input.baseBranch,
+        acceptTerms: input.acceptTerms,
+      }),
+    controlWatch: async (input) => applyWatchControl(input.id, input.action, "rpc"),
+    listReviewRuns: async (input) => store.listReviewRuns(input).map(toReviewRunSummary),
+    listApprovalRuns: async (input) => store.listApprovalRuns(input).map(toApprovalRunSummary),
+    listAudit: async (input) => store.listAudit(input),
+    verifyBot: async () => {
+      const s = await settings.get();
+      const configuredLogin = (s.botLogin ?? "").trim();
+      const bot = await currentBotClient();
+      if (!bot) {
+        return {
+          configured: false,
+          ok: false,
+          configuredLogin,
+          login: null,
+          viewerId: null,
+          loginMatches: null,
+          error: "GitHub botToken is not configured.",
+        };
+      }
+      try {
+        const viewer = await bot.getViewerLogin();
+        const loginMatches =
+          configuredLogin === "" ? null : viewer.login.toLowerCase() === configuredLogin.toLowerCase();
+        return {
+          configured: true,
+          ok: true,
+          configuredLogin,
+          login: viewer.login,
+          viewerId: viewer.id,
+          loginMatches,
+          error: null,
+        };
+      } catch (err) {
+        return {
+          configured: true,
+          ok: false,
+          configuredLogin,
+          login: null,
+          viewerId: null,
+          loginMatches: null,
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+    getThreadWatch: async (input) => {
+      let full = store.getWatchByWorkerThreadId(input.threadId);
+      if (!full && input.projectId) {
+        full =
+          store
+            .listFullWatches({ activeOnly: true, limit: 100 })
+            .find((w) => w.projectId === input.projectId) ?? null;
+      }
+      if (!full) {
+        return {
+          watch: null,
+          latestReviewVerdict: null,
+          latestReviewScore: null,
+          latestApprovalVerdict: null,
+        };
+      }
+      const latestRev = store.getLastReviewRun(full.repo, full.prNumber);
+      const latestApr = store.getLatestApprovalRun(full.repo, full.prNumber);
+      const aprSummary = latestApr ? toApprovalRunSummary(latestApr) : null;
+      return {
+        watch: toPublicWatchRecord(full),
+        latestReviewVerdict: latestRev?.verdict ?? null,
+        latestReviewScore: latestRev?.meanScore ?? null,
+        latestApprovalVerdict: aprSummary?.verdict ?? null,
+      };
+    },
+  });
+
+  bb.http.route(
+    "POST",
+    "/webhook/github",
+    async (c) => {
+      const s = await settings.get();
+      const secret = typeof s.webhookSecret === "string" ? s.webhookSecret.trim() : "";
+      if (!secret) {
+        return c.json({ ok: false, error: "webhook_not_configured" }, 503);
+      }
+
+      const rawBody = await c.req.text();
+      const sigHeader = c.req.header("x-hub-signature-256");
+      const event = (c.req.header("x-github-event") ?? "").trim().toLowerCase();
+
+      if (!verifyGitHubWebhookSignature(rawBody, sigHeader, secret)) {
+        store.appendAudit({
+          actor: "webhook",
+          action: "webhook.rejected",
+          outcome: "error",
+          detail: { event: event || "unknown" },
+        });
+        return c.json({ ok: false, error: "invalid_signature" }, 401);
+      }
+
+      if (event === "ping") {
+        return c.json({ ok: true, event: "ping", triggered: false }, 200);
+      }
+
+      if (SUPPORTED_GITHUB_WEBHOOK_EVENTS.has(event)) {
+        store.appendAudit({
+          actor: "webhook",
+          action: "webhook.received",
+          outcome: "ok",
+          detail: { event },
+        });
+        void poller.tickOnce().catch((err) => {
+          bb.log?.error?.(
+            `Webhook-triggered poll failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+        return c.json({ ok: true, event, triggered: true }, 202);
+      }
+
+      return c.json({ ok: true, event: event || "unknown", triggered: false }, 200);
+    },
+    { auth: "none" },
+  );
+
+  async function startStewardWatch(
+    ctx: PluginCliContext,
+    options: {
+      path?: string;
+      host?: string;
+      project?: string;
+      repo?: string;
+      pr?: number;
+      remote?: string;
+      base?: string;
+      "accept-terms"?: boolean;
+      json?: boolean;
+    },
+  ) {
+    const res = await createOrReuseWatch({
+      actor: "cli",
+      ctx,
+      host: options.host,
+      path: options.path,
+      project: options.project,
+      repo: options.repo,
+      pr: options.pr,
+      remote: options.remote,
+      base: options.base,
+      acceptTerms: options["accept-terms"],
+    });
     if (options.json) {
-      return { exitCode: 0, stdout: `${JSON.stringify({ alreadyWatching: false, watch: pub }, null, 2)}\n` };
+      return { exitCode: 0, stdout: `${JSON.stringify(res, null, 2)}\n` };
+    }
+    if (res.alreadyWatching) {
+      return {
+        exitCode: 0,
+        stdout: `Already watching ${res.watch.repo}#${res.watch.prNumber} (${res.watch.id}, state=${res.watch.state})\n`,
+      };
     }
     return {
       exitCode: 0,
-      stdout: `Started watch ${watchId} for ${repo}#${prNumber} (${created.headBranch} -> ${created.baseBranch})\n`,
+      stdout: `Started watch ${res.watch.id} for ${res.watch.repo}#${res.watch.prNumber} (${res.watch.headBranch} -> ${res.watch.baseBranch})\n`,
     };
   }
 
@@ -1352,6 +1687,8 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
               diffText: approvalCtx.diffText,
               store,
               executor,
+              sandboxGateReceipt: approvalCtx.sandboxGateReceipt ?? null,
+              hasCloudroomBootstrap: approvalCtx.containerGates?.hasBootstrapCloudroom ?? false,
               nowMs,
             });
 
@@ -1463,6 +1800,9 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
                 classifierErrors: decision.classifierErrors,
                 classifierCallCount: decision.classifierCallCount,
                 classifierCacheHits: decision.classifierCacheHits,
+                gateSource: decision.facts.gateSource,
+                gateSatisfied: decision.facts.gateSatisfied,
+                sandboxGateReceipt: decision.facts.sandboxGateReceipt,
                 ruleResults: decision.ruleResults,
               },
               report,
@@ -1477,7 +1817,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
             }
 
             const lines = [
-              `Approvals (${effectiveMode}) for ${repo}#${prNumber}@${decision.headSha.slice(0, 7)}: verdict=${decision.verdict}, seats=${decision.requiredSeats}`,
+              `Approvals (${effectiveMode}) for ${repo}#${prNumber}@${decision.headSha.slice(0, 7)}: verdict=${decision.verdict}, seats=${decision.requiredSeats}, gate=${decision.facts.gateSource}`,
               `Matched rules: ${decision.matchedRuleIds.join(", ") || "(default_action)"}`,
               ...(decision.classifierErrors.length > 0
                 ? [`Classifier errors: ${decision.classifierErrors.join("; ")}`]
@@ -1491,6 +1831,392 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
               ...(mergeResult.attempted
                 ? [`Dev auto-merge result: ${mergeResult.merged ? "merged" : `failed (${mergeResult.error})`}`]
                 : []),
+            ];
+            return { exitCode, stdout: `${lines.join("\n")}\n` };
+          },
+        }),
+        "gate inspect": cliCommand({
+          summary: "Inspect container merge-guard gate scripts, Kiri runners, and Cloud sandbox status.",
+          options: {
+            host: { type: "string", description: "Cloudroom host id or name." },
+            path: { type: "string", description: "Absolute path to git checkout on the target host." },
+            base: { type: "string", description: "Target base branch (e.g. dev or main)." },
+            repo: { type: "string", description: "GitHub repository (owner/repo) override." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ options }, ctx) {
+            if (options.repo) {
+              const parsedRepo = repoSlugSchema.safeParse(options.repo);
+              if (!parsedRepo.success) {
+                throw new PluginCliError(`Invalid repository "${options.repo}": expected owner/repo.`, {
+                  code: "invalid_repo",
+                });
+              }
+            }
+            const { hostId, root } = await resolveHostAndRoot(ctx, options.host, options.path);
+            let repoSlug = options.repo;
+            if (!repoSlug) {
+              const pubCtx = await hostClient
+                .call("inspectPublishContext", { root }, { hostId })
+                .catch(() => null);
+              repoSlug = pubCtx?.repoMeta?.slug ?? undefined;
+            }
+            const plan = await hostClient.call(
+              "inspectContainerGates",
+              {
+                root,
+                ...(options.base ? { baseBranch: options.base } : {}),
+                ...(repoSlug ? { repoSlug } : {}),
+              },
+              { hostId },
+            );
+            if (options.json) {
+              return { exitCode: 0, stdout: `${JSON.stringify({ hostId, root, repoSlug: repoSlug ?? null, ...plan }, null, 2)}\n` };
+            }
+            const lines = [
+              `Container gates (${plan.repoKind}): sandbox=${plan.inCloudSandbox} supportedForBase=${plan.supportedForBase}`,
+              `Scripts: bootstrap=${plan.bootstrapScriptPath ?? "none"}, merge-eligibility=${plan.mergeEligibilityScriptPath ?? "none"}, kiri=${plan.hasKiriRunner ? plan.kiriFiles.join(", ") : "none"}`,
+              ...(plan.unsupportedReason ? [`Restriction: ${plan.unsupportedReason}`] : []),
+              ...(plan.recommendedGateCommand ? [`Recommended command: ${plan.recommendedGateCommand}`] : []),
+            ];
+            return { exitCode: 0, stdout: `${lines.join("\n")}\n` };
+          },
+        }),
+        "gate eligibility": cliCommand({
+          summary: "Check deterministic conflict-only merge eligibility for a PR via scripts/ci/merge-eligibility.sh.",
+          positionals: [{ name: "pr", description: "Pull request number.", required: true }],
+          options: {
+            host: { type: "string", description: "Cloudroom host id or name." },
+            path: { type: "string", description: "Absolute path to git checkout on the target host." },
+            base: { type: "string", description: "Optional base branch ref." },
+            repo: { type: "string", description: "Optional GitHub repository (owner/repo)." },
+            policy: {
+              type: "enum",
+              values: ["conflict-only", "strict"],
+              description: "Behind policy mode (default conflict-only).",
+            },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ positionals, options }, ctx) {
+            if (!/^[1-9]\d*$/u.test(positionals.pr)) {
+              throw new PluginCliError(`Invalid PR number "${positionals.pr}".`, { code: "invalid_pr_number" });
+            }
+            const prNumber = Number.parseInt(positionals.pr, 10);
+            if (options.repo) {
+              const parsedRepo = repoSlugSchema.safeParse(options.repo);
+              if (!parsedRepo.success) {
+                throw new PluginCliError(`Invalid repository "${options.repo}": expected owner/repo.`, {
+                  code: "invalid_repo",
+                });
+              }
+            }
+            const { hostId, root } = await resolveHostAndRoot(ctx, options.host, options.path);
+            const result = await hostClient.call(
+              "runMergeEligibility",
+              {
+                root,
+                prNumber,
+                ...(options.base ? { baseRef: options.base } : {}),
+                ...(options.repo ? { repo: options.repo } : {}),
+                behindPolicy: options.policy ?? "conflict-only",
+              },
+              { hostId },
+            );
+            const exitCode = result.scriptFound ? 0 : 1;
+            if (options.json) {
+              return { exitCode, stdout: `${JSON.stringify(result, null, 2)}\n` };
+            }
+            if (!result.scriptFound) {
+              return { exitCode: 1, stderr: `Merge eligibility check unavailable: ${result.error}\n` };
+            }
+            return {
+              exitCode: 0,
+              stdout: `PR #${prNumber} eligibility: eligible=${result.eligible}, conflictFree=${result.conflictFree}, sharedContractOverlap=${result.sharedContractOverlap}, reason=${result.reason ?? "none"}\n`,
+            };
+          },
+        }),
+        "gate run": cliCommand({
+          summary: "Run the repository container merge-guard gate inside a Cloudroom Cloud sandbox (or spawn a Cloud child with --cloud).",
+          options: {
+            host: { type: "string", description: "Cloudroom host id or name." },
+            path: { type: "string", description: "Absolute path to git checkout on the target host." },
+            project: { type: "string", description: "Cloudroom project id for spawning a Cloud sandbox thread." },
+            repo: { type: "string", description: "GitHub repository (owner/repo)." },
+            pr: { type: "integer", min: 1, max: 9_999_999, description: "Optional pull request number for posting a Gate receipt." },
+            base: { type: "string", description: "Target base branch (defaults to PR base or dev/main)." },
+            branch: { type: "string", description: "Head branch name to check out in --cloud mode." },
+            mode: {
+              type: "enum",
+              values: ["smoke", "full"],
+              description: "Container gate depth (smoke or full; default smoke).",
+            },
+            cloud: { type: "boolean", description: "Spawn an ephemeral Cloudroom Cloud sandbox child thread instead of running on the current host." },
+            provider: { type: "string", description: "Agent provider id for --cloud spawn (default codex)." },
+            post: { type: "boolean", description: "Post canonical Gate receipt to the PR via botToken." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ options }, ctx) {
+            if (options.repo) {
+              const parsedRepo = repoSlugSchema.safeParse(options.repo);
+              if (!parsedRepo.success) {
+                throw new PluginCliError(`Invalid repository "${options.repo}": expected owner/repo.`, {
+                  code: "invalid_repo",
+                });
+              }
+            }
+            const { hostId, root, projectId } = await resolveHostAndRoot(
+              ctx,
+              options.host,
+              options.path,
+              options.project,
+            );
+            const checkout = await hostClient.call("inspectCheckout", { root }, { hostId });
+            const pubCtx = await hostClient
+              .call("inspectPublishContext", { root }, { hostId })
+              .catch(() => null);
+            const repoSlug = options.repo ?? pubCtx?.repoMeta?.slug ?? null;
+            if (!repoSlug) {
+              throw new PluginCliError("Could not determine GitHub repository. Pass --repo <owner/repo>.", {
+                code: "no_repo",
+              });
+            }
+            const headSha = checkout.headSha ?? "";
+            if (!/^[0-9a-f]{40}$/u.test(headSha)) {
+              throw new PluginCliError("Checkout has no valid 40-char HEAD commit SHA.", {
+                code: "no_head_sha",
+              });
+            }
+            const baseBranch =
+              options.base?.trim() ||
+              pubCtx?.existingPr?.baseRefName ||
+              pubCtx?.repoMeta?.defaultBranch ||
+              "dev";
+            const headBranch = options.branch?.trim() || checkout.branch || pubCtx?.existingPr?.headRefName || null;
+
+            const gates = await hostClient.call(
+              "inspectContainerGates",
+              { root, baseBranch, repoSlug },
+              { hostId },
+            );
+
+            if (!gates.hasBootstrapCloudroom) {
+              const errMsg = "scripts/ci/bootstrap-cloudroom.sh not found in repository checkout.";
+              if (options.json) {
+                return { exitCode: 1, stdout: `${JSON.stringify({ status: "no_bootstrap", error: errMsg, gates }, null, 2)}\n` };
+              }
+              return { exitCode: 1, stderr: `${errMsg}\n` };
+            }
+            if (!gates.supportedForBase || !gates.recommendedGateCommand) {
+              const errMsg = gates.unsupportedReason ?? `Container gate unsupported for base branch "${baseBranch}".`;
+              if (options.json) {
+                return { exitCode: 1, stdout: `${JSON.stringify({ status: "unsupported_base", error: errMsg, gates }, null, 2)}\n` };
+              }
+              return { exitCode: 1, stderr: `${errMsg}\n` };
+            }
+
+            // Refuse running container bootstrap on a non-container host unless explicitly delegating via --cloud.
+            if (!gates.inCloudSandbox || options.cloud) {
+              if (!options.cloud) {
+                const payload = {
+                  status: "refused_non_container",
+                  inCloudSandbox: false,
+                  repo: repoSlug,
+                  baseBranch,
+                  headSha,
+                  recommendedGateCommand: gates.recommendedGateCommand,
+                  hint: "Re-run with --cloud (after pushing the branch) or execute inside a Cloudroom Cloud sandbox thread.",
+                };
+                if (options.json) {
+                  return { exitCode: 1, stdout: `${JSON.stringify(payload, null, 2)}\n` };
+                }
+                return {
+                  exitCode: 1,
+                  stderr: `Refused to run bootstrap-cloudroom.sh on non-container host. ${payload.hint}\n`,
+                };
+              }
+
+              if (!headBranch) {
+                throw new PluginCliError("Cannot launch --cloud gate from detached HEAD without --branch.", {
+                  code: "no_branch",
+                });
+              }
+
+              const provider = options.provider?.trim() || "codex";
+              const gateMode = options.mode ?? "smoke";
+              const cloudPrompt = [
+                `Run the Cloudroom Cloud sandbox merge-guard gate (${gateMode}) for ${repoSlug} branch ${headBranch} targeting base ${baseBranch} (expected commit ${headSha}).`,
+                `1. Verify you are inside a Cloudroom Cloud sandbox container (/.dockerenv present, CLOUDROOM_WORKLOAD set) and HEAD matches ${headSha}.`,
+                `2. Execute: ${gates.recommendedGateCommand}`,
+                "3. Return ONLY a concise summary including the exact canonical `Gate receipt` block.",
+              ].join("\n");
+
+              const spawnArgs = [
+                "thread",
+                "spawn",
+                "--machine",
+                "cloud",
+                "--provider",
+                provider,
+                "--base-branch",
+                headBranch,
+                "--title",
+                `ship-gate ${repoSlug}@${headSha.slice(0, 7)}`,
+                ...(projectId ? ["--project", projectId] : []),
+                ...(ctx.threadId ? ["--parent-thread", ctx.threadId] : []),
+                "--prompt",
+                cloudPrompt,
+                "--json",
+              ];
+
+              const execCloudSpawn =
+                deps.execCloudSpawn ??
+                ((args: readonly string[]) =>
+                  runProcess("room-cli", args, { cwd: root, timeoutMs: 30_000 }));
+              const spawnRes = await execCloudSpawn(spawnArgs);
+              if (spawnRes.code !== 0) {
+                const errText = spawnRes.stderr.trim() || spawnRes.stdout.trim() || `room-cli thread spawn exited ${spawnRes.code}`;
+                if (options.json) {
+                  return { exitCode: 1, stdout: `${JSON.stringify({ status: "cloud_spawn_failed", error: errText }, null, 2)}\n` };
+                }
+                return { exitCode: 1, stderr: `Failed to spawn Cloudroom Cloud sandbox gate thread: ${errText}\n` };
+              }
+
+              let threadId: string | null = null;
+              try {
+                const parsed = JSON.parse(spawnRes.stdout) as { id?: unknown; threadId?: unknown; thread?: { id?: unknown } };
+                if (typeof parsed.id === "string") threadId = parsed.id;
+                else if (typeof parsed.threadId === "string") threadId = parsed.threadId;
+                else if (parsed.thread && typeof parsed.thread.id === "string") threadId = parsed.thread.id;
+              } catch {
+                threadId = null;
+              }
+
+              store.appendAudit({
+                actor: "cli",
+                action: "gate.cloud_spawned",
+                outcome: "ok",
+                detail: { repo: repoSlug, baseBranch, headBranch, headSha, threadId, mode: gateMode },
+              });
+
+              const payload = {
+                status: "cloud_spawned",
+                threadId,
+                repo: repoSlug,
+                branch: headBranch,
+                baseBranch,
+                headSha,
+                provider,
+                mode: gateMode,
+                recommendedGateCommand: gates.recommendedGateCommand,
+              };
+              if (options.json) {
+                return { exitCode: 0, stdout: `${JSON.stringify(payload, null, 2)}\n` };
+              }
+              return {
+                exitCode: 0,
+                stdout: `Spawned Cloudroom Cloud sandbox gate thread ${threadId ?? "(pending)"} for ${repoSlug}@${headSha.slice(0, 7)} (base ${baseBranch}).\n`,
+              };
+            }
+
+            const hosts = await bb.sdk.hosts.list().catch(() => []);
+            const hostName = hosts.find((h) => h.id === hostId)?.name ?? hostId;
+            const runRes = await hostClient.call(
+              "runContainerGate",
+              {
+                root,
+                repoSlug,
+                baseBranch,
+                headSha,
+                mode: options.mode ?? "smoke",
+                hostLabel: hostName,
+              },
+              { hostId },
+            );
+
+            store.appendAudit({
+              actor: "cli",
+              action: "gate.run",
+              outcome: runRes.passed ? "pass" : runRes.refused ? "refused" : "fail",
+              detail: {
+                repo: repoSlug,
+                baseBranch,
+                headSha,
+                exitCode: runRes.exitCode,
+                wallSeconds: runRes.wallSeconds,
+                passed: runRes.passed,
+              },
+            });
+
+            const formattedReceipt = runRes.receipt
+              ? formatGateReceipt({
+                  repo: runRes.receipt.repo,
+                  base: runRes.receipt.base,
+                  commit: runRes.receipt.commit,
+                  gate: runRes.receipt.gate,
+                  result: runRes.receipt.result,
+                  passedCount: runRes.receipt.passedCount,
+                  failedCount: runRes.receipt.failedCount,
+                  skippedCount: runRes.receipt.skippedCount,
+                  wall: runRes.receipt.wall ?? `${runRes.wallSeconds}s`,
+                  host: runRes.receipt.host ?? `cloudroom-sandbox (${hostName})`,
+                  bootstrap: runRes.receipt.bootstrap ?? "scripts/ci/bootstrap-cloudroom.sh",
+                  notRun: runRes.receipt.notRun ?? "none",
+                })
+              : null;
+
+            let postedCommentId: number | null = null;
+            let postError: string | null = null;
+            const prNum = options.pr ?? pubCtx?.existingPr?.number ?? null;
+            if (options.post && formattedReceipt && prNum) {
+              const bot = await currentBotClient();
+              if (!bot) {
+                postError = "GitHub botToken is not configured.";
+              } else {
+                const commentBody = `${SHIP_MARKER_PREFIX} -->\n${formattedReceipt}`;
+                const textOk = validateCommentText(commentBody);
+                if (!textOk.ok) {
+                  postError = `Outbound validation blocked Gate receipt: ${textOk.reason}`;
+                } else {
+                  const secCheck = await hostClient.call(
+                    "scanOutboundForLocalSecrets",
+                    { root, text: commentBody },
+                    { hostId },
+                  );
+                  if (!secCheck.ok) {
+                    postError = `Local secret match blocked Gate receipt post (${secCheck.matchedSource}).`;
+                  } else {
+                    try {
+                      const posted = await bot.postIssueComment(repoSlug, prNum, commentBody);
+                      postedCommentId = posted.id;
+                    } catch (err) {
+                      postError = err instanceof Error ? err.message : String(err);
+                    }
+                  }
+                }
+              }
+            }
+
+            const exitCode = runRes.ok && runRes.passed && !postError ? 0 : 1;
+            const payload = {
+              status: runRes.refused ? "refused" : runRes.passed ? "passed" : "failed",
+              repo: repoSlug,
+              baseBranch,
+              headSha,
+              prNumber: prNum,
+              ...runRes,
+              formattedReceipt,
+              postedCommentId,
+              postError,
+            };
+            if (options.json) {
+              return { exitCode, stdout: `${JSON.stringify(payload, null, 2)}\n` };
+            }
+            const lines = [
+              `Container gate ${payload.status} for ${repoSlug}@${headSha.slice(0, 7)} (${runRes.wallSeconds}s)`,
+              ...(formattedReceipt ? ["", formattedReceipt] : []),
+              ...(postedCommentId ? [`Posted Gate receipt comment id=${postedCommentId}`] : []),
+              ...(postError ? [`Post error: ${postError}`] : []),
+              ...(runRes.error ? [`Error: ${runRes.error}`] : []),
             ];
             return { exitCode, stdout: `${lines.join("\n")}\n` };
           },

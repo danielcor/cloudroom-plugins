@@ -1,3 +1,4 @@
+import type { ContainerGateInspectionOutput } from "../contract.js";
 import type { WatchFullRecord } from "../db.js";
 import { MAX_BEHIND_MERGES, MAX_RERUNS_PER_JOB, type PollTransitionAction } from "./state-machine.js";
 
@@ -17,9 +18,10 @@ export function buildStewardWakePrompt(input: {
   watch: WatchFullRecord;
   transition: Extract<PollTransitionAction, { type: "wake_worker" }>;
   repoSkill: { found: boolean; sourcePath: string | null; content: string | null } | null;
+  containerGates?: ContainerGateInspectionOutput | null;
   maxPushesPerCause: number;
 }): string {
-  const { watch, transition, repoSkill, maxPushesPerCause } = input;
+  const { watch, transition, repoSkill, containerGates, maxPushesPerCause } = input;
   const usedPushes = watch.causePushCounts[transition.causeKey] ?? 0;
 
   const lines = [
@@ -28,6 +30,17 @@ export function buildStewardWakePrompt(input: {
     `Budgets: pushes for cause=${usedPushes}/${maxPushesPerCause}, base merges=${watch.behindMergesCount}/${MAX_BEHIND_MERGES}, reruns per job<=${MAX_RERUNS_PER_JOB}.`,
     `Merge status: dirty=${transition.isDirty}, behind=${transition.isBehind}.`,
   ];
+
+  if (containerGates && (containerGates.hasBootstrapCloudroom || containerGates.hasMergeEligibilityScript || containerGates.hasKiriRunner)) {
+    lines.push(
+      `Container merge-guard gates: repoKind=${containerGates.repoKind}, inCloudSandbox=${containerGates.inCloudSandbox}, supportedForBase=${containerGates.supportedForBase}, bootstrap=${containerGates.hasBootstrapCloudroom}, mergeEligibility=${containerGates.hasMergeEligibilityScript}, kiriRunner=${containerGates.hasKiriRunner}.`,
+    );
+    if (!containerGates.supportedForBase && containerGates.unsupportedReason) {
+      lines.push(`Container gate restriction: ${containerGates.unsupportedReason}`);
+    } else if (containerGates.inCloudSandbox && containerGates.recommendedGateCommand) {
+      lines.push(`Cloud sandbox gate command: ${containerGates.recommendedGateCommand}`);
+    }
+  }
 
   if (transition.failingChecks.length > 0) {
     lines.push("Failing checks:");

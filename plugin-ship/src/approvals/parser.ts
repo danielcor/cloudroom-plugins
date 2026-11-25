@@ -33,6 +33,7 @@ export const approvalWhenSchema = z
     labels_exclude: z.array(z.string().min(1).max(120)).min(1).max(50).optional(),
     is_draft: z.boolean().optional(),
     ci_green: z.boolean().optional(),
+    gate_receipt_pass: z.boolean().optional(),
     no_never_edit_paths: z.boolean().optional(),
   })
   .strict();

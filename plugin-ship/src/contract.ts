@@ -228,6 +228,83 @@ export const approvalClassifierSourceSchema = z
   })
   .strict();
 
+export const containerGateInspectionSchema = z
+  .object({
+    repoKind: z.enum(["pmzbot", "AiTradingBot", "rust-pmz-copytrading", "generic"]),
+    hasBootstrapCloudroom: z.boolean(),
+    bootstrapScriptPath: z.string().nullable(),
+    hasMergeEligibilityScript: z.boolean(),
+    mergeEligibilityScriptPath: z.string().nullable(),
+    hasKiriRunner: z.boolean(),
+    kiriFiles: z.array(z.string()),
+    inCloudSandbox: z.boolean(),
+    baseBranch: z.string().nullable(),
+    supportedForBase: z.boolean(),
+    unsupportedReason: z.string().nullable(),
+    recommendedGateCommand: z.string().nullable(),
+    containerConstraints: z.array(z.string()),
+  })
+  .strict();
+
+export type ContainerGateInspectionOutput = z.infer<typeof containerGateInspectionSchema>;
+
+export const parsedGateReceiptSchema = z
+  .object({
+    repo: z.string(),
+    base: z.string(),
+    commit: z.string(),
+    gate: z.string(),
+    result: z.enum(["PASS", "FAIL"]),
+    passedCount: z.number().int().nullable(),
+    failedCount: z.number().int().nullable(),
+    skippedCount: z.number().int().nullable(),
+    wall: z.string().nullable(),
+    host: z.string().nullable(),
+    bootstrap: z.string().nullable(),
+    notRun: z.string().nullable(),
+    sourceAuthor: z.string().nullable(),
+    sourceKind: z.string().nullable(),
+  })
+  .strict();
+
+export type ParsedGateReceiptOutput = z.infer<typeof parsedGateReceiptSchema>;
+
+export const mergeEligibilityOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    scriptFound: z.boolean(),
+    eligible: z.boolean(),
+    behind: z.boolean(),
+    behindCount: z.number().int().nullable(),
+    conflictFree: z.boolean(),
+    sharedContractOverlap: z.boolean(),
+    overlapFiles: z.array(z.string()),
+    nondocsOverlap: z.array(z.string()),
+    alwaysOverlapHits: z.array(z.string()),
+    docsOnlyPr: z.boolean(),
+    reason: z.string().nullable(),
+    rawJson: z.string().nullable(),
+    error: z.string().nullable(),
+  })
+  .strict();
+
+export type MergeEligibilityOutput = z.infer<typeof mergeEligibilityOutputSchema>;
+
+export const runContainerGateOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    passed: z.boolean(),
+    refused: z.boolean(),
+    exitCode: z.number().int().nullable(),
+    wallSeconds: z.number(),
+    receipt: parsedGateReceiptSchema.nullable(),
+    outputTail: z.string(),
+    error: z.string().nullable(),
+  })
+  .strict();
+
+export type RunContainerGateOutput = z.infer<typeof runContainerGateOutputSchema>;
+
 export const inspectApprovalContextOutputSchema = z
   .object({
     ok: z.boolean(),
@@ -257,6 +334,8 @@ export const inspectApprovalContextOutputSchema = z
     checkRuns: z.array(polledCheckRunSchema),
     diffText: z.string(),
     diffTruncated: z.boolean(),
+    sandboxGateReceipt: parsedGateReceiptSchema.nullable().optional(),
+    containerGates: containerGateInspectionSchema.nullable().optional(),
   })
   .strict();
 
@@ -535,6 +614,44 @@ export const hostContract = defineRpcContract({
       .strict(),
     output: mergeDevPrOutputSchema,
   },
+  inspectContainerGates: {
+    experimental_retryable: true,
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        baseBranch: z.string().min(1).max(200).optional(),
+        repoSlug: z.string().min(1).max(200).optional(),
+      })
+      .strict(),
+    output: containerGateInspectionSchema,
+  },
+  runMergeEligibility: {
+    experimental_retryable: true,
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        prNumber: z.number().int().positive(),
+        baseRef: z.string().min(1).max(200).optional(),
+        repo: repoSlugSchema.optional(),
+        behindPolicy: z.enum(["conflict-only", "strict"]).optional(),
+      })
+      .strict(),
+    output: mergeEligibilityOutputSchema,
+  },
+  runContainerGate: {
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        repoSlug: z.string().min(1).max(200),
+        baseBranch: z.string().min(1).max(200),
+        headSha: z.string().regex(/^[0-9a-f]{40}$/u),
+        mode: z.enum(["smoke", "full"]).optional(),
+        hostLabel: z.string().max(120).optional(),
+        timeoutMs: z.number().int().min(1000).max(1_800_000).optional(),
+      })
+      .strict(),
+    output: runContainerGateOutputSchema,
+  },
 });
 
 export type ShipHostContract = typeof hostContract;
@@ -612,11 +729,139 @@ export const auditEntrySchema = z
 
 export type AuditEntry = z.infer<typeof auditEntrySchema>;
 
+export const reviewFindingSummarySchema = z
+  .object({
+    id: z.string(),
+    reviewRunId: z.string(),
+    severity: z.string(),
+    file: z.string(),
+    line: z.number().int().nullable(),
+    claim: z.string(),
+    raisers: z.array(z.string()),
+    status: z.string(),
+    resolutionSha: z.string().nullable(),
+  })
+  .strict();
+
+export type ReviewFindingSummary = z.infer<typeof reviewFindingSummarySchema>;
+
+export const reviewRunSummarySchema = z
+  .object({
+    id: z.string(),
+    watchId: z.string().nullable(),
+    repo: z.string(),
+    prNumber: z.number().int(),
+    headSha: z.string(),
+    mode: reviewModeSchema,
+    round: z.number().int(),
+    seats: z.array(z.string()),
+    verdict: z.string(),
+    meanScore: z.number().nullable(),
+    createdAt: z.number().int(),
+  })
+  .strict();
+
+export type ReviewRunSummary = z.infer<typeof reviewRunSummarySchema>;
+
+export const approvalRunSummarySchema = z
+  .object({
+    id: z.string(),
+    repo: z.string(),
+    prNumber: z.number().int(),
+    headSha: z.string(),
+    policySha: z.string(),
+    mode: approvalsModeSchema,
+    verdict: z.string(),
+    requiredSeats: z.number().int(),
+    matchedRuleIds: z.array(z.string()),
+    classifierErrors: z.array(z.string()),
+    statusPosted: z.boolean(),
+    reviewPosted: z.boolean(),
+    createdAt: z.number().int(),
+  })
+  .strict();
+
+export type ApprovalRunSummary = z.infer<typeof approvalRunSummarySchema>;
+
+export const watchDetailSchema = z
+  .object({
+    watch: watchRecordSchema,
+    budgets: z
+      .object({
+        causePushCounts: z.record(z.string(), z.number().int()),
+        maxPushesPerCause: z.number().int(),
+        behindMergesCount: z.number().int(),
+        maxBehindMerges: z.number().int(),
+        rerunJobIds: z.array(z.number().int()),
+        pinsCount: z.number().int(),
+        trustedBots: z.array(z.string()),
+        seenCommentsCount: z.number().int(),
+      })
+      .strict(),
+    latestReview: reviewRunSummarySchema.nullable(),
+    findings: z.array(reviewFindingSummarySchema),
+    latestApproval: approvalRunSummarySchema.nullable(),
+    audits: z.array(auditEntrySchema),
+  })
+  .strict();
+
+export type WatchDetail = z.infer<typeof watchDetailSchema>;
+
+export const startWatchInputSchema = z
+  .object({
+    repo: repoSlugSchema,
+    prNumber: z.number().int().positive(),
+    hostId: z.string().min(1).max(120).optional(),
+    worktreePath: z.string().min(1).max(4096).optional(),
+    projectId: z.string().min(1).max(120).optional(),
+    baseBranch: z.string().min(1).max(200).optional(),
+    acceptTerms: z.boolean().optional(),
+  })
+  .strict();
+
+export type StartWatchInput = z.infer<typeof startWatchInputSchema>;
+
+export const startWatchOutputSchema = z
+  .object({
+    alreadyWatching: z.boolean(),
+    watch: watchRecordSchema,
+  })
+  .strict();
+
+export type StartWatchOutput = z.infer<typeof startWatchOutputSchema>;
+
+export const verifyBotOutputSchema = z
+  .object({
+    configured: z.boolean(),
+    ok: z.boolean(),
+    configuredLogin: z.string(),
+    login: z.string().nullable(),
+    viewerId: z.number().int().nullable(),
+    loginMatches: z.boolean().nullable(),
+    error: z.string().nullable(),
+  })
+  .strict();
+
+export type VerifyBotOutput = z.infer<typeof verifyBotOutputSchema>;
+
+export const threadWatchSummarySchema = z
+  .object({
+    watch: watchRecordSchema.nullable(),
+    latestReviewVerdict: z.string().nullable(),
+    latestReviewScore: z.number().nullable(),
+    latestApprovalVerdict: z.string().nullable(),
+  })
+  .strict();
+
+export type ThreadWatchSummary = z.infer<typeof threadWatchSummarySchema>;
+
 export const shipStatusSchema = z
   .object({
     pluginVersion: z.string(),
     botConfigured: z.boolean(),
     botLogin: z.string(),
+    webhookConfigured: z.boolean(),
+    webhookPath: z.string(),
     defaultReviewMode: reviewModeSchema,
     defaultReviewEffort: reviewEffortSchema,
     pollIntervalSeconds: z.number().int(),
@@ -651,6 +896,14 @@ export const rpcContract = defineRpcContract({
       .strict(),
     output: z.array(watchRecordSchema),
   },
+  getWatchDetail: {
+    input: z.object({ id: z.string().min(1).max(120) }).strict(),
+    output: watchDetailSchema,
+  },
+  startWatch: {
+    input: startWatchInputSchema,
+    output: startWatchOutputSchema,
+  },
   controlWatch: {
     input: z
       .object({
@@ -660,6 +913,26 @@ export const rpcContract = defineRpcContract({
       .strict(),
     output: watchRecordSchema,
   },
+  listReviewRuns: {
+    input: z
+      .object({
+        repo: z.string().max(200).optional(),
+        prNumber: z.number().int().positive().optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+      })
+      .strict(),
+    output: z.array(reviewRunSummarySchema),
+  },
+  listApprovalRuns: {
+    input: z
+      .object({
+        repo: z.string().max(200).optional(),
+        prNumber: z.number().int().positive().optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+      })
+      .strict(),
+    output: z.array(approvalRunSummarySchema),
+  },
   listAudit: {
     input: z
       .object({
@@ -668,6 +941,19 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
     output: z.array(auditEntrySchema),
+  },
+  verifyBot: {
+    input: z.object({}).strict(),
+    output: verifyBotOutputSchema,
+  },
+  getThreadWatch: {
+    input: z
+      .object({
+        threadId: z.string().min(1).max(120),
+        projectId: z.string().max(120).optional(),
+      })
+      .strict(),
+    output: threadWatchSummarySchema,
   },
 });
 

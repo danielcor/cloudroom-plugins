@@ -1,4 +1,5 @@
 import type { CachedClassifierEntry, ReviewRunRecord, ShipStore } from "../db.js";
+import type { ParsedGateReceipt } from "../gates/container-gates.js";
 import { runClassifierWithCache, type ClassifierEvalResult, type ClassifierExecutor } from "./classifiers.js";
 import {
   buildApprovalFacts,
@@ -69,11 +70,16 @@ export async function evaluateApprovalsPolicy(input: {
   store: ShipStore;
   executor: ClassifierExecutor | null;
   inRunCache?: Map<string, CachedClassifierEntry>;
+  sandboxGateReceipt?: ParsedGateReceipt | null;
+  hasCloudroomBootstrap?: boolean;
   nowMs?: number;
 }): Promise<ApprovalDecision> {
   const nowMs = input.nowMs ?? Date.now();
   const inRunCache = input.inRunCache ?? new Map<string, CachedClassifierEntry>();
-  const facts = buildApprovalFacts(input.pr, input.checkRuns);
+  const facts = buildApprovalFacts(input.pr, input.checkRuns, {
+    sandboxGateReceipt: input.sandboxGateReceipt ?? null,
+    hasCloudroomBootstrap: input.hasCloudroomBootstrap ?? false,
+  });
 
   // Step 1: evaluate ALL deterministic predicates first (zero LLM calls).
   const detResults = input.policy.rules.map((rule) => ({
@@ -267,7 +273,7 @@ export function evaluateDevAutoMergeGuard(input: {
   }
   if (!input.facts.ciGreen) {
     blockedReasons.push(
-      `CI checks are not green (total=${input.facts.totalChecks}, failing=${input.facts.failingChecks}, pending=${input.facts.pendingChecks}).`,
+      `CI checks / sandbox Gate receipt not green (source=${input.facts.gateSource}, total=${input.facts.totalChecks}, failing=${input.facts.failingChecks}, pending=${input.facts.pendingChecks}).`,
     );
   }
   if (input.facts.collisionLabels.length > 0) {

@@ -38,4 +38,6 @@ PR Steward runs a persistent, zero-token server poller (`ship-poller`) every 120
 ## Security & Budget Boundaries
 
 - Steward workers run with `-c core.hooksPath=/dev/null`, tamper-pin verification before every mutation, `merge-guard` simulation before merging base branches, and a strict 8-tool native fence (`ship_steward_*`).
+- When a watched PR is `BEHIND` its base branch and the repo ships `scripts/ci/merge-eligibility.sh`, the Steward poller runs deterministic conflict-only eligibility (`BEHIND_POLICY=conflict-only`) first and skips unnecessary downmerges when `eligible && conflictFree` is true.
+- When waking on repos with `scripts/ci/bootstrap-cloudroom.sh` or Kiri merge-guard runners, Steward includes container gate awareness and base-branch restrictions (such as `pmzbot` `dev`-only bootstrap) in the worker prompt.
 - Default budgets: 10-minute wake cooldown, 7-day watch TTL, 3 pushes per cause, 1 CI job rerun per job ID, and at most 2 automated `BEHIND` base merges before escalating to `needs_human`.

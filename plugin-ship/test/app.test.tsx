@@ -13,10 +13,13 @@ afterEach(() => {
 });
 
 describe("Ship app & PublishConfirmCard", () => {
-  it("registers ship navPanel and ship-publish-confirm pendingInteraction slot", async () => {
+  it("registers ship navPanel, pendingInteraction, threadHeaderRow, threadAction, and composer plusMenu", async () => {
     const app = await loadPluginApp(() => import("../app.js"));
     expect(app.navPanels.map((p) => [p.id, p.path, p.title])).toEqual([["ship", "ship", "Ship"]]);
     expect(app.pendingInteractions.map((p) => p.id)).toEqual(["ship-publish-confirm"]);
+    expect(app.threadHeaderRows.map((p) => p.id)).toEqual(["ship-thread-bar"]);
+    expect(app.threadActions.map((p) => p.id)).toEqual(["ship-open-panel"]);
+    expect(app.composerCustomizations.map((p) => p.id)).toEqual(["ship-actions"]);
   });
 
   it("enforces 3.5s Allow dwell, shows public repo warning, submits edited values, and allows immediate cancel", async () => {
@@ -133,6 +136,8 @@ describe("Ship app & PublishConfirmCard", () => {
       pluginVersion: "0.1.0",
       botConfigured: true,
       botLogin: "ship-bot",
+      webhookConfigured: false,
+      webhookPath: "/api/v1/plugins/ship/http/webhook/github",
       defaultReviewMode: "triad",
       defaultReviewEffort: "high",
       pollIntervalSeconds: 120,
