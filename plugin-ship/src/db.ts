@@ -226,6 +226,43 @@ export interface ReviewFindingRecord {
   resolutionSha: string | null;
 }
 
+export interface CachedClassifierEntry {
+  name: string;
+  classifierSha: string;
+  outcome: string;
+  passed: boolean;
+  reason: string;
+  evaluatedAt: number;
+}
+
+export interface ApprovalRunRecord {
+  id: string;
+  repo: string;
+  prNumber: number;
+  headSha: string;
+  policySha: string;
+  mode: ApprovalsMode;
+  verdictJson: string;
+  classifierCacheJson: string;
+  statusPosted: boolean;
+  reviewPosted: boolean;
+  createdAt: number;
+}
+
+interface ApprovalRunRow {
+  id: string;
+  repo: string;
+  pr_number: number;
+  head_sha: string;
+  policy_sha: string;
+  mode: ApprovalsMode;
+  verdict_json: string;
+  classifier_cache_json: string;
+  status_posted: number;
+  review_posted: number;
+  created_at: number;
+}
+
 interface ReviewRunRow {
   id: string;
   watch_id: string | null;
@@ -738,6 +775,132 @@ export class ShipStore {
 
   getLastReviewRun(repo: string, prNumber: number): ReviewRunRecord | null {
     return this.listReviewRuns({ repo, prNumber, limit: 1 })[0] ?? null;
+  }
+
+  getLatestReviewRun(repo: string, prNumber: number, headSha?: string): ReviewRunRecord | null {
+    if (!headSha) {
+      return this.getLastReviewRun(repo, prNumber);
+    }
+    const row = this.db
+      .prepare(
+        "SELECT * FROM review_runs WHERE repo = ? AND pr_number = ? AND head_sha = ? ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(repo, prNumber, headSha) as ReviewRunRow | undefined;
+    return row
+      ? {
+          id: row.id,
+          watchId: row.watch_id,
+          repo: row.repo,
+          prNumber: row.pr_number,
+          headSha: row.head_sha,
+          mode: row.mode,
+          round: row.round,
+          seatsJson: row.seats_json,
+          verdict: row.verdict,
+          meanScore: row.mean_score,
+          createdAt: row.created_at,
+        }
+      : null;
+  }
+
+  insertApprovalRun(run: ApprovalRunRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO approval_runs (
+          id, repo, pr_number, head_sha, policy_sha, mode, verdict_json,
+          classifier_cache_json, status_posted, review_posted, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        run.id,
+        run.repo,
+        run.prNumber,
+        run.headSha,
+        run.policySha,
+        run.mode,
+        run.verdictJson,
+        run.classifierCacheJson,
+        run.statusPosted ? 1 : 0,
+        run.reviewPosted ? 1 : 0,
+        run.createdAt,
+      );
+  }
+
+  listApprovalRuns(opts: { repo?: string; prNumber?: number; limit?: number } = {}): ApprovalRunRecord[] {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+    let rows: ApprovalRunRow[];
+    if (opts.repo && opts.prNumber !== undefined) {
+      rows = this.db
+        .prepare("SELECT * FROM approval_runs WHERE repo = ? AND pr_number = ? ORDER BY created_at DESC LIMIT ?")
+        .all(opts.repo, opts.prNumber, limit) as ApprovalRunRow[];
+    } else if (opts.repo) {
+      rows = this.db
+        .prepare("SELECT * FROM approval_runs WHERE repo = ? ORDER BY created_at DESC LIMIT ?")
+        .all(opts.repo, limit) as ApprovalRunRow[];
+    } else {
+      rows = this.db.prepare("SELECT * FROM approval_runs ORDER BY created_at DESC LIMIT ?").all(limit) as ApprovalRunRow[];
+    }
+    return rows.map((r) => ({
+      id: r.id,
+      repo: r.repo,
+      prNumber: r.pr_number,
+      headSha: r.head_sha,
+      policySha: r.policy_sha,
+      mode: r.mode,
+      verdictJson: r.verdict_json,
+      classifierCacheJson: r.classifier_cache_json,
+      statusPosted: r.status_posted !== 0,
+      reviewPosted: r.review_posted !== 0,
+      createdAt: r.created_at,
+    }));
+  }
+
+  getLatestApprovalRun(repo: string, prNumber: number): ApprovalRunRecord | null {
+    return this.listApprovalRuns({ repo, prNumber, limit: 1 })[0] ?? null;
+  }
+
+  getCachedClassifierResult(
+    repo: string,
+    prNumber: number,
+    headSha: string,
+    classifierSha: string,
+  ): CachedClassifierEntry | null {
+    const rows = this.db
+      .prepare(
+        "SELECT classifier_cache_json FROM approval_runs WHERE repo = ? AND pr_number = ? AND head_sha = ? ORDER BY created_at DESC LIMIT 20",
+      )
+      .all(repo, prNumber, headSha) as Array<{ classifier_cache_json: string }>;
+
+    for (const r of rows) {
+      try {
+        const parsed = JSON.parse(r.classifier_cache_json) as Record<string, unknown>;
+        if (!parsed || typeof parsed !== "object") continue;
+        for (const val of Object.values(parsed)) {
+          if (val && typeof val === "object") {
+            const entry = val as Partial<CachedClassifierEntry>;
+            if (
+              entry.classifierSha === classifierSha &&
+              typeof entry.name === "string" &&
+              typeof entry.outcome === "string" &&
+              typeof entry.passed === "boolean" &&
+              typeof entry.reason === "string"
+            ) {
+              return {
+                name: entry.name,
+                classifierSha: entry.classifierSha,
+                outcome: entry.outcome,
+                passed: entry.passed,
+                reason: entry.reason,
+                evaluatedAt: typeof entry.evaluatedAt === "number" ? entry.evaluatedAt : 0,
+              };
+            }
+          }
+        }
+      } catch {
+        // Ignore malformed historical rows.
+      }
+    }
+    return null;
   }
 
   listReviewFindings(reviewRunId: string): ReviewFindingRecord[] {

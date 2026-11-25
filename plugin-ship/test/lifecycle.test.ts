@@ -65,7 +65,7 @@ describe("end-to-end PR Steward watch lifecycle", () => {
 
     const host = createFakePluginHost({
       pluginId: "ship",
-      agentSkillIds: ["ship", "steward"],
+      agentSkillIds: ["ship", "steward", "ship-approvals"],
       sdk: {
         hosts: { list: async () => [{ id: "host_1", name: "aipc-ubuntu" }] as never },
         projects: {

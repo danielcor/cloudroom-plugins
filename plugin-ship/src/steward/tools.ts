@@ -444,7 +444,7 @@ export function registerStewardTools(bb: BbPluginApi, deps: StewardToolsDeps): v
       }
       return {
         tools: [],
-        skills: ["ship", "steward"],
+        skills: ["ship", "steward", "ship-approvals"],
       };
     } catch {
       return { tools: [], skills: [] };

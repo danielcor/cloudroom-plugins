@@ -1,11 +1,14 @@
+import { createHash } from "node:crypto";
 import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import {
   hostContract,
   type CheckoutInspection,
+  type InspectApprovalContextOutput,
   type InspectPublishContextOutput,
   type InspectReviewContextOutput,
+  type MergeDevPrOutput,
   type PolledCheckRunOutput,
   type PollPrStateOutput,
   type PublishChangesOutput,
@@ -20,7 +23,7 @@ import {
   type PullRequestSummary,
   type RepoMeta,
 } from "./src/github/client.js";
-import { fetchPrDiscussion, truncateUtf8, type FilteredPrDiscussion } from "./src/github/comments.js";
+import { fetchPrDiscussion, findCollisionLabels, truncateUtf8, type FilteredPrDiscussion } from "./src/github/comments.js";
 import { isValidGitBranchName } from "./src/publish/preflight.js";
 import { defaultGitExec, runProcess, SAFE_GIT_FLAGS, type ExecResult, type GitExec } from "./src/safety/git-exec.js";
 import { checkGitDirPlain, checkMergeSafe } from "./src/safety/merge-guard.js";
@@ -1418,6 +1421,49 @@ export async function stewardRerunJobAt(
 const LOG_SECRET_PATTERNS_RE =
   /(?:-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})|\bsk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}|\bxox[abposr]-[A-Za-z0-9-]{10,}|\bAIza[0-9A-Za-z_-]{35}\b|\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}|\bbearer\s+[A-Za-z0-9._~+/-]{24,}=*)/giu;
 
+async function redactSensitiveOutput(
+  root: string,
+  raw: string,
+  maxBytes: number,
+): Promise<{ text: string; truncated: boolean; redactedCount: number }> {
+  let redactedCount = 0;
+  let cleaned = stripInvisible(raw);
+  const localSecrets = await collectLocalSecrets(root);
+  for (const s of localSecrets) {
+    if (cleaned.includes(s.value)) {
+      const parts = cleaned.split(s.value);
+      redactedCount += parts.length - 1;
+      cleaned = parts.join("[REDACTED]");
+    }
+  }
+  cleaned = cleaned.replace(LOG_SECRET_PATTERNS_RE, () => {
+    redactedCount += 1;
+    return "[REDACTED]";
+  });
+
+  const remainingFindings = findSecrets(cleaned);
+  if (remainingFindings.length > 0) {
+    const flaggedLines = new Set(remainingFindings.map((f) => f.line));
+    const lines = cleaned.split(/\r?\n/u);
+    cleaned = lines
+      .map((line, idx) => {
+        if (flaggedLines.has(idx + 1)) {
+          redactedCount += 1;
+          return "[REDACTED POTENTIAL SECRET LINE]";
+        }
+        return line;
+      })
+      .join("\n");
+  }
+
+  const bounded = truncateUtf8(cleaned, maxBytes);
+  return {
+    text: bounded.text,
+    truncated: bounded.truncated,
+    redactedCount,
+  };
+}
+
 export async function stewardFetchJobLogsAt(
   input: {
     root: string;
@@ -1454,44 +1500,317 @@ export async function stewardFetchJobLogsAt(
     };
   }
 
-  let redactedCount = 0;
-  let cleaned = stripInvisible(res.stdout);
-  const localSecrets = await collectLocalSecrets(input.root);
-  for (const s of localSecrets) {
-    if (cleaned.includes(s.value)) {
-      const parts = cleaned.split(s.value);
-      redactedCount += parts.length - 1;
-      cleaned = parts.join("[REDACTED]");
-    }
-  }
-  cleaned = cleaned.replace(LOG_SECRET_PATTERNS_RE, () => {
-    redactedCount += 1;
-    return "[REDACTED]";
-  });
-
-  const remainingFindings = findSecrets(cleaned);
-  if (remainingFindings.length > 0) {
-    const flaggedLines = new Set(remainingFindings.map((f) => f.line));
-    const lines = cleaned.split(/\r?\n/u);
-    cleaned = lines
-      .map((line, idx) => {
-        if (flaggedLines.has(idx + 1)) {
-          redactedCount += 1;
-          return "[REDACTED POTENTIAL SECRET LINE]";
-        }
-        return line;
-      })
-      .join("\n");
-  }
-
-  const bounded = truncateUtf8(cleaned, maxBytes);
+  const redacted = await redactSensitiveOutput(input.root, res.stdout, maxBytes);
   return {
     ok: true,
-    logs: bounded.text,
-    truncated: bounded.truncated,
-    redactedCount,
+    logs: redacted.text,
+    truncated: redacted.truncated,
+    redactedCount: redacted.redactedCount,
     error: null,
   };
+}
+
+const APPROVAL_META_GRAPHQL = `query($owner: String!, $name: String!, $pr: Int!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    pullRequest(number: $pr) {
+      number
+      title
+      state
+      isDraft
+      headRefOid
+      baseRefName
+      headRefName
+      author { login }
+      authorAssociation
+      labels(first: 50) { nodes { name } }
+      files(first: 100) {
+        nodes {
+          path
+          additions
+          deletions
+        }
+      }
+    }
+  }
+}`;
+
+interface ApprovalMetaGraphqlPayload {
+  data?: {
+    repository?: {
+      defaultBranchRef?: { name?: string | null } | null;
+      pullRequest?: {
+        number: number;
+        title: string;
+        state: string;
+        isDraft: boolean;
+        headRefOid: string;
+        baseRefName: string;
+        headRefName: string;
+        author?: { login?: string | null } | null;
+        authorAssociation?: string | null;
+        labels?: { nodes?: Array<{ name?: string | null }> } | null;
+        files?: {
+          nodes?: Array<{ path?: string | null; additions?: number | null; deletions?: number | null }>;
+        } | null;
+      } | null;
+    } | null;
+  };
+  errors?: Array<{ message?: string }>;
+}
+
+const CLASSIFIER_FILE_RE = /^\.claude\/classifiers\/([a-z0-9][a-z0-9_-]{0,63})\/def\.yml$/u;
+
+export async function inspectApprovalContextAt(
+  input: {
+    root: string;
+    repo: string;
+    prNumber: number;
+    baseRemote?: string;
+    defaultBranch?: string;
+    maxDiffBytes?: number;
+  },
+  deps: HostDeps = {},
+): Promise<InspectApprovalContextOutput> {
+  const execGit = deps.execGit ?? defaultAuthorGitExec;
+  const execGh = deps.execGh ?? defaultGhExec;
+  const baseRemote = input.baseRemote?.trim() || "origin";
+  let defaultBranch = input.defaultBranch?.trim() || "main";
+
+  const fail = (error: string): InspectApprovalContextOutput => ({
+    ok: false,
+    error,
+    defaultBranch,
+    baseRemote,
+    policyFound: false,
+    policyRaw: null,
+    policySha: null,
+    classifiers: [],
+    pr: null,
+    checkRuns: [],
+    diffText: "",
+    diffTruncated: false,
+  });
+
+  if (baseRemote.startsWith("-")) {
+    return fail(`Invalid remote name "${baseRemote}".`);
+  }
+  const [owner, name] = input.repo.split("/");
+  if (!owner || !name) {
+    return fail(`Invalid repository slug "${input.repo}".`);
+  }
+
+  const gqlRes = await execGh(input.root, [
+    "api",
+    "graphql",
+    "-F",
+    `owner=${owner}`,
+    "-F",
+    `name=${name}`,
+    "-F",
+    `pr=${input.prNumber}`,
+    "-f",
+    `query=${APPROVAL_META_GRAPHQL}`,
+  ]);
+  if (gqlRes.code !== 0) {
+    return fail(`gh api graphql failed: ${gqlRes.stderr.trim() || gqlRes.stdout.trim() || `exit ${gqlRes.code}`}`);
+  }
+
+  let parsedGql: ApprovalMetaGraphqlPayload;
+  try {
+    parsedGql = JSON.parse(gqlRes.stdout) as ApprovalMetaGraphqlPayload;
+  } catch (err) {
+    return fail(`Invalid GraphQL response JSON: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (parsedGql.errors && parsedGql.errors.length > 0) {
+    return fail(`GitHub GraphQL error: ${parsedGql.errors.map((e) => e.message ?? "unknown").join("; ")}`);
+  }
+  const repoNode = parsedGql.data?.repository;
+  const prNode = repoNode?.pullRequest;
+  if (!repoNode || !prNode) {
+    return fail(`PR #${input.prNumber} not found in ${input.repo}.`);
+  }
+  if (!input.defaultBranch?.trim() && repoNode.defaultBranchRef?.name) {
+    defaultBranch = repoNode.defaultBranchRef.name;
+  }
+  if (!isValidGitBranchName(defaultBranch)) {
+    return fail(`Invalid default branch "${defaultBranch}".`);
+  }
+
+  // Strictly fetch <baseRemote>/<defaultBranch> and inspect policy/classifiers ONLY from FETCH_HEAD!
+  const fetchRes = await execGit(input.root, ["fetch", "--no-tags", "--", baseRemote, defaultBranch]);
+  if (fetchRes.code !== 0) {
+    return fail(`Failed to fetch ${baseRemote}/${defaultBranch}: ${fetchRes.stderr.trim() || fetchRes.stdout.trim()}`);
+  }
+  const tipRes = await execGit(input.root, ["rev-parse", "--verify", "--quiet", "FETCH_HEAD^{commit}"]);
+  const defaultTip = tipRes.stdout.trim();
+  if (tipRes.code !== 0 || !/^[0-9a-f]{40}$/u.test(defaultTip)) {
+    return fail(`Could not resolve commit SHA for ${baseRemote}/${defaultBranch}.`);
+  }
+
+  let policyFound = false;
+  let policyRaw: string | null = null;
+  let policySha: string | null = null;
+  const classifiers: Array<{ name: string; path: string; raw: string; sha: string }> = [];
+
+  const policyTreeRes = await execGit(input.root, ["ls-tree", "-z", defaultTip, "--", ".claude/approvals.yml"]);
+  if (policyTreeRes.code !== 0) {
+    return fail(`Failed to inspect ${defaultTip}:.claude/approvals.yml`);
+  }
+  const policyEntry = parseLsTreeZ(policyTreeRes.stdout)[0];
+  if (policyEntry) {
+    if (policyEntry.mode === "120000" || policyEntry.type !== "blob") {
+      return fail("Refused symlink or non-blob .claude/approvals.yml on default branch.");
+    }
+    const showPolicy = await execGit(input.root, ["show", `${defaultTip}:.claude/approvals.yml`]);
+    if (showPolicy.code !== 0) {
+      return fail(`Failed to read ${defaultTip}:.claude/approvals.yml: ${showPolicy.stderr.trim()}`);
+    }
+    policyFound = true;
+    policyRaw = showPolicy.stdout;
+    policySha = createHash("sha256").update(policyRaw, "utf8").digest("hex");
+  }
+
+  const clsTreeRes = await execGit(input.root, ["ls-tree", "-r", "-z", defaultTip, "--", ".claude/classifiers"]);
+  if (clsTreeRes.code === 0 && clsTreeRes.stdout) {
+    for (const entry of parseLsTreeZ(clsTreeRes.stdout)) {
+      const m = CLASSIFIER_FILE_RE.exec(entry.path);
+      if (!m) continue;
+      if (entry.mode === "120000" || entry.type !== "blob") {
+        return fail(`Refused symlink or non-blob classifier definition "${entry.path}" on default branch.`);
+      }
+      const showCls = await execGit(input.root, ["show", `${defaultTip}:${entry.path}`]);
+      if (showCls.code !== 0) {
+        return fail(`Failed to read classifier "${entry.path}" from default branch.`);
+      }
+      classifiers.push({
+        name: m[1]!,
+        path: entry.path,
+        raw: showCls.stdout,
+        sha: createHash("sha256").update(showCls.stdout, "utf8").digest("hex"),
+      });
+    }
+  }
+
+  const checkRes = await execGh(input.root, [
+    "api",
+    `repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${encodeURIComponent(prNode.headRefOid)}/check-runs?per_page=100`,
+  ]);
+  let checkRuns: PolledCheckRunOutput[] = [];
+  if (checkRes.code === 0 && checkRes.stdout.trim()) {
+    try {
+      const parsed = JSON.parse(checkRes.stdout) as {
+        check_runs?: Array<{
+          id: number;
+          name: string;
+          status: string;
+          conclusion: string | null;
+          details_url?: string | null;
+          html_url?: string | null;
+        }>;
+      };
+      checkRuns = (parsed.check_runs ?? []).map((r) => ({
+        id: r.id,
+        name: r.name,
+        status: r.status,
+        conclusion: r.conclusion ?? null,
+        detailsUrl: r.details_url ?? r.html_url ?? null,
+      }));
+    } catch {
+      checkRuns = [];
+    }
+  }
+
+  const diffRes = await execGh(input.root, ["pr", "diff", String(input.prNumber), "--repo", input.repo]);
+  const maxDiffBytes = input.maxDiffBytes ?? MAX_DIFF_TEXT_BYTES;
+  const boundedDiff =
+    diffRes.code === 0
+      ? await redactSensitiveOutput(input.root, diffRes.stdout, maxDiffBytes)
+      : { text: "", truncated: false, redactedCount: 0 };
+
+  const labels = (prNode.labels?.nodes ?? []).map((l) => l.name ?? "").filter(Boolean);
+  const changedFiles = (prNode.files?.nodes ?? [])
+    .filter((f): f is { path: string; additions?: number | null; deletions?: number | null } => typeof f.path === "string" && f.path.length > 0)
+    .map((f) => ({
+      path: f.path,
+      additions: Math.max(0, Math.trunc(f.additions ?? 0)),
+      deletions: Math.max(0, Math.trunc(f.deletions ?? 0)),
+    }));
+
+  return {
+    ok: true,
+    error: null,
+    defaultBranch,
+    baseRemote,
+    policyFound,
+    policyRaw,
+    policySha,
+    classifiers,
+    pr: {
+      number: prNode.number,
+      title: prNode.title,
+      state: prNode.state,
+      isDraft: Boolean(prNode.isDraft),
+      headSha: prNode.headRefOid,
+      baseBranch: prNode.baseRefName,
+      headBranch: prNode.headRefName,
+      authorLogin: prNode.author?.login ?? "",
+      authorAssociation: prNode.authorAssociation ?? "NONE",
+      labels,
+      collisionLabels: findCollisionLabels(labels),
+      changedFiles,
+    },
+    checkRuns,
+    diffText: boundedDiff.text,
+    diffTruncated: boundedDiff.truncated,
+  };
+}
+
+export async function mergeDevPrAt(
+  input: {
+    root: string;
+    repo: string;
+    prNumber: number;
+    baseBranch: string;
+    expectedHeadSha: string;
+    method?: "squash" | "merge" | "rebase";
+  },
+  deps: HostDeps = {},
+): Promise<MergeDevPrOutput> {
+  if (input.baseBranch.trim().toLowerCase() !== "dev") {
+    return {
+      ok: false,
+      merged: false,
+      error: `Auto-merge is strictly restricted to base branch "dev" (refused "${input.baseBranch}").`,
+    };
+  }
+  if (!/^[0-9a-f]{40}$/u.test(input.expectedHeadSha)) {
+    return {
+      ok: false,
+      merged: false,
+      error: "Invalid expectedHeadSha for dev auto-merge.",
+    };
+  }
+  const execGh = deps.execGh ?? defaultGhExec;
+  const methodFlag = `--${input.method ?? "squash"}`;
+  const res = await execGh(input.root, [
+    "pr",
+    "merge",
+    String(input.prNumber),
+    "--repo",
+    input.repo,
+    methodFlag,
+    "--match-head-commit",
+    input.expectedHeadSha,
+  ]);
+  if (res.code !== 0) {
+    return {
+      ok: false,
+      merged: false,
+      error: res.stderr.trim() || res.stdout.trim() || `gh pr merge exited ${res.code}`,
+    };
+  }
+  return { ok: true, merged: true, error: null };
 }
 
 export default experimental_defineHostEntry({
@@ -1530,5 +1849,7 @@ export default experimental_defineHostEntry({
     stewardCommitAndPush: async (input) => stewardCommitAndPushAt(input),
     stewardRerunJob: async (input) => stewardRerunJobAt(input),
     stewardFetchJobLogs: async (input) => stewardFetchJobLogsAt(input),
+    inspectApprovalContext: async (input) => inspectApprovalContextAt(input),
+    mergeDevPr: async (input) => mergeDevPrAt(input),
   },
 });

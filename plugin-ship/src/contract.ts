@@ -211,6 +211,67 @@ export const pollPrStateOutputSchema = z
 
 export type PollPrStateOutput = z.infer<typeof pollPrStateOutputSchema>;
 
+export const approvalChangedFileSchema = z
+  .object({
+    path: z.string(),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const approvalClassifierSourceSchema = z
+  .object({
+    name: z.string(),
+    path: z.string(),
+    raw: z.string(),
+    sha: z.string(),
+  })
+  .strict();
+
+export const inspectApprovalContextOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    error: z.string().nullable(),
+    defaultBranch: z.string(),
+    baseRemote: z.string(),
+    policyFound: z.boolean(),
+    policyRaw: z.string().nullable(),
+    policySha: z.string().nullable(),
+    classifiers: z.array(approvalClassifierSourceSchema),
+    pr: z
+      .object({
+        number: z.number().int(),
+        title: z.string(),
+        state: z.string(),
+        isDraft: z.boolean(),
+        headSha: z.string(),
+        baseBranch: z.string(),
+        headBranch: z.string(),
+        authorLogin: z.string(),
+        authorAssociation: z.string(),
+        labels: z.array(z.string()),
+        collisionLabels: z.array(z.string()),
+        changedFiles: z.array(approvalChangedFileSchema),
+      })
+      .nullable(),
+    checkRuns: z.array(polledCheckRunSchema),
+    diffText: z.string(),
+    diffTruncated: z.boolean(),
+  })
+  .strict();
+
+export type InspectApprovalContextOutput = z.infer<typeof inspectApprovalContextOutputSchema>;
+
+export const mergeDevPrOutputSchema = z
+  .object({
+    ok: z.boolean(),
+    merged: z.boolean(),
+    error: z.string().nullable(),
+  })
+  .strict();
+
+export type MergeDevPrOutput = z.infer<typeof mergeDevPrOutputSchema>;
+
 export const hostContract = defineRpcContract({
   inspectCheckout: {
     experimental_retryable: true,
@@ -446,6 +507,33 @@ export const hostContract = defineRpcContract({
         error: z.string().nullable(),
       })
       .strict(),
+  },
+  inspectApprovalContext: {
+    experimental_retryable: true,
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        repo: repoSlugSchema,
+        prNumber: z.number().int().positive(),
+        baseRemote: z.string().min(1).max(120).optional(),
+        defaultBranch: z.string().min(1).max(200).optional(),
+        maxDiffBytes: z.number().int().min(1024).max(131_072).optional(),
+      })
+      .strict(),
+    output: inspectApprovalContextOutputSchema,
+  },
+  mergeDevPr: {
+    input: z
+      .object({
+        root: z.string().min(1).max(4096),
+        repo: repoSlugSchema,
+        prNumber: z.number().int().positive(),
+        baseBranch: z.string().min(1).max(200),
+        expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/u),
+        method: z.enum(["squash", "merge", "rebase"]).optional(),
+      })
+      .strict(),
+    output: mergeDevPrOutputSchema,
   },
 });
 

@@ -177,7 +177,7 @@ describe("agent configuration & fenced Steward tool budget enforcement", () => {
 
     const host = createFakePluginHost({
       pluginId: "ship",
-      agentSkillIds: ["ship", "steward"],
+      agentSkillIds: ["ship", "steward", "ship-approvals"],
       settings: { botLogin: "ship-bot", botToken: botSecret },
       experimental_callHostRpc: async ({ method, input }) => {
         if (method === "scanOutboundForLocalSecrets") return { ok: true, matchedSource: null };
@@ -204,7 +204,7 @@ describe("agent configuration & fenced Steward tool budget enforcement", () => {
       makePluginAgentConfigurationContext({ pluginMetadata: {} }),
     );
     expect(userCfg.tools).toEqual([]);
-    expect(userCfg.skills).toEqual(["ship", "steward"]);
+    expect(userCfg.skills).toEqual(["ship", "steward", "ship-approvals"]);
 
     const revCfg = await host.harness.resolveAgentConfiguration(
       makePluginAgentConfigurationContext({ pluginMetadata: { shipRole: "reviewer" } }),

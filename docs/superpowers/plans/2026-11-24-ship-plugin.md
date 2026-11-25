@@ -115,11 +115,11 @@
 - Create: `plugin-ship/test/approvals.test.ts`
 
 **Tasks:**
-- [ ] **Step 1:** Parse `.claude/approvals.yml` (`version: 1`) and `.claude/classifiers/<name>/def.yml` strictly from the **default branch** (`git show origin/<default>:...`), never the PR branch.
-- [ ] **Step 2:** Evaluate free deterministic facts first, spawn classifier threads only when needed (caching by `(head_sha, classifier_sha)`), and combine strictest matching verdicts.
-- [ ] **Step 3:** Post Commit Statuses (`observe` non-blocking vs `enforce` blocking) and bot GitHub `APPROVE` / `COMMENT` / `REQUEST_CHANGES` reviews via `botToken`.
-- [ ] **Step 4:** Add opt-in per-repo `dev`-only auto-merge guard (hard-blocked on `main`/`master`/`beta`/`prod`/release branches; requires clean review + green CI + `seats: 0` + matching `headSha`).
-- [ ] **Step 5:** Add `room-cli ship approvals check <pr>` and comprehensive policy evaluator tests.
+- [x] **Step 1:** Parse `.claude/approvals.yml` (`version: 1`) and `.claude/classifiers/<name>/def.yml` strictly from the **default branch** (`git show FETCH_HEAD:...` after fetching `origin/<defaultBranch>`), never the PR branch or working tree.
+- [x] **Step 2:** Evaluate free deterministic facts first, spawn diff-only classifier threads only when needed (caching by `(head_sha, classifier_sha)`), and combine strictest matching verdicts.
+- [x] **Step 3:** Post Commit Statuses (`observe` non-blocking vs `enforce` blocking) and bot GitHub `APPROVE` / `COMMENT` / `REQUEST_CHANGES` reviews via `botToken`.
+- [x] **Step 4:** Add opt-in per-repo `dev`-only auto-merge guard (hard-blocked on `main`/`master`/`beta`/`prod`/release branches; requires clean review + green CI + `seats: 0` + matching `headSha`, plus `--dev-automerge` on `repos set`).
+- [x] **Step 5:** Add `room-cli ship approvals check <pr>` and comprehensive policy evaluator tests (`test/approvals.test.ts`).
 
 ---
 

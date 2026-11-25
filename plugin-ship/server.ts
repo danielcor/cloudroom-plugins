@@ -14,6 +14,10 @@ import {
   type ShipStatus,
   type WatchRecord,
 } from "./src/contract.js";
+import { createCloudroomClassifierExecutor, type ClassifierExecutor } from "./src/approvals/classifiers.js";
+import { evaluateApprovalsPolicy, evaluateDevAutoMergeGuard } from "./src/approvals/evaluator.js";
+import { computePolicyBundleSha, loadAndValidateClassifiers, parseApprovalsPolicy } from "./src/approvals/parser.js";
+import { reportApprovalDecision, type ApprovalReportResult } from "./src/approvals/reporter.js";
 import { MIGRATIONS, ShipStore, toPublicWatchRecord, type RepoDefaults } from "./src/db.js";
 import { GitHubBotClient } from "./src/github/bot.js";
 import { fetchPrDiscussion, type FilteredPrDiscussion } from "./src/github/comments.js";
@@ -42,6 +46,7 @@ export interface ShipServerDeps {
   minDwellMs?: number;
   execDispatch?: DispatchExec;
   seatTimeoutMs?: number;
+  classifierExecutor?: ClassifierExecutor;
   pollIntervalMs?: number;
   disableBackgroundPoller?: boolean;
   discoverRepoPrs?: (repo: string) => Promise<DiscoveredPrCandidate[]>;
@@ -324,18 +329,22 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
 
     if (!projectId) {
       const normRoot = root.replace(/\/+$/u, "");
-      const projects = await bb.sdk.projects.list().catch(() => []);
-      for (const proj of projects) {
-        const matchedSrc = proj.sources.find((src) => {
-          if (src.hostId && src.hostId !== hostId) return false;
-          const srcRoot = src.path?.replace(/\/+$/u, "");
-          if (!srcRoot) return false;
-          return normRoot === srcRoot || normRoot.startsWith(`${srcRoot}/`);
-        });
-        if (matchedSrc) {
-          projectId = proj.id;
-          break;
+      try {
+        const projects = await bb.sdk.projects.list();
+        for (const proj of projects) {
+          const matchedSrc = proj.sources.find((src) => {
+            if (src.hostId && src.hostId !== hostId) return false;
+            const srcRoot = src.path?.replace(/\/+$/u, "");
+            if (!srcRoot) return false;
+            return normRoot === srcRoot || normRoot.startsWith(`${srcRoot}/`);
+          });
+          if (matchedSrc) {
+            projectId = proj.id;
+            break;
+          }
         }
+      } catch {
+        // Ignore unavailable project listing.
       }
     }
 
@@ -612,6 +621,14 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
               values: ["off", "observe", "enforce"],
               description: "Claude Approvals policy evaluation mode.",
             },
+            "dev-automerge": {
+              type: "boolean",
+              description: "Enable opt-in dev-only auto-merge for this repository.",
+            },
+            "no-dev-automerge": {
+              type: "boolean",
+              description: "Disable dev-only auto-merge for this repository.",
+            },
             "max-pushes": {
               type: "integer",
               min: 1,
@@ -637,7 +654,10 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
               description: "Print JSON output.",
             },
           },
-          constraints: [{ kind: "at-most-one", options: ["enabled", "disabled"] }],
+          constraints: [
+            { kind: "at-most-one", options: ["enabled", "disabled"] },
+            { kind: "at-most-one", options: ["dev-automerge", "no-dev-automerge"] },
+          ],
           async run({ positionals, options }) {
             const parsedRepo = repoSlugSchema.safeParse(positionals.repo);
             if (!parsedRepo.success) {
@@ -654,6 +674,11 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
                 ...(options.effort ? { reviewEffort: reviewEffortSchema.parse(options.effort) } : {}),
                 ...(options["auto-steward"] ? { autoSteward: autoStewardSchema.parse(options["auto-steward"]) } : {}),
                 ...(options.approvals ? { approvalsMode: approvalsModeSchema.parse(options.approvals) } : {}),
+                ...(options["dev-automerge"]
+                  ? { allowDevAutomerge: true }
+                  : options["no-dev-automerge"]
+                    ? { allowDevAutomerge: false }
+                    : {}),
                 ...(options["max-pushes"] !== undefined ? { maxPushesPerCause: options["max-pushes"] } : {}),
                 ...(options["max-rounds"] !== undefined ? { maxReviewRounds: options["max-rounds"] } : {}),
               },
@@ -670,7 +695,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
             }
             return {
               exitCode: 0,
-              stdout: `Saved ${saved.repo}: enabled=${saved.enabled} review=${saved.reviewMode}:${saved.reviewEffort} steward=${saved.autoSteward} approvals=${saved.approvalsMode}\n`,
+              stdout: `Saved ${saved.repo}: enabled=${saved.enabled} review=${saved.reviewMode}:${saved.reviewEffort} steward=${saved.autoSteward} approvals=${saved.approvalsMode} devAutomerge=${saved.allowDevAutomerge}\n`,
             };
           },
         }),
@@ -1175,6 +1200,299 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
             const updated = await applyWatchControl(positionals.watchId, "resume", "cli");
             if (options.json) return { exitCode: 0, stdout: `${JSON.stringify(updated, null, 2)}\n` };
             return { exitCode: 0, stdout: `Resumed watch ${updated.id} (${updated.repo}#${updated.prNumber})\n` };
+          },
+        }),
+        "approvals check": cliCommand({
+          summary: "Evaluate default-branch .claude/approvals.yml policy and optional dev-only auto-merge.",
+          positionals: [{ name: "pr", description: "Pull request number.", required: true }],
+          options: {
+            path: { type: "string", description: "Absolute path to git checkout on the target host." },
+            host: { type: "string", description: "Cloudroom host id or name." },
+            project: { type: "string", description: "Cloudroom project id for running LLM classifiers." },
+            repo: { type: "string", description: "GitHub repository (owner/repo)." },
+            remote: { type: "string", description: "Base git remote name (defaults to origin)." },
+            "default-branch": { type: "string", description: "Default branch override for policy loading." },
+            mode: {
+              type: "enum",
+              values: ["observe", "enforce", "off"],
+              description: "Override approvals mode (observe, enforce, or off).",
+            },
+            post: { type: "boolean", description: "Post Commit Status and bot PR review via botToken." },
+            automerge: { type: "boolean", description: "Attempt dev-only auto-merge if all 8 guard invariants pass." },
+            "dry-run": { type: "boolean", description: "Evaluate without persisting approval_runs or posting to GitHub." },
+            json: { type: "boolean", description: "Print JSON output." },
+          },
+          async run({ positionals, options }, ctx) {
+            if (!/^[1-9]\d*$/u.test(positionals.pr)) {
+              throw new PluginCliError(`Invalid PR number "${positionals.pr}".`, { code: "invalid_pr_number" });
+            }
+            const prNumber = Number.parseInt(positionals.pr, 10);
+
+            if (options.repo) {
+              const parsedRepo = repoSlugSchema.safeParse(options.repo);
+              if (!parsedRepo.success) {
+                throw new PluginCliError(`Invalid repository "${options.repo}": expected owner/repo.`, {
+                  code: "invalid_repo",
+                });
+              }
+            }
+
+            const { hostId, root, projectId } = await resolveHostAndRoot(
+              ctx,
+              options.host,
+              options.path,
+              options.project,
+            );
+
+            let repo = options.repo;
+            if (!repo) {
+              const pubCtx = await hostClient.call("inspectPublishContext", { root }, { hostId });
+              repo = pubCtx.repoMeta?.slug;
+              if (!repo) {
+                throw new PluginCliError("Could not determine GitHub repository. Pass --repo <owner/repo>.", {
+                  code: "no_repo",
+                });
+              }
+            }
+
+            const approvalCtx = await hostClient.call(
+              "inspectApprovalContext",
+              {
+                root,
+                repo,
+                prNumber,
+                ...(options.remote ? { baseRemote: options.remote } : {}),
+                ...(options["default-branch"] ? { defaultBranch: options["default-branch"] } : {}),
+              },
+              { hostId },
+            );
+
+            if (!approvalCtx.ok || !approvalCtx.pr) {
+              const errMsg = approvalCtx.error ?? "Failed to inspect approval context.";
+              if (options.json) {
+                return { exitCode: 1, stdout: `${JSON.stringify({ status: "error", error: errMsg }, null, 2)}\n` };
+              }
+              return { exitCode: 1, stderr: `Approvals check failed: ${errMsg}\n` };
+            }
+
+            if (!approvalCtx.policyFound || !approvalCtx.policyRaw) {
+              if (!options["dry-run"]) {
+                store.appendAudit({
+                  actor: "cli",
+                  action: "approvals.no_policy",
+                  outcome: "skipped",
+                  detail: { repo, prNumber, defaultBranch: approvalCtx.defaultBranch },
+                });
+              }
+              const noPolicyPayload = {
+                status: "no_policy",
+                repo,
+                prNumber,
+                defaultBranch: approvalCtx.defaultBranch,
+                headSha: approvalCtx.pr.headSha,
+              };
+              if (options.json) {
+                return { exitCode: 0, stdout: `${JSON.stringify(noPolicyPayload, null, 2)}\n` };
+              }
+              return {
+                exitCode: 0,
+                stdout: `No .claude/approvals.yml found on ${approvalCtx.baseRemote}/${approvalCtx.defaultBranch} for ${repo}.\n`,
+              };
+            }
+
+            let policy;
+            let classifiers;
+            let bundleSha: string;
+            try {
+              policy = parseApprovalsPolicy(approvalCtx.policyRaw);
+              classifiers = loadAndValidateClassifiers(policy, approvalCtx.classifiers);
+              bundleSha = computePolicyBundleSha(approvalCtx.policyRaw, approvalCtx.classifiers);
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              if (!options["dry-run"]) {
+                store.appendAudit({
+                  actor: "cli",
+                  action: "approvals.invalid_policy",
+                  outcome: "error",
+                  detail: { repo, prNumber, error: msg },
+                });
+              }
+              if (options.json) {
+                return { exitCode: 1, stdout: `${JSON.stringify({ status: "invalid_policy", error: msg }, null, 2)}\n` };
+              }
+              return { exitCode: 1, stderr: `Invalid approvals policy on default branch: ${msg}\n` };
+            }
+
+            const repoCfg = store.getRepo(repo);
+            const effectiveMode = approvalsModeSchema.parse(
+              options.mode ?? repoCfg?.approvalsMode ?? policy.mode ?? "observe",
+            );
+
+            const executor: ClassifierExecutor | null =
+              deps.classifierExecutor ??
+              (!options["dry-run"] && projectId
+                ? createCloudroomClassifierExecutor({
+                    bb,
+                    projectId,
+                    parentThreadId: ctx.threadId,
+                    gatekeeper,
+                    settledWaiters,
+                    timeoutMs: deps.seatTimeoutMs,
+                  })
+                : null);
+
+            const nowMs = (deps.nowMs ?? Date.now)();
+            const decision = await evaluateApprovalsPolicy({
+              repo,
+              policy,
+              policySha: bundleSha,
+              classifiers,
+              pr: approvalCtx.pr,
+              checkRuns: approvalCtx.checkRuns,
+              diffText: approvalCtx.diffText,
+              store,
+              executor,
+              nowMs,
+            });
+
+            let report: ApprovalReportResult | null = null;
+            if (!options["dry-run"] && options.post && effectiveMode !== "off") {
+              report = await reportApprovalDecision({
+                repo,
+                prNumber,
+                root,
+                effectiveMode,
+                decision,
+                botClient: await currentBotClient(),
+                scanOutboundForLocalSecrets: (input) =>
+                  hostClient.call("scanOutboundForLocalSecrets", input, { hostId }),
+              });
+            }
+
+            const latestReviewRun = store.getLatestReviewRun(repo, prNumber, approvalCtx.pr.headSha);
+            const autoMergeGuard = evaluateDevAutoMergeGuard({
+              allowDevAutomerge: repoCfg?.allowDevAutomerge ?? false,
+              pr: approvalCtx.pr,
+              facts: decision.facts,
+              decision,
+              latestReviewRun,
+            });
+
+            let mergeResult: { attempted: boolean; merged: boolean; error: string | null } = {
+              attempted: false,
+              merged: false,
+              error: null,
+            };
+            if (!options["dry-run"] && options.automerge && autoMergeGuard.eligible) {
+              const res = await hostClient.call(
+                "mergeDevPr",
+                {
+                  root,
+                  repo,
+                  prNumber,
+                  baseBranch: approvalCtx.pr.baseBranch,
+                  expectedHeadSha: approvalCtx.pr.headSha,
+                },
+                { hostId },
+              );
+              mergeResult = { attempted: true, merged: res.merged, error: res.error };
+              store.appendAudit({
+                actor: "cli",
+                action: "approvals.automerge",
+                outcome: res.ok && res.merged ? "merged" : "error",
+                detail: { repo, prNumber, headSha: approvalCtx.pr.headSha, error: res.error },
+              });
+            }
+
+            if (!options["dry-run"]) {
+              const runId = `apr_${randomUUID()}`;
+              store.insertApprovalRun({
+                id: runId,
+                repo,
+                prNumber,
+                headSha: approvalCtx.pr.headSha,
+                policySha: bundleSha,
+                mode: effectiveMode,
+                verdictJson: JSON.stringify({
+                  verdict: decision.verdict,
+                  requiredSeats: decision.requiredSeats,
+                  matchedRuleIds: decision.matchedRuleIds,
+                  classifierErrors: decision.classifierErrors,
+                }),
+                classifierCacheJson: JSON.stringify(decision.classifierCache),
+                statusPosted: report?.statusPosted ?? false,
+                reviewPosted: report?.reviewPosted ?? false,
+                createdAt: nowMs,
+              });
+              store.appendAudit({
+                actor: "cli",
+                action: "approvals.checked",
+                outcome: decision.verdict,
+                detail: {
+                  repo,
+                  prNumber,
+                  headSha: approvalCtx.pr.headSha,
+                  mode: effectiveMode,
+                  requiredSeats: decision.requiredSeats,
+                  classifierCalls: decision.classifierCallCount,
+                  cacheHits: decision.classifierCacheHits,
+                  statusPosted: report?.statusPosted ?? false,
+                  reviewPosted: report?.reviewPosted ?? false,
+                },
+              });
+            }
+
+            const hasPostError = Boolean(report?.error);
+            const hasMergeError = mergeResult.attempted && !mergeResult.merged;
+            const exitCode = hasPostError || hasMergeError ? 1 : 0;
+
+            const outputPayload = {
+              status: options["dry-run"] ? "dry_run" : "checked",
+              repo,
+              prNumber,
+              defaultBranch: approvalCtx.defaultBranch,
+              effectiveMode,
+              decision: {
+                headSha: decision.headSha,
+                policySha: decision.policySha,
+                statusContext: decision.statusContext,
+                verdict: decision.verdict,
+                requiredSeats: decision.requiredSeats,
+                usedFallbackDefault: decision.usedFallbackDefault,
+                matchedRuleIds: decision.matchedRuleIds,
+                classifierErrors: decision.classifierErrors,
+                classifierCallCount: decision.classifierCallCount,
+                classifierCacheHits: decision.classifierCacheHits,
+                ruleResults: decision.ruleResults,
+              },
+              report,
+              autoMerge: {
+                ...autoMergeGuard,
+                ...mergeResult,
+              },
+            };
+
+            if (options.json) {
+              return { exitCode, stdout: `${JSON.stringify(outputPayload, null, 2)}\n` };
+            }
+
+            const lines = [
+              `Approvals (${effectiveMode}) for ${repo}#${prNumber}@${decision.headSha.slice(0, 7)}: verdict=${decision.verdict}, seats=${decision.requiredSeats}`,
+              `Matched rules: ${decision.matchedRuleIds.join(", ") || "(default_action)"}`,
+              ...(decision.classifierErrors.length > 0
+                ? [`Classifier errors: ${decision.classifierErrors.join("; ")}`]
+                : []),
+              ...(report
+                ? [
+                    `Posted: status=${report.statusPosted ? report.statusState : "no"} review=${report.reviewPosted ? report.reviewEvent : "no"}${report.error ? ` (${report.error})` : ""}`,
+                  ]
+                : []),
+              `Dev auto-merge eligible: ${autoMergeGuard.eligible}${autoMergeGuard.blockedReasons.length > 0 ? ` (${autoMergeGuard.blockedReasons[0]})` : ""}`,
+              ...(mergeResult.attempted
+                ? [`Dev auto-merge result: ${mergeResult.merged ? "merged" : `failed (${mergeResult.error})`}`]
+                : []),
+            ];
+            return { exitCode, stdout: `${lines.join("\n")}\n` };
           },
         }),
       },
