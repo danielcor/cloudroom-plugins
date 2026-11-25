@@ -102,7 +102,7 @@
 - [x] **Step 2:** Register the 8 native fenced tools via `bb.agents.registerTool` + `bb.agents.configure` scoped to `pluginMetadata.shipRole === "steward-worker"`, backed by `host.ts` (`-c core.hooksPath=/dev/null`, `merge-guard`, `never-edit`, live secret checks).
 - [x] **Step 3:** Implement `gatekeeper.ts` on `bb.events.on("interaction.pending")` for worker/reviewer threads, plus repo `.claude/skills/steward/SKILL.md` (and `babysit` fallback) loader.
 - [x] **Step 4:** Add `room-cli ship start|steward|status|stop|pause|resume|terms`, opt-in repo-wide auto-watch discovery, push notifications on `Ready`/`Needs Human`, and minimal `ShipPage`.
-- [ ] **Step 5:** End-to-end fake lifecycle tests (`vitest`) and isolated `room-cli plugin build .` on `aipc-ubuntu` passed; live `aipc-ubuntu` install/smoke test against a private test PR awaits Daniel's approval.
+- [x] **Step 5:** End-to-end fake lifecycle tests (`vitest`), isolated `room-cli plugin build .`, live `aipc-ubuntu` plugin install (`ship@0.1.0`), and live private-PR smoke test (`danielcor/ship-plugin-smoke-test` #2) all passed.
 
 ---
 

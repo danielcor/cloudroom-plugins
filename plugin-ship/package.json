@@ -5,8 +5,8 @@
   "type": "module",
   "description": "Publish, review, steward, and approve GitHub pull requests with multi-model agents and a deterministic safety fence.",
   "engines": {
-    "bb": ">=166.0",
-    "bbPluginSdk": ">=0.6.189"
+    "bb": ">=0.0",
+    "bbPluginSdk": ">=0.6.49"
   },
   "bb": {
     "name": "Ship",

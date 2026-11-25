@@ -186,7 +186,7 @@ interface RawGhPrListItem {
   headRefName: string;
   headRefOid: string;
   baseRefName: string;
-  baseRefOid: string;
+  baseRefOid?: string;
   author?: { login?: string | null } | null;
   labels?: Array<{ name?: string | null }>;
   mergeStateStatus?: string;
@@ -209,7 +209,7 @@ export async function ghFindOpenPr(
     "--state",
     "open",
     "--json",
-    "number,url,title,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,author,labels,mergeStateStatus,isCrossRepository",
+    "number,url,title,state,isDraft,headRefName,headRefOid,baseRefName,author,labels,mergeStateStatus,isCrossRepository",
     "--limit",
     "5",
   ]);
@@ -228,7 +228,7 @@ export async function ghFindOpenPr(
     headRefName: pr.headRefName,
     headRefOid: pr.headRefOid,
     baseRefName: pr.baseRefName,
-    baseRefOid: pr.baseRefOid,
+    baseRefOid: pr.baseRefOid ?? "",
     authorLogin: pr.author?.login ?? "",
     labels: (pr.labels ?? []).map((l) => l.name ?? "").filter(Boolean),
     mergeStateStatus: pr.mergeStateStatus ?? "UNKNOWN",

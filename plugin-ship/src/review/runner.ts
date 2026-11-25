@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { BbPluginApi, PluginThreadSettledEvent } from "@get-bb/plugin-sdk";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { InspectReviewContextOutput } from "../contract.js";
 import type { ReviewFindingRecord, ReviewRunRecord, ShipStore } from "../db.js";
 import { GitHubBotClient, type ReviewInlineCommentInput } from "../github/bot.js";
@@ -27,8 +27,15 @@ import {
   type StopSplitTrigger,
 } from "./types.js";
 
+export interface ThreadSettlementEvent {
+  threadId: string;
+  outcome: "completed" | "failed" | "archived" | "deleted";
+  lastAssistantText: string | null;
+  error: string | null;
+}
+
 export type SettledThreadWaiter = {
-  resolve: (event: PluginThreadSettledEvent) => void;
+  resolve: (event: ThreadSettlementEvent) => void;
 };
 
 function sanitizeOutboundMarkdown(text: string): string {
@@ -177,7 +184,7 @@ export function createCloudroomSeatExecutor(opts: {
     });
 
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const settledPromise = new Promise<PluginThreadSettledEvent | "timeout">((resolve) => {
+    const settledPromise = new Promise<ThreadSettlementEvent | "timeout">((resolve) => {
       opts.settledWaiters.set(threadId, { resolve });
       timer = setTimeout(() => resolve("timeout"), timeoutMs);
     });

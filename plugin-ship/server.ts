@@ -23,6 +23,7 @@ import {
   createCloudroomSeatExecutor,
   runShipReview,
   type SettledThreadWaiter,
+  type ThreadSettlementEvent,
 } from "./src/review/runner.js";
 import { ReviewerGatekeeper } from "./src/review/types.js";
 import { isNeverEditPath, isSecretFilename } from "./src/safety/never-edit.js";
@@ -188,9 +189,45 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
       .catch(() => undefined);
   });
 
-  bb.events.on("experimental_thread.settled", (event) => {
-    settledWaiters.get(event.thread.id)?.resolve(event);
-    poller.handleWorkerSettled(event.thread.id);
+  function handleThreadSettled(event: ThreadSettlementEvent): void {
+    settledWaiters.get(event.threadId)?.resolve(event);
+    poller.handleWorkerSettled(event.threadId);
+  }
+
+  bb.events.on("thread.idle", (e) => {
+    handleThreadSettled({
+      threadId: e.thread.id,
+      outcome: "completed",
+      lastAssistantText: e.lastAssistantText ?? null,
+      error: null,
+    });
+  });
+
+  bb.events.on("thread.failed", (e) => {
+    handleThreadSettled({
+      threadId: e.thread.id,
+      outcome: "failed",
+      lastAssistantText: null,
+      error: e.error ?? null,
+    });
+  });
+
+  bb.events.on("thread.archived", (e) => {
+    handleThreadSettled({
+      threadId: e.thread.id,
+      outcome: "archived",
+      lastAssistantText: null,
+      error: null,
+    });
+  });
+
+  bb.events.on("thread.deleted", (e) => {
+    handleThreadSettled({
+      threadId: e.thread.id,
+      outcome: "deleted",
+      lastAssistantText: null,
+      error: null,
+    });
   });
 
   async function currentDefaults(): Promise<{ status: ShipStatus; repoDefaults: RepoDefaults }> {
@@ -225,10 +262,11 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
     ctx: PluginCliContext,
     hostOverride?: string,
     pathOverride?: string,
+    projectOverride?: string,
   ): Promise<{ hostId: string; root: string; projectId: string | null }> {
     let hostId = hostOverride?.trim() || undefined;
     let root = pathOverride?.trim() || ctx.cwd?.trim() || undefined;
-    let projectId = ctx.projectId?.trim() || null;
+    let projectId = projectOverride?.trim() || ctx.projectId?.trim() || null;
 
     if ((!hostId || !root || !projectId) && ctx.threadId) {
       try {
@@ -282,6 +320,23 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
         code: "no_checkout_path",
         hint: "Pass --path <dir> or run from inside a repository checkout.",
       });
+    }
+
+    if (!projectId) {
+      const normRoot = root.replace(/\/+$/u, "");
+      const projects = await bb.sdk.projects.list().catch(() => []);
+      for (const proj of projects) {
+        const matchedSrc = proj.sources.find((src) => {
+          if (src.hostId && src.hostId !== hostId) return false;
+          const srcRoot = src.path?.replace(/\/+$/u, "");
+          if (!srcRoot) return false;
+          return normRoot === srcRoot || normRoot.startsWith(`${srcRoot}/`);
+        });
+        if (matchedSrc) {
+          projectId = proj.id;
+          break;
+        }
+      }
     }
 
     return { hostId, root, projectId };
@@ -343,6 +398,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
     options: {
       path?: string;
       host?: string;
+      project?: string;
       repo?: string;
       pr?: number;
       remote?: string;
@@ -374,13 +430,12 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
       }
     }
 
-    const { hostId, root, projectId } = await resolveHostAndRoot(ctx, options.host, options.path);
-    if (!projectId) {
-      throw new PluginCliError("Could not determine projectId for starting a Steward watch.", {
-        code: "no_project_id",
-        hint: "Run inside a Cloudroom project or thread.",
-      });
-    }
+    const { hostId, root, projectId } = await resolveHostAndRoot(
+      ctx,
+      options.host,
+      options.path,
+      options.project,
+    );
 
     const inspectCtx = await hostClient.call(
       "inspectPublishContext",
@@ -864,6 +919,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
           options: {
             path: { type: "string", description: "Absolute path to git checkout on the target host." },
             host: { type: "string", description: "Cloudroom host id or name." },
+            project: { type: "string", description: "Cloudroom project id for spawning reviewer child threads." },
             repo: { type: "string", description: "GitHub repository (owner/repo) for PR dedup/posting." },
             pr: { type: "integer", min: 1, max: 9_999_999, description: "Optional pull request number." },
             base: { type: "string", description: "Base ref or commit SHA to diff from." },
@@ -895,7 +951,12 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
                 });
               }
             }
-            const { hostId, root, projectId } = await resolveHostAndRoot(ctx, options.host, options.path);
+            const { hostId, root, projectId } = await resolveHostAndRoot(
+              ctx,
+              options.host,
+              options.path,
+              options.project,
+            );
             if (!options["dry-run"] && !projectId) {
               throw new PluginCliError("Could not determine projectId to spawn reviewer child threads.", {
                 code: "no_project_id",
@@ -1032,6 +1093,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
           options: {
             path: { type: "string", description: "Absolute path to git checkout on the target host." },
             host: { type: "string", description: "Cloudroom host id or name." },
+            project: { type: "string", description: "Cloudroom project id for spawning Steward workers." },
             repo: { type: "string", description: "GitHub repository (owner/repo)." },
             pr: { type: "integer", min: 1, max: 9_999_999, description: "Pull request number." },
             remote: { type: "string", description: "Git remote name (defaults to origin)." },
@@ -1048,6 +1110,7 @@ export function createShipPlugin(deps: ShipServerDeps = {}) {
           options: {
             path: { type: "string", description: "Absolute path to git checkout on the target host." },
             host: { type: "string", description: "Cloudroom host id or name." },
+            project: { type: "string", description: "Cloudroom project id for spawning Steward workers." },
             repo: { type: "string", description: "GitHub repository (owner/repo)." },
             pr: { type: "integer", min: 1, max: 9_999_999, description: "Pull request number." },
             remote: { type: "string", description: "Git remote name (defaults to origin)." },
