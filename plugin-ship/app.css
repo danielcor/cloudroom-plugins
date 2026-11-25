@@ -1,0 +1,562 @@
+/* Cloudroom Ship plugin UI — strictly scoped .ship-* styles, theme-neutral for Light and Dark modes */
+
+.ship-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ship-subhdr {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px 18px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.ship-title-block h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.ship-subline {
+  font-size: 12px;
+  opacity: 0.7;
+  margin-top: 2px;
+}
+
+.ship-tabs {
+  display: inline-flex;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.ship-tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  opacity: 0.78;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ship-tab.is-active {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 9%, transparent);
+  border-color: color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.ship-cnt {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 0 6px;
+  border-radius: 99px;
+  background: color-mix(in srgb, currentColor 13%, transparent);
+}
+
+.ship-spacer {
+  flex: 1;
+}
+
+.ship-btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  color: inherit;
+  padding: 5px 11px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ship-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 9%, transparent);
+}
+
+.ship-btn:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.ship-btn.is-primary {
+  background: color-mix(in srgb, currentColor 88%, transparent);
+  border-color: transparent;
+  color: Canvas;
+}
+
+.ship-btn.is-sm {
+  padding: 3px 8px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+.ship-btn.is-danger {
+  color: #dc2626;
+  border-color: color-mix(in srgb, #dc2626 35%, transparent);
+}
+
+.ship-guide-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 8px 18px;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, currentColor 11%, transparent);
+  font-size: 12px;
+}
+
+.ship-guide-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.ship-cmd-pill {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  font-weight: 600;
+  background: color-mix(in srgb, currentColor 7%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+.ship-banner-err {
+  margin: 12px 18px 0;
+  padding: 8px 12px;
+  border-radius: 7px;
+  border: 1px solid color-mix(in srgb, #dc2626 40%, transparent);
+  background: color-mix(in srgb, #dc2626 10%, transparent);
+  color: #dc2626;
+  font-size: 12.5px;
+}
+
+.ship-banner-warn {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, #d97706 38%, transparent);
+  background: color-mix(in srgb, #d97706 10%, transparent);
+  color: #b45309;
+  font-size: 12px;
+}
+
+.ship-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.ship-pane-left {
+  flex: 1;
+  min-width: 0;
+  padding: 14px 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
+
+.ship-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ship-input,
+.ship-select,
+.ship-textarea {
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  color: inherit;
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12.5px;
+  font-family: inherit;
+}
+
+.ship-input-sm {
+  min-width: 210px;
+}
+
+.ship-seg {
+  display: inline-flex;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.ship-seg-btn {
+  appearance: none;
+  border: none;
+  border-right: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  background: transparent;
+  color: inherit;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ship-seg-btn:last-child {
+  border-right: none;
+}
+
+.ship-seg-btn.is-active {
+  background: color-mix(in srgb, currentColor 85%, transparent);
+  color: Canvas;
+}
+
+.ship-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.ship-table th {
+  text-align: left;
+  font-weight: 600;
+  opacity: 0.65;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 7px 8px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 13%, transparent);
+}
+
+.ship-table td {
+  padding: 10px 8px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 8%, transparent);
+  vertical-align: middle;
+}
+
+.ship-row-clickable {
+  cursor: pointer;
+}
+
+.ship-row-clickable:hover td {
+  background: color-mix(in srgb, currentColor 4%, transparent);
+}
+
+.ship-row-selected td {
+  background: color-mix(in srgb, currentColor 6%, transparent);
+}
+
+.ship-row-selected td:first-child {
+  box-shadow: inset 3px 0 0 currentColor;
+}
+
+.ship-actions-cell {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.ship-actions-row {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ship-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.ship-dim {
+  opacity: 0.68;
+}
+
+.ship-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.ship-pill.is-ok {
+  color: #15803d;
+  background: color-mix(in srgb, #16a34a 14%, transparent);
+  border-color: color-mix(in srgb, #16a34a 32%, transparent);
+}
+
+.ship-pill.is-warn {
+  color: #b45309;
+  background: color-mix(in srgb, #d97706 14%, transparent);
+  border-color: color-mix(in srgb, #d97706 34%, transparent);
+}
+
+.ship-pill.is-err {
+  color: #dc2626;
+  background: color-mix(in srgb, #dc2626 14%, transparent);
+  border-color: color-mix(in srgb, #dc2626 34%, transparent);
+}
+
+.ship-pill.is-info {
+  color: #1d4ed8;
+  background: color-mix(in srgb, #2563eb 14%, transparent);
+  border-color: color-mix(in srgb, #2563eb 32%, transparent);
+}
+
+.ship-pill.is-neu {
+  opacity: 0.84;
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  border-color: color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.ship-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.ship-inspector {
+  width: 440px;
+  flex: none;
+  border-left: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  background: color-mix(in srgb, currentColor 2.5%, transparent);
+  padding: 14px 18px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+  overflow: auto;
+}
+
+.ship-ins-hdr {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ship-ins-title {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.ship-ins-sub {
+  font-size: 12px;
+  opacity: 0.72;
+  margin-top: 2px;
+}
+
+.ship-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+
+.ship-stat-box {
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-radius: 7px;
+  padding: 6px 8px;
+}
+
+.ship-stat-lbl {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+
+.ship-stat-val {
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.ship-card {
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 13%, transparent);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ship-card-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ship-finding {
+  font-size: 12px;
+  padding: 6px 8px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 11%, transparent);
+  border-radius: 6px;
+}
+
+.ship-finding-sev {
+  color: #dc2626;
+  font-size: 11px;
+  font-weight: 700;
+  margin-right: 6px;
+}
+
+.ship-audit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ship-audit-row {
+  display: grid;
+  grid-template-columns: 60px 150px 1fr;
+  gap: 8px;
+  font-size: 11.5px;
+  align-items: baseline;
+}
+
+.ship-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px;
+}
+
+.ship-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ship-field.is-full {
+  grid-column: 1 / -1;
+}
+
+.ship-field-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+}
+
+.ship-chk-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, currentColor 13%, transparent);
+  border-radius: 7px;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.ship-code-cmd {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-x: auto;
+}
+
+/* Modal / Inline Watch PR sheet */
+.ship-modal-card {
+  margin: 0 18px;
+  padding: 12px 14px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  display: grid;
+  gap: 10px;
+}
+
+/* PublishConfirmCard */
+.ship-confirm-card {
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 10px;
+  padding: 13px 15px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ship-confirm-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ship-confirm-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.ship-confirm-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ship-confirm-file-chip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  border: 1px solid color-mix(in srgb, currentColor 14%, transparent);
+  background: color-mix(in srgb, currentColor 5%, transparent);
+}
+
+/* Compact Thread Header Row Bar */
+.ship-thread-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 14px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+  background: color-mix(in srgb, currentColor 2.5%, transparent);
+  font-size: 12px;
+}
+
+.ship-thread-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}

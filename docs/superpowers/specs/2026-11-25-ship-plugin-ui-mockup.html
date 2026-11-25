@@ -1,0 +1,1095 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cloudroom Ship Plugin — UI Design Mockup</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --sheet-bg: #eef0f3;
+    --win-bg: #ffffff;
+    --side-bg: #f7f7f8;
+    --panel-bg: #fafafa;
+    --surface-hover: #f4f4f5;
+    --surface-sel: #f0f2f5;
+    --line: #e4e4e7;
+    --line-strong: #d4d4d8;
+    --ink: #18181b;
+    --ink-2: #52525b;
+    --ink-3: #71717a;
+    --ink-4: #a1a1aa;
+    --accent: #18181b;
+    --brand-lime: #a3e635;
+    --ok-ink: #15803d;
+    --ok-bg: #dcfce7;
+    --ok-bd: #bbf7d0;
+    --warn-ink: #b45309;
+    --warn-bg: #fef3c7;
+    --warn-bd: #fde68a;
+    --err-ink: #b91c1c;
+    --err-bg: #fee2e2;
+    --err-bd: #fecaca;
+    --info-ink: #1d4ed8;
+    --info-bg: #dbeafe;
+    --info-bd: #bfdbfe;
+  }
+  body {
+    width: 1600px;
+    background: var(--sheet-bg);
+    color: var(--ink);
+    font: 13px/1.45 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    padding: 28px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .cap {
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin: 0 0 10px 4px;
+  }
+  .cap b { color: var(--ink); font-weight: 700; }
+  .win {
+    background: var(--win-bg);
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    overflow: hidden;
+    display: flex;
+    margin-bottom: 26px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+  }
+  .row2-split {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .row2-split .win { margin-bottom: 0; }
+
+  .side {
+    width: 210px;
+    background: var(--side-bg);
+    border-right: 1px solid var(--line);
+    padding: 12px 10px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .side-hdr {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink-3);
+    padding: 4px 10px 8px;
+  }
+  .nav {
+    padding: 6px 10px;
+    border-radius: 7px;
+    color: var(--ink-2);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-weight: 500;
+    font-size: 13px;
+  }
+  .nav.on {
+    background: #ffffff;
+    color: var(--ink);
+    border: 1px solid var(--line);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  }
+  .nav svg { width: 14px; height: 14px; flex: none; color: var(--ink-3); }
+  .nav.on svg { color: var(--ink); }
+  .sep { height: 1px; background: var(--line); margin: 10px 6px; }
+  .sec-lbl {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ink-3);
+    padding: 2px 10px 4px;
+  }
+  .thr {
+    padding: 5px 10px;
+    border-radius: 6px;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .thr.on { background: #e8eaee; color: var(--ink); font-weight: 500; }
+
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--win-bg); }
+  .topbar {
+    height: 44px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    justify-content: space-between;
+    background: #ffffff;
+    gap: 12px;
+  }
+  .topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--ink);
+    min-width: 0;
+  }
+  .topbar-logo {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: -0.02em;
+    color: var(--ink);
+    flex: none;
+  }
+  .logo-badge {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    background: var(--brand-lime);
+    border: 1px solid #84cc16;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: 800;
+    color: #1a2e05;
+  }
+  .topbar-right { display: flex; align-items: center; gap: 8px; flex: none; }
+  .pane-btn {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-3);
+    font-size: 12px;
+  }
+
+  .subhdr {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    background: #ffffff;
+  }
+  .subhdr h1 { font-size: 15px; font-weight: 650; color: var(--ink); letter-spacing: -0.01em; }
+  .subhdr .sub { font-size: 12px; color: var(--ink-3); margin-top: 1px; }
+  .tabs {
+    display: inline-flex;
+    background: var(--side-bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 2px;
+    gap: 2px;
+    margin-left: 8px;
+  }
+  .tab {
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ink-2);
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+  .tab.on {
+    background: #ffffff;
+    color: var(--ink);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+  .cnt {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    padding: 0 5px;
+    border-radius: 99px;
+    background: #e4e4e7;
+    color: var(--ink-2);
+  }
+  .tab.on .cnt { background: #18181b; color: #ffffff; }
+  .sp { flex: 1; }
+
+  .btn {
+    border: 1px solid var(--line-strong);
+    background: #ffffff;
+    color: var(--ink);
+    padding: 5px 11px;
+    border-radius: 7px;
+    font-size: 12.5px;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+  .btn.pri { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+  .btn.sm { padding: 3px 8px; font-size: 12px; border-radius: 6px; }
+  .btn.dan { color: var(--err-ink); border-color: var(--err-bd); background: #fffafa; }
+
+  .guide-strip {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 18px;
+    background: var(--panel-bg);
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+  .guide-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .cmd-pill {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    font-weight: 600;
+    background: #ffffff;
+    border: 1px solid var(--line-strong);
+    border-radius: 5px;
+    padding: 1px 6px;
+    color: var(--ink);
+  }
+  .guide-dot { color: var(--ink-4); }
+
+  .body { display: flex; flex: 1; min-height: 0; }
+  .pane-left { flex: 1; min-width: 0; padding: 14px 18px 16px; display: flex; flex-direction: column; }
+  .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .inp {
+    border: 1px solid var(--line-strong);
+    background: #ffffff;
+    border-radius: 7px;
+    padding: 5px 10px;
+    color: var(--ink);
+    font-size: 12.5px;
+  }
+  .inp.muted { color: var(--ink-3); }
+  .seg {
+    display: inline-flex;
+    border: 1px solid var(--line-strong);
+    border-radius: 7px;
+    overflow: hidden;
+    background: #ffffff;
+  }
+  .seg span {
+    padding: 5px 10px;
+    font-size: 12px;
+    color: var(--ink-2);
+    border-right: 1px solid var(--line);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .seg span:last-child { border-right: none; }
+  .seg span.on { background: var(--ink); color: #ffffff; }
+
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th {
+    text-align: left;
+    font-weight: 600;
+    color: var(--ink-3);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  td {
+    padding: 10px 8px;
+    border-bottom: 1px solid #f1f1f4;
+    vertical-align: middle;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  td.actions-cell { overflow: visible; text-align: right; }
+  tr.sel td { background: var(--surface-sel); }
+  tr.sel td:first-child { box-shadow: inset 3px 0 0 var(--ink); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  .dim { color: var(--ink-3); }
+  .tnum { font-variant-numeric: tabular-nums; }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 8px;
+    border-radius: 99px;
+    font-size: 11.5px;
+    font-weight: 600;
+    border: 1px solid transparent;
+    white-space: nowrap;
+    flex: none;
+  }
+  .pill.ok { color: var(--ok-ink); background: var(--ok-bg); border-color: var(--ok-bd); }
+  .pill.warn { color: var(--warn-ink); background: var(--warn-bg); border-color: var(--warn-bd); }
+  .pill.err { color: var(--err-ink); background: var(--err-bg); border-color: var(--err-bd); }
+  .pill.info { color: var(--info-ink); background: var(--info-bg); border-color: var(--info-bd); }
+  .pill.neu { color: var(--ink-2); background: var(--surface-hover); border-color: var(--line); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+
+  .table-foot {
+    margin-top: auto;
+    padding-top: 12px;
+    font-size: 12px;
+    color: var(--ink-3);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .inspector {
+    width: 452px;
+    flex: none;
+    border-left: 1px solid var(--line);
+    background: var(--panel-bg);
+    padding: 14px 18px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+  }
+  .ins-hdr { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+  .ins-title { font-size: 14px; font-weight: 650; color: var(--ink); }
+  .ins-sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+  .reason-box {
+    background: #fffbeb;
+    border: 1px solid var(--warn-bd);
+    color: #92400e;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+  .ins-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+  }
+  .stat-box {
+    background: #ffffff;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 6px 8px;
+  }
+  .stat-lbl { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); }
+  .stat-val { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; margin-top: 1px; color: var(--ink); }
+  .stat-val.warn { color: var(--warn-ink); }
+  .stat-val.ok { color: var(--ok-ink); }
+
+  .card {
+    background: #ffffff;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .card-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .finding {
+    font-size: 12px;
+    padding: 6px 8px;
+    background: var(--panel-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--ink-2);
+  }
+  .finding b { color: var(--err-ink); font-size: 11px; margin-right: 4px; }
+  .audit-list { display: flex; flex-direction: column; gap: 6px; }
+  .audit-row {
+    display: grid;
+    grid-template-columns: 54px 150px 1fr;
+    gap: 10px;
+    font-size: 11.5px;
+    align-items: baseline;
+  }
+  .audit-ts { font-family: ui-monospace, monospace; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .audit-act { font-family: ui-monospace, monospace; font-weight: 600; color: var(--ink); white-space: nowrap; }
+
+  /* Panel 2 form styles */
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .fld { display: flex; flex-direction: column; gap: 4px; }
+  .fld.full { grid-column: 1 / -1; }
+  .fld label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-3);
+  }
+  .selbox {
+    border: 1px solid var(--line-strong);
+    background: #ffffff;
+    border-radius: 7px;
+    padding: 5px 9px;
+    font-size: 12.5px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: var(--ink);
+  }
+  .chk-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    background: #ffffff;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+  .chk-box {
+    width: 15px;
+    height: 15px;
+    border-radius: 4px;
+    background: var(--ink);
+    color: #ffffff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    flex: none;
+    margin-top: 1px;
+  }
+  .code-cmd {
+    background: #18181b;
+    color: #f4f4f5;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+  }
+  .copy-tag {
+    font-family: Inter, sans-serif;
+    font-size: 11px;
+    color: #d4d4d8;
+    border: 1px solid #3f3f46;
+    border-radius: 4px;
+    padding: 1px 6px;
+    flex: none;
+  }
+
+  /* Panel 3 Split In-Thread Showcase */
+  .thread-hdr-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 9px;
+    border-radius: 99px;
+    background: var(--ok-bg);
+    border: 1px solid var(--ok-bd);
+    color: var(--ok-ink);
+    font-size: 11.5px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .chat-wrap {
+    flex: 1;
+    padding: 16px 22px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: #ffffff;
+  }
+  .chat-msg { color: var(--ink-2); font-size: 13px; }
+  .confirm-card {
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    background: #ffffff;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
+    padding: 13px 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .cc-hdr { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .cc-title { font-weight: 650; font-size: 13.5px; color: var(--ink); display: flex; align-items: center; gap: 8px; }
+  .cc-meta {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--ink-2);
+    padding: 6px 10px;
+    background: var(--panel-bg);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+  }
+  .file-chip {
+    display: inline-block;
+    font-family: ui-monospace, monospace;
+    font-size: 11.5px;
+    background: var(--panel-bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 2px 7px;
+    margin-right: 5px;
+    color: var(--ink);
+  }
+  .plus-menu {
+    width: 340px;
+    background: #ffffff;
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.09);
+    padding: 6px;
+  }
+  .pm-item {
+    padding: 6px 9px;
+    border-radius: 7px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+  }
+  .pm-item.on { background: var(--surface-sel); }
+  .pm-title { font-size: 12.5px; font-weight: 600; color: var(--ink); display: flex; justify-content: space-between; }
+  .pm-desc { font-size: 11.5px; color: var(--ink-3); }
+  .pm-sep { height: 1px; background: var(--line); margin: 4px 2px; }
+  .pm-foot { padding: 4px 9px 2px; font-size: 11px; color: var(--ink-3); }
+
+  .composer-box {
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    padding: 10px 12px;
+    background: #ffffff;
+  }
+  .composer-text { color: var(--ink-3); font-size: 12.5px; margin-bottom: 10px; }
+  .composer-bar { display: flex; align-items: center; gap: 8px; }
+  .plus-btn {
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    border: 1px solid var(--ink);
+    background: var(--ink);
+    color: #ffffff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+  }
+  .model-tag { font-size: 12px; color: var(--ink-3); }
+  .send-btn {
+    margin-left: auto;
+    width: 26px;
+    height: 26px;
+    border-radius: 99px;
+    background: var(--ink);
+    color: #ffffff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .badge-muted {
+    font-size: 11px;
+    color: var(--ink-3);
+    background: var(--side-bg);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1px 6px;
+  }
+</style>
+</head>
+<body>
+
+<!-- ========================================================= -->
+<!-- PANEL 1: SHIP DASHBOARD — WATCHES & LIVE PR INSPECTOR    -->
+<!-- ========================================================= -->
+<div class="cap"><b>1 · Ship Dashboard</b> — Watches Table, Quick Guide &amp; Live PR Inspector (Sidebar NavPanel)</div>
+<div class="win">
+  <div class="side">
+    <div class="side-hdr">Cloudroom</div>
+    <div class="nav">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M8 5v6M5 8h6"/></svg>
+      New thread
+    </div>
+    <div class="nav">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8a5 5 0 1 1-1.5-3.5M13 2.5V5h-2.5"/></svg>
+      Loops
+    </div>
+    <div class="nav">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 2.5h5.5L12.5 5.5V13.5H4z"/><path d="M9.5 2.5v3h3"/></svg>
+      Snippets
+    </div>
+    <div class="nav on">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="4.5" cy="4" r="1.5"/><circle cx="4.5" cy="12" r="1.5"/><circle cx="11.5" cy="6" r="1.5"/><path d="M4.5 5.5v5M11.5 7.5c0 2.5-2 3.5-7 3.5"/></svg>
+      Ship
+    </div>
+    <div class="sep"></div>
+    <div class="sec-lbl">pmzbot</div>
+    <div class="thr">Fix Tier3 null quote guard</div>
+    <div class="sec-lbl" style="margin-top:6px">cloudroom-plugins</div>
+    <div class="thr">ship-plugin design &amp; PR #13</div>
+    <div class="thr">Prompt Snippets</div>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-left">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="4.5" cy="4" r="1.5"/><circle cx="4.5" cy="12" r="1.5"/><circle cx="11.5" cy="6" r="1.5"/><path d="M4.5 5.5v5M11.5 7.5c0 2.5-2 3.5-7 3.5"/></svg>
+        Ship
+      </div>
+      <div class="topbar-logo"><span class="logo-badge">c</span> cloudroom.</div>
+      <div class="topbar-right">
+        <div class="pane-btn">◫</div>
+      </div>
+    </div>
+
+    <div class="subhdr">
+      <div>
+        <h1>Ship</h1>
+        <div class="sub">Publish, Triad/Sol-loop review, PR Steward daemon, and Approvals</div>
+      </div>
+      <div class="tabs">
+        <span class="tab on">Watches <span class="cnt">2</span></span>
+        <span class="tab">Repos <span class="cnt">3</span></span>
+        <span class="tab">Setup &amp; Commands</span>
+      </div>
+      <div class="sp"></div>
+      <span class="pill warn"><span class="dot"></span> Bot not configured</span>
+      <span class="btn pri">+ Watch PR</span>
+      <span class="btn">Refresh</span>
+    </div>
+
+    <div class="guide-strip">
+      <span class="guide-item"><span class="cmd-pill">/ship</span> Preflight, push branch, open PR &amp; Triad review</span>
+      <span class="guide-dot">·</span>
+      <span class="guide-item"><span class="cmd-pill">/steward</span> Background fixer (120s zero-token poll)</span>
+      <span class="guide-dot">·</span>
+      <span class="guide-item"><span class="cmd-pill">/ship-approvals</span> Default-branch <span class="mono">.claude/approvals.yml</span> gate</span>
+    </div>
+
+    <div class="body">
+      <div class="pane-left">
+        <div class="toolbar">
+          <div class="inp muted" style="width:230px">Filter PRs, repos, branches...</div>
+          <div class="seg">
+            <span class="on">Active (2)</span>
+            <span>All (3)</span>
+            <span>Needs Human (1)</span>
+          </div>
+          <div class="sp"></div>
+          <span class="dim tnum" style="font-size:12px">Poller every 120s · 0 LLM tokens when idle</span>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th style="width:23%">PR</th>
+              <th style="width:20%">Branch</th>
+              <th style="width:16%">State</th>
+              <th style="width:9%">Head</th>
+              <th style="width:16%">Review / Approvals</th>
+              <th style="width:16%;text-align:right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="sel">
+              <td><b>danielcor/pmzbot#412</b></td>
+              <td class="mono dim">fix/tier3-guard → dev</td>
+              <td><span class="pill warn"><span class="dot"></span>Needs Human</span></td>
+              <td class="mono dim">9c4e1a2</td>
+              <td style="font-size:12px">CHANGES · pending</td>
+              <td class="actions-cell">
+                <span class="btn sm">Resume</span>
+                <span class="btn sm dan">Stop</span>
+              </td>
+            </tr>
+            <tr>
+              <td><b>danielcor/cloudroom-plugins#13</b></td>
+              <td class="mono dim">room/reverse-eng… → main</td>
+              <td><span class="pill ok"><span class="dot"></span>Ready</span></td>
+              <td class="mono dim">3ed78e5</td>
+              <td style="font-size:12px">APPROVE · checks ok</td>
+              <td class="actions-cell">
+                <span class="btn sm">Pause</span>
+                <span class="btn sm dan">Stop</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="table-foot">
+          <span>Showing active watches · 1 stopped smoke-test watch hidden in <b>All (3)</b></span>
+          <span class="tnum">Click any row to inspect reviews, approvals &amp; audit trail →</span>
+        </div>
+      </div>
+
+      <div class="inspector">
+        <div class="ins-hdr">
+          <div>
+            <div class="ins-title">danielcor/pmzbot #412</div>
+            <div class="ins-sub"><span class="mono">fix/tier3-guard</span> → <span class="mono">dev</span> · host <span class="mono">aipc-ubuntu</span></div>
+          </div>
+          <span class="pill warn"><span class="dot"></span>Needs Human</span>
+        </div>
+
+        <div class="reason-box">
+          <b>Escalated:</b> Push cap reached for cause <span class="mono">check:dotnet-test</span> (3/3). Review before resuming watch.
+        </div>
+
+        <div class="ins-actions">
+          <span class="btn sm pri">Resume Watch</span>
+          <span class="btn sm">Run Review</span>
+          <span class="btn sm">Check Approvals</span>
+          <span class="btn sm dan">Stop</span>
+        </div>
+
+        <div class="stat-row">
+          <div class="stat-box"><div class="stat-lbl">Cause Pushes</div><div class="stat-val warn">3 / 3</div></div>
+          <div class="stat-box"><div class="stat-lbl">Base Merges</div><div class="stat-val">1 / 2</div></div>
+          <div class="stat-box"><div class="stat-lbl">CI Reruns</div><div class="stat-val">1 / 1</div></div>
+          <div class="stat-box"><div class="stat-lbl">Tamper Pins</div><div class="stat-val ok">14/14 OK</div></div>
+        </div>
+
+        <div class="card">
+          <div class="card-hdr">
+            <span>Latest Review · Triad (high · 3/3)</span>
+            <span class="pill err">CHANGES · 7.8/10</span>
+          </div>
+          <div class="finding">
+            <b>F1 [MAJOR]</b> <span class="mono">src/Execution/Tier3Guard.cs:148</span> — Missing null check when quote stream resets mid-halt (Claude + GPT).
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2);border-top:1px solid var(--line);padding-top:6px">
+            <span>Approvals (<b>enforce</b>): <span class="mono">policy 8a1f3c</span></span>
+            <span><b>comment</b> · 2 seats req</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-hdr">
+            <span>Audit Trail</span>
+            <span class="dim" style="font-weight:500">Newest first</span>
+          </div>
+          <div class="audit-list">
+            <div class="audit-row">
+              <span class="audit-ts">05:18:04</span>
+              <span class="audit-act">steward.escalate</span>
+              <span class="dim">Reached max push cap (3/3)</span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-ts">05:14:22</span>
+              <span class="audit-act">steward.commit_push</span>
+              <span class="dim">Pushed 2 files (9c4e1a2) · hooks off</span>
+            </div>
+            <div class="audit-row">
+              <span class="audit-ts">05:10:02</span>
+              <span class="audit-act">steward.worker_woken</span>
+              <span class="dim">Failing job dotnet-test (#891204)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========================================================= -->
+<!-- PANEL 2: REPOS & BOT SETUP                                -->
+<!-- ========================================================= -->
+<div class="cap"><b>2 · Repos &amp; Bot Setup</b> — Per-Repo Review, Steward &amp; Approvals Policies + Dual-Identity Bot Status</div>
+<div class="win">
+  <div class="side">
+    <div class="side-hdr">Cloudroom</div>
+    <div class="nav">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M8 5v6M5 8h6"/></svg>
+      New thread
+    </div>
+    <div class="nav">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8a5 5 0 1 1-1.5-3.5M13 2.5V5h-2.5"/></svg>
+      Loops
+    </div>
+    <div class="nav">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 2.5h5.5L12.5 5.5V13.5H4z"/><path d="M9.5 2.5v3h3"/></svg>
+      Snippets
+    </div>
+    <div class="nav on">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="4.5" cy="4" r="1.5"/><circle cx="4.5" cy="12" r="1.5"/><circle cx="11.5" cy="6" r="1.5"/><path d="M4.5 5.5v5M11.5 7.5c0 2.5-2 3.5-7 3.5"/></svg>
+      Ship
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-left">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="4.5" cy="4" r="1.5"/><circle cx="4.5" cy="12" r="1.5"/><circle cx="11.5" cy="6" r="1.5"/><path d="M4.5 5.5v5M11.5 7.5c0 2.5-2 3.5-7 3.5"/></svg>
+        Ship
+      </div>
+      <div class="topbar-logo"><span class="logo-badge">c</span> cloudroom.</div>
+      <div class="topbar-right"><div class="pane-btn">◫</div></div>
+    </div>
+
+    <div class="subhdr">
+      <div>
+        <h1>Ship</h1>
+        <div class="sub">Repository overrides &amp; dedicated GitHub bot credentials</div>
+      </div>
+      <div class="tabs">
+        <span class="tab">Watches <span class="cnt">2</span></span>
+        <span class="tab on">Repos <span class="cnt">3</span></span>
+        <span class="tab">Setup &amp; Commands</span>
+      </div>
+      <div class="sp"></div>
+      <span class="pill ok"><span class="dot"></span> Bot: danielcor-ship-bot</span>
+      <span class="btn pri">+ Add Repo</span>
+    </div>
+
+    <div class="body">
+      <div class="pane-left">
+        <div class="toolbar">
+          <div class="inp muted" style="width:240px">Filter repositories...</div>
+          <div class="sp"></div>
+          <span class="dim" style="font-size:12px">Global defaults: <b>triad · high · poll 120s</b></span>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th style="width:30%">Repository</th>
+              <th style="width:17%">Review</th>
+              <th style="width:16%">Auto-Steward</th>
+              <th style="width:17%">Approvals</th>
+              <th style="width:20%">dev Auto-Merge</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="sel">
+              <td><b>danielcor/pmzbot</b></td>
+              <td>triad · high</td>
+              <td><span class="pill info">auto</span></td>
+              <td><span class="pill warn">enforce</span></td>
+              <td><span class="pill ok">dev only</span></td>
+            </tr>
+            <tr>
+              <td><b>danielcor/rust-pmz-copytrading</b></td>
+              <td>sol-loop · max</td>
+              <td><span class="pill neu">manual</span></td>
+              <td><span class="pill neu">observe</span></td>
+              <td class="dim">Off</td>
+            </tr>
+            <tr>
+              <td><b>danielcor/cloudroom-plugins</b></td>
+              <td>triad · high</td>
+              <td><span class="pill neu">manual</span></td>
+              <td><span class="pill neu">observe</span></td>
+              <td class="dim">Off</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="inspector" style="width:452px">
+        <div class="ins-hdr">
+          <div>
+            <div class="ins-title">Policy: danielcor/pmzbot</div>
+            <div class="ins-sub">Overrides global Ship defaults for this repository</div>
+          </div>
+          <span class="pill ok">Enabled</span>
+        </div>
+
+        <div class="form-grid">
+          <div class="fld">
+            <label>Review Mode</label>
+            <div class="selbox"><span>triad (3-family blind)</span><span class="dim">▾</span></div>
+          </div>
+          <div class="fld">
+            <label>Reasoning Effort</label>
+            <div class="selbox"><span>high</span><span class="dim">▾</span></div>
+          </div>
+          <div class="fld">
+            <label>Auto-Steward</label>
+            <div class="selbox"><span>auto (discover PRs)</span><span class="dim">▾</span></div>
+          </div>
+          <div class="fld">
+            <label>Approvals Mode</label>
+            <div class="selbox"><span>enforce (blocking)</span><span class="dim">▾</span></div>
+          </div>
+          <div class="fld">
+            <label>Max Pushes / Cause</label>
+            <div class="inp tnum">3</div>
+          </div>
+          <div class="fld">
+            <label>Max Review Rounds</label>
+            <div class="inp tnum">4</div>
+          </div>
+          <div class="fld full">
+            <label>Trusted Bots (allowed to trigger Steward)</label>
+            <div class="inp mono">coderabbitai[bot], dependabot[bot]</div>
+          </div>
+        </div>
+
+        <div class="chk-row">
+          <span class="chk-box">✓</span>
+          <div>
+            <b>Allow dev-only auto-merge</b>
+            <div class="dim" style="font-size:11.5px;margin-top:2px">Hard-blocked on <span class="mono">main</span>, <span class="mono">master</span>, <span class="mono">beta</span>, <span class="mono">prod</span>, and <span class="mono">release/*</span>; requires clean APPROVE review + green CI + 0 seats.</div>
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="btn pri">Save Repository</span>
+          <span style="color:var(--ok-ink);font-size:12px;font-weight:500">✓ Saved to SQLite</span>
+        </div>
+
+        <div class="card">
+          <div class="card-hdr">
+            <span>GitHub Bot Identity (<span class="mono">0600</span> Secret Store)</span>
+            <span class="pill ok">Verified @danielcor-ship-bot</span>
+          </div>
+          <div class="dim" style="font-size:11.5px">Your personal <span class="mono">gh</span> opens PRs; the bot posts reviews, Commit Statuses &amp; <span class="mono">APPROVE</span>.</div>
+          <div class="code-cmd">
+            <span>room-cli plugin config ship set botLogin danielcor-ship-bot</span>
+            <span class="copy-tag">Copy</span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span class="btn sm">Run Bot Check</span>
+            <span class="dim" style="font-size:11.5px">Last verified 2m ago</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========================================================= -->
+<!-- PANEL 3: IN-THREAD EXPERIENCE (3A + 3B SIDE BY SIDE)     -->
+<!-- ========================================================= -->
+<div class="cap"><b>3 · In-Thread Experience</b> — (A) Thread Header PR Badge &amp; Publish Confirm Card · (B) Composer <kbd>+</kbd> Ship Menu</div>
+<div class="row2-split">
+  <!-- 3A -->
+  <div class="win">
+    <div class="main">
+      <div class="topbar">
+        <div class="topbar-left">
+          <b>Fix Tier3 null quote guard</b>
+          <span class="badge-muted">3A · Confirm Card &amp; Header Badge</span>
+        </div>
+        <div class="topbar-right">
+          <span class="thread-hdr-pill"><span class="dot"></span> PR #412 · Ready · Triad APPROVE</span>
+          <div class="pane-btn">◫</div>
+        </div>
+      </div>
+
+      <div class="chat-wrap">
+        <div class="chat-msg">
+          Added the null check on session halt and updated <span class="mono">Tier3GuardTests.cs</span>. All 18 tests pass. Running <span class="mono">/ship</span> preflight:
+        </div>
+
+        <div class="confirm-card">
+          <div class="cc-hdr">
+            <div class="cc-title">
+              Confirm Ship &amp; Publish PR
+              <span class="pill ok">PRIVATE REPO</span>
+            </div>
+            <span class="dim mono" style="font-size:12px">danielcor/pmzbot</span>
+          </div>
+
+          <div class="cc-meta">
+            <span>Branch: <b class="mono">fix/tier3-guard → dev</b></span>
+            <span>Stage: <b>2 files</b></span>
+            <span style="color:var(--ok-ink)">✓ No secrets or protected paths</span>
+          </div>
+
+          <div>
+            <span class="file-chip">src/Execution/Tier3Guard.cs</span>
+            <span class="file-chip">tests/Tier3GuardTests.cs</span>
+          </div>
+
+          <div class="form-grid">
+            <div class="fld">
+              <label>Commit Message (repo hooks ON)</label>
+              <div class="inp">fix: guard null quote on halt reset</div>
+            </div>
+            <div class="fld">
+              <label>PR Title</label>
+              <div class="inp">Fix Tier3 null quote guard on halt</div>
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:10px;border-top:1px solid var(--line);padding-top:10px">
+            <span class="dim" style="font-size:12px">Review security delay complete · Open as draft: <b>No</b></span>
+            <div class="sp"></div>
+            <span class="btn">Cancel</span>
+            <span class="btn pri">Allow Publish</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3B -->
+  <div class="win">
+    <div class="main">
+      <div class="topbar">
+        <div class="topbar-left">
+          <b>ship-plugin design &amp; PR #13</b>
+          <span class="badge-muted">3B · Composer + Menu</span>
+        </div>
+        <div class="topbar-right">
+          <span class="thread-hdr-pill"><span class="dot"></span> PR #13 · Watching · 120s poll</span>
+          <div class="pane-btn">◫</div>
+        </div>
+      </div>
+
+      <div class="chat-wrap">
+        <div class="chat-msg">
+          PR #13 is open against <span class="mono">main</span>. Click <span class="mono">+</span> to run a Ship action or check approvals:
+        </div>
+
+        <div style="margin-top:auto;display:flex;flex-direction:column;gap:8px">
+          <div class="plus-menu">
+            <div class="pm-item on">
+              <div class="pm-title"><span>Ship this branch…</span><span class="mono dim" style="font-size:11px">/ship</span></div>
+              <div class="pm-desc">Preflight, commit, open PR &amp; run Triad review</div>
+            </div>
+            <div class="pm-item">
+              <div class="pm-title"><span>Watch PR with Steward…</span><span class="mono dim" style="font-size:11px">/steward</span></div>
+              <div class="pm-desc">Start 120s background poller on current PR</div>
+            </div>
+            <div class="pm-item">
+              <div class="pm-title"><span>Check PR approvals…</span><span class="mono dim" style="font-size:11px">/ship-approvals</span></div>
+              <div class="pm-desc">Evaluate default-branch .claude/approvals.yml</div>
+            </div>
+            <div class="pm-sep"></div>
+            <div class="pm-item">
+              <div class="pm-title"><span>Insert snippet…</span><span class="dim" style="font-size:11px">⌘⌥S</span></div>
+              <div class="pm-desc">Prompt Snippets</div>
+            </div>
+            <div class="pm-foot">Inserts prompt into composer — nothing runs until sent.</div>
+          </div>
+
+          <div class="composer-box">
+            <div class="composer-text">Reply or type <span class="mono">/</span> for skills (<span class="mono">/ship</span>, <span class="mono">/steward</span>, <span class="mono">/ship-approvals</span>)…</div>
+            <div class="composer-bar">
+              <span class="plus-btn">+</span>
+              <span class="model-tag">Claude Opus 5.5 · high</span>
+              <span class="send-btn">↑</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
