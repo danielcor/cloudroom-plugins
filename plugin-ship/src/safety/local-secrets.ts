@@ -91,6 +91,31 @@ type BoundedReadResult =
   | { status: "non_regular"; bytesRead: 0 }
   | { status: "error"; code?: string; bytesRead: number };
 
+async function classifyEnoentPath(filePath: string): Promise<"dangling" | "absent" | "error"> {
+  let cur = resolve(filePath);
+  while (true) {
+    try {
+      const st = await lstat(cur);
+      if (st.isSymbolicLink()) {
+        try {
+          await stat(cur);
+        } catch {
+          return "dangling";
+        }
+      }
+      return "absent";
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        return "error";
+      }
+    }
+    const parent = dirname(cur);
+    if (parent === cur) return "absent";
+    cur = parent;
+  }
+}
+
 async function readTextBounded(filePath: string, maxBytes = MAX_FILE_BYTES): Promise<BoundedReadResult> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   let totalBytes = 0;
@@ -100,33 +125,11 @@ async function readTextBounded(filePath: string, maxBytes = MAX_FILE_BYTES): Pro
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
-        try {
-          await lstat(filePath);
-          return { status: "error", code: "ENOENT", bytesRead: 0 };
-        } catch (lstatErr) {
-          const lstatCode = (lstatErr as NodeJS.ErrnoException).code;
-          if (lstatCode !== "ENOENT") {
-            return { status: "error", code: lstatCode, bytesRead: 0 };
-          }
+        const kind = await classifyEnoentPath(filePath);
+        if (kind === "absent") {
+          return { status: "missing", bytesRead: 0 };
         }
-        const parent = dirname(filePath);
-        let parentIsSymlink = false;
-        try {
-          parentIsSymlink = (await lstat(parent)).isSymbolicLink();
-        } catch (parentErr) {
-          const parentCode = (parentErr as NodeJS.ErrnoException).code;
-          if (parentCode !== "ENOENT") {
-            return { status: "error", code: parentCode, bytesRead: 0 };
-          }
-        }
-        if (parentIsSymlink) {
-          try {
-            await stat(parent);
-          } catch (targetErr) {
-            return { status: "error", code: (targetErr as NodeJS.ErrnoException).code ?? "ENOENT", bytesRead: 0 };
-          }
-        }
-        return { status: "missing", bytesRead: 0 };
+        return { status: "error", code: "ENOENT", bytesRead: 0 };
       }
       return { status: "error", code, bytesRead: 0 };
     }
@@ -188,7 +191,7 @@ function decodeShellUnquoted(raw: string): { value: string; hadEscapes: boolean 
 }
 
 function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolean } {
-  const src = (text.startsWith("\uFEFF") ? text.slice(1) : text).replace(/\r\n?/gu, "\n");
+  const src = (text.startsWith("\uFEFF") ? text.slice(1) : text).replace(/\r\n/gu, "\n");
   const n = src.length;
   const entries: DotenvEntry[] = [];
   let incomplete = false;
@@ -285,8 +288,8 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
       }
       if (!closed) incomplete = true;
       const rawBody = src.slice(bodyStart, closed ? bodyEnd : i);
-      const nodeStyle = rawBody.replace(/\\n/gu, "\n");
-      const dotenvStyle = nodeStyle.replace(/\\r/gu, "\r");
+      const nodeStyle = rawBody.replace(/\r/gu, "").replace(/\\n/gu, "\n");
+      const dotenvStyle = rawBody.replace(/\r\n?/gu, "\n").replace(/\\n/gu, "\n").replace(/\\r/gu, "\r");
       for (const v of new Set([decoded, shellStyle, nodeStyle, dotenvStyle])) {
         entries.push({ key, value: v, quote: "double" });
       }
@@ -305,11 +308,19 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
       const closeIdx = src.indexOf(quote, i);
       if (closeIdx === -1) {
         incomplete = true;
-        entries.push({ key, value: src.slice(i), quote: qKind });
+        const val = src.slice(i);
+        entries.push({ key, value: val, quote: qKind });
+        if (val.includes("\r")) {
+          entries.push({ key, value: val.replace(/\r/gu, ""), quote: qKind });
+        }
         i = n;
         continue;
       }
-      entries.push({ key, value: src.slice(i, closeIdx), quote: qKind });
+      const val = src.slice(i, closeIdx);
+      entries.push({ key, value: val, quote: qKind });
+      if (val.includes("\r")) {
+        entries.push({ key, value: val.replace(/\r/gu, ""), quote: qKind });
+      }
       i = closeIdx + 1;
       const restEnd = src.indexOf("\n", i);
       const stop = restEnd === -1 ? n : restEnd;
@@ -327,20 +338,30 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
     if (/(?:^|[^\\])(?:\\\\)*\\$/u.test(raw)) {
       incomplete = true;
     }
-    const hashIdx = raw.indexOf("#");
-    const unquotedVals: string[] = [];
-    if (hashIdx === -1) {
-      unquotedVals.push(raw.trim());
-    } else if (hashIdx === 0 || /[ \t]/u.test(raw[hashIdx - 1]!)) {
-      unquotedVals.push(raw.slice(0, hashIdx).trim());
-    } else {
-      const stripped = raw.slice(0, hashIdx).trim();
-      if (stripped !== "") unquotedVals.push(stripped);
-      const full = raw.trim();
-      if (full !== "" && full !== stripped) unquotedVals.push(full);
+    const collectUnquoted = (rawLine: string): string[] => {
+      const vals: string[] = [];
+      const hashIdx = rawLine.indexOf("#");
+      if (hashIdx === -1) {
+        vals.push(rawLine.trim());
+      } else if (hashIdx === 0 || /[ \t]/u.test(rawLine[hashIdx - 1]!)) {
+        vals.push(rawLine.slice(0, hashIdx).trim());
+      } else {
+        const stripped = rawLine.slice(0, hashIdx).trim();
+        if (stripped !== "") vals.push(stripped);
+        const full = rawLine.trim();
+        if (full !== "" && full !== stripped) vals.push(full);
+      }
+      return vals;
+    };
+    const unquotedVals = collectUnquoted(raw);
+    if (raw.includes("\r")) {
+      for (const v of collectUnquoted(raw.replace(/\r/gu, ""))) {
+        if (v !== "") unquotedVals.push(v);
+      }
     }
     const emitted = new Map<string, boolean>();
     for (const v of unquotedVals) {
+      if (emitted.has(v)) continue;
       entries.push({ key, value: v, quote: "none" });
       emitted.set(v, false);
     }
@@ -435,10 +456,7 @@ function parseGitCredentials(text: string): { passwords: string[]; incomplete: b
     } catch {
       // Malformed percent encoding handled below via pushField.
     }
-    if (
-      (url.password.toLowerCase() === "x-oauth-basic" || decodedPassword.toLowerCase() === "x-oauth-basic") &&
-      url.username !== ""
-    ) {
+    if (decodedPassword === "x-oauth-basic" && url.username !== "") {
       pushField(url.username);
     } else {
       pushField(url.password);

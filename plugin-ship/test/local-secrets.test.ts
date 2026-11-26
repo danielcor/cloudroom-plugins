@@ -368,7 +368,7 @@ describe("local secret collection and matching", () => {
     expect(findLocalSecretMatch("backslash_secret", res.secrets)).toBe("POSIX_TOKEN in .env.local\\backup");
   });
 
-  it("scales linearly on long uppercase keys and handles S2/S3/S4/S5/S6/S7 edge cases", async () => {
+  it("scales linearly on long uppercase keys and handles S2/S3/S4/S5/S6/S7/S9/S10 edge cases", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ship-sec-r2-"));
     dirs.push(dir);
     const homeDir = await mkdtemp(join(tmpdir(), "ship-sec-r2-home-"));
@@ -382,32 +382,24 @@ describe("local secret collection and matching", () => {
       "utf8",
     );
 
-    const stateDir = join(homeDir, ".state");
-    await mkdir(stateDir, { recursive: true });
-    const { stdout: ghTokenOut } = await execFileAsync("gh", ["auth", "token", "--hostname", "github.com"], {
-      env: {
-        PATH: process.env.PATH,
-        HOME: homeDir,
-        GH_CONFIG_DIR: ghDir,
-        XDG_CONFIG_HOME: join(homeDir, ".config"),
-        XDG_STATE_HOME: stateDir,
-        XDG_DATA_HOME: stateDir,
-        XDG_CACHE_HOME: stateDir,
-        GH_NO_UPDATE_NOTIFIER: "1",
-      },
-    });
-    expect(ghTokenOut.trim()).toBe("Z2hwX3Rlc3R0b2tlbg==");
-
     await writeFile(
       join(homeDir, ".git-credentials"),
-      "https://ghp_user%2Btok:x-oauth-basic@github.com\n",
+      "https://ghp_user%2Btok:x-oauth-basic@github.com\nhttps://alice:X-OAUTH-BASIC@github.com\n",
       "utf8",
     );
 
     const longUpperKey = `${"A".repeat(25_000)}_KEY`;
     await writeFile(
       join(dir, ".env"),
-      `${longUpperKey}=fast_key_val\nDOUBLE_BS_SECRET="a\\\\nb"\nCR_SECRET="part1\\rpart2"\n`,
+      [
+        `${longUpperKey}=fast_key_val`,
+        'DOUBLE_BS_SECRET="a\\\\nb"',
+        'CR_SECRET="part1\\rpart2"',
+        'DQ_CR_SECRET="left\rright"',
+        "SQ_CR_SECRET='sleft\rsright'",
+        "UNQ_CR_SECRET=uleft\ruright",
+        "",
+      ].join("\n"),
       "utf8",
     );
     await writeFile(join(dir, "\uFF0Eenv"), "FW_SECRET=fullwidth_dot_env_secret\n", "utf8");
@@ -425,11 +417,20 @@ describe("local secret collection and matching", () => {
     expect(findLocalSecretMatch("ghp_user%2Btok", res.secrets)).toBe("git credential");
     expect(findLocalSecretMatch("ghp_user+tok", res.secrets)).toBe("git credential");
     expect(findLocalSecretMatch("x-oauth-basic", res.secrets)).toBeNull();
+    expect(findLocalSecretMatch("X-OAUTH-BASIC", res.secrets)).toBe("git credential");
+    expect(findLocalSecretMatch("alice", res.secrets)).toBeNull();
     expect(findLocalSecretMatch("a\\\nb", res.secrets)).toBe("DOUBLE_BS_SECRET in .env");
     expect(findLocalSecretMatch("a\\nb", res.secrets)).toBe("DOUBLE_BS_SECRET in .env");
     expect(findLocalSecretMatch("part1\rpart2", res.secrets)).toBe("CR_SECRET in .env");
     expect(findLocalSecretMatch("part1\npart2", res.secrets)).toBe("CR_SECRET in .env");
     expect(findLocalSecretMatch("part1\r\npart2", res.secrets)).toBe("CR_SECRET in .env");
+    expect(findLocalSecretMatch("leftright", res.secrets)).toBe("DQ_CR_SECRET in .env");
+    expect(findLocalSecretMatch("left\rright", res.secrets)).toBe("DQ_CR_SECRET in .env");
+    expect(findLocalSecretMatch("left\nright", res.secrets)).toBe("DQ_CR_SECRET in .env");
+    expect(findLocalSecretMatch("sleftsright", res.secrets)).toBe("SQ_CR_SECRET in .env");
+    expect(findLocalSecretMatch("sleft\nsright", res.secrets)).toBe("SQ_CR_SECRET in .env");
+    expect(findLocalSecretMatch("ulefturight", res.secrets)).toBe("UNQ_CR_SECRET in .env");
+    expect(findLocalSecretMatch("uleft\nuright", res.secrets)).toBe("UNQ_CR_SECRET in .env");
     expect(findLocalSecretMatch("fullwidth_dot_env_secret", res.secrets)).toBe("FW_SECRET in \uFF0Eenv");
     expect(findLocalSecretMatch("cyrillic_e_env_secret", res.secrets)).toBe("CYR_SECRET in .\u0435nv");
     expect(findLocalSecretMatch("fullwidth_example_ignored", res.secrets)).toBeNull();
@@ -438,7 +439,7 @@ describe("local secret collection and matching", () => {
     expect(findLocalSecretMatch("plain text", [{ name: "inv", value: "\u200B" }])).toBeNull();
     expect(findLocalSecretMatch("a\u200Bb", [{ name: "inv", value: "\u200B" }])).toBe("inv");
 
-    // S4: dangling hosts.yml and .git-credentials symlinks must report incomplete
+    // S4: dangling hosts.yml, .git-credentials, and ~/.config ancestor symlinks must report incomplete
     const symlinkHome = await mkdtemp(join(tmpdir(), "ship-sec-symlink-home-"));
     dirs.push(symlinkHome);
     await mkdir(join(symlinkHome, ".config", "gh"), { recursive: true });
@@ -448,6 +449,15 @@ describe("local secret collection and matching", () => {
     expect(symlinkRes.incomplete).toBe(true);
     expect(symlinkRes.incompleteReasons).toEqual(
       expect.arrayContaining(["unreadable:gh hosts.yml", "unreadable:.git-credentials"]),
+    );
+
+    const cfgSymHome = await mkdtemp(join(tmpdir(), "ship-sec-cfg-sym-home-"));
+    dirs.push(cfgSymHome);
+    await symlink(join(cfgSymHome, "missing-config"), join(cfgSymHome, ".config"));
+    const cfgSymRes = await collectLocalSecrets(dir, { PATH: process.env.PATH }, cfgSymHome);
+    expect(cfgSymRes.incomplete).toBe(true);
+    expect(cfgSymRes.incompleteReasons).toEqual(
+      expect.arrayContaining(["unreadable:gh hosts.yml", "unreadable:git/credentials"]),
     );
   });
 });
