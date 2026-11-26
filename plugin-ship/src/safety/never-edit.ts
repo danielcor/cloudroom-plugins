@@ -101,7 +101,7 @@ const CONFUSABLE_MAP: Record<string, string> = {
   "\uFF0F": "/",
 };
 
-function foldConfusables(input: string, decodePercent = true): string {
+export function foldConfusables(input: string, decodePercent = true): string {
   let decoded = input;
   if (decodePercent) {
     try {

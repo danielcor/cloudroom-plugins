@@ -1,9 +1,9 @@
 import { constants } from "node:fs";
-import { open, readdir } from "node:fs/promises";
+import { lstat, open, opendir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isAlias, isNode, isPair, isScalar, parseAllDocuments, visit, type Alias, type Document, type Node } from "yaml";
-import { isSecretEnvBasename, normalizePathForCheck, stripInvisible } from "./never-edit.js";
+import { foldConfusables, isSecretEnvBasename, normalizePathForCheck, stripInvisible } from "./never-edit.js";
 
 export interface LocalSecret {
   name: string;
@@ -34,7 +34,7 @@ const DOTENV_SECRET_WORDS = new Set([
 
 function isDotenvSecretName(name: string): boolean {
   const words = name
-    .replace(/([A-Z]+)([A-Z][a-z])/gu, "$1 $2")
+    .replace(/([A-Z])([A-Z][a-z])/gu, "$1 $2")
     .replace(/([a-z0-9])([A-Z])/gu, "$1 $2")
     .split(/[\s_.-]+/u)
     .filter(Boolean)
@@ -82,6 +82,7 @@ function anchorIndex(doc: Document.Parsed): (alias: Alias) => Node | undefined {
 const MAX_FILE_BYTES = 1_000_000;
 const MAX_TOTAL_BYTES = 4_000_000;
 const MAX_ENV_FILES = 64;
+const MAX_DIR_ENTRIES = 4_096;
 
 type BoundedReadResult =
   | { status: "ok"; text: string; bytesRead: number }
@@ -99,6 +100,32 @@ async function readTextBounded(filePath: string, maxBytes = MAX_FILE_BYTES): Pro
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
+        try {
+          await lstat(filePath);
+          return { status: "error", code: "ENOENT", bytesRead: 0 };
+        } catch (lstatErr) {
+          const lstatCode = (lstatErr as NodeJS.ErrnoException).code;
+          if (lstatCode !== "ENOENT") {
+            return { status: "error", code: lstatCode, bytesRead: 0 };
+          }
+        }
+        const parent = dirname(filePath);
+        let parentIsSymlink = false;
+        try {
+          parentIsSymlink = (await lstat(parent)).isSymbolicLink();
+        } catch (parentErr) {
+          const parentCode = (parentErr as NodeJS.ErrnoException).code;
+          if (parentCode !== "ENOENT") {
+            return { status: "error", code: parentCode, bytesRead: 0 };
+          }
+        }
+        if (parentIsSymlink) {
+          try {
+            await stat(parent);
+          } catch (targetErr) {
+            return { status: "error", code: (targetErr as NodeJS.ErrnoException).code ?? "ENOENT", bytesRead: 0 };
+          }
+        }
         return { status: "missing", bytesRead: 0 };
       }
       return { status: "error", code, bytesRead: 0 };
@@ -204,14 +231,16 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
     const quote = src[i]!;
     if (quote === '"') {
       i += 1;
+      const bodyStart = i;
+      let bodyEnd = n;
       let decoded = "";
-      let nodeStyle = "";
       let shellStyle = "";
       let closed = false;
       while (i < n) {
         const ch = src[i]!;
         if (ch === '"') {
           closed = true;
+          bodyEnd = i;
           i += 1;
           break;
         }
@@ -219,52 +248,46 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
           if (i + 1 >= n) {
             incomplete = true;
             decoded += "\\";
-            nodeStyle += "\\";
             shellStyle += "\\";
             i += 1;
             break;
           }
           const nxt = src[i + 1]!;
           if (nxt === "\n") {
-            nodeStyle += "\\\n";
             i += 2;
             continue;
           }
           if (nxt === "n") {
             decoded += "\n";
-            nodeStyle += "\n";
             shellStyle += "\\n";
           } else if (nxt === "r") {
             decoded += "\r";
-            nodeStyle += "\r";
             shellStyle += "\\r";
           } else if (nxt === "t") {
             decoded += "\t";
-            nodeStyle += "\\t";
             shellStyle += "\\t";
           } else if (nxt === '"' || nxt === "\\" || nxt === "$") {
             decoded += nxt;
-            nodeStyle += "\\" + nxt;
             shellStyle += nxt;
           } else if (nxt === "`") {
             decoded += "\\`";
-            nodeStyle += "\\`";
             shellStyle += "`";
           } else {
             decoded += "\\" + nxt;
-            nodeStyle += "\\" + nxt;
             shellStyle += "\\" + nxt;
           }
           i += 2;
           continue;
         }
         decoded += ch;
-        nodeStyle += ch;
         shellStyle += ch;
         i += 1;
       }
       if (!closed) incomplete = true;
-      for (const v of new Set([decoded, nodeStyle, shellStyle])) {
+      const rawBody = src.slice(bodyStart, closed ? bodyEnd : i);
+      const nodeStyle = rawBody.replace(/\\n/gu, "\n");
+      const dotenvStyle = nodeStyle.replace(/\\r/gu, "\r");
+      for (const v of new Set([decoded, shellStyle, nodeStyle, dotenvStyle])) {
         entries.push({ key, value: v, quote: "double" });
       }
       const restEnd = src.indexOf("\n", i);
@@ -366,8 +389,17 @@ function parseGhHostsYml(text: string): { tokens: string[]; incomplete: boolean 
           incomplete = true;
           return;
         }
-        if (valNode.value === null || valNode.value === undefined) return;
-        tokens.push(typeof valNode.value === "string" ? valNode.value : String(valNode.value));
+        if (typeof valNode.value === "string") {
+          if (valNode.value !== "") tokens.push(valNode.value);
+          return;
+        }
+        if (typeof valNode.source === "string" && valNode.source !== "") {
+          tokens.push(valNode.source);
+        }
+        if (valNode.value !== null && valNode.value !== undefined) {
+          const rendered = String(valNode.value);
+          if (rendered !== "" && rendered !== valNode.source) tokens.push(rendered);
+        }
       },
     });
   }
@@ -377,6 +409,15 @@ function parseGhHostsYml(text: string): { tokens: string[]; incomplete: boolean 
 function parseGitCredentials(text: string): { passwords: string[]; incomplete: boolean } {
   const passwords: string[] = [];
   let incomplete = false;
+  const pushField = (raw: string) => {
+    passwords.push(raw);
+    try {
+      const decoded = decodeURIComponent(raw);
+      if (decoded !== raw) passwords.push(decoded);
+    } catch {
+      incomplete = true;
+    }
+  };
   for (const line of text.replace(/\r\n?/gu, "\n").split("\n")) {
     const trimmed = line.trim();
     if (trimmed === "") continue;
@@ -388,15 +429,42 @@ function parseGitCredentials(text: string): { passwords: string[]; incomplete: b
       continue;
     }
     if (url.password === "") continue;
-    passwords.push(url.password);
+    let decodedPassword = url.password;
     try {
-      const decoded = decodeURIComponent(url.password);
-      if (decoded !== url.password) passwords.push(decoded);
+      decodedPassword = decodeURIComponent(url.password);
     } catch {
-      incomplete = true;
+      // Malformed percent encoding handled below via pushField.
+    }
+    if (
+      (url.password.toLowerCase() === "x-oauth-basic" || decodedPassword.toLowerCase() === "x-oauth-basic") &&
+      url.username !== ""
+    ) {
+      pushField(url.username);
+    } else {
+      pushField(url.password);
     }
   }
   return { passwords, incomplete };
+}
+
+function isDotenvEntryName(name: string): boolean {
+  const candidates = [
+    normalizePathForCheck(name, false),
+    normalizePathForCheck(foldConfusables(name, false), false),
+    normalizePathForCheck(foldConfusables(name, true), false),
+  ];
+  return candidates.some((c) => isSecretEnvBasename(c));
+}
+
+function insertSorted(arr: string[], value: string): void {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (arr[mid]! < value) lo = mid + 1;
+    else hi = mid;
+  }
+  arr.splice(lo, 0, value);
 }
 
 type SecretCandidateSource = "explicit_cred" | "dotenv_secret_key" | "dotenv_ambiguous";
@@ -475,17 +543,43 @@ export async function collectLocalSecrets(
     }
   }
 
-  let entries: string[] = [];
+  const envFiles: string[] = [];
+  let envFilesOverflow = false;
+  let dirEntriesOverflow = false;
+  let dirHandle: Awaited<ReturnType<typeof opendir>> | undefined;
   try {
-    entries = await readdir(root);
+    dirHandle = await opendir(root);
+    let scannedEntries = 0;
+    for await (const dirent of dirHandle) {
+      scannedEntries += 1;
+      if (scannedEntries > MAX_DIR_ENTRIES) {
+        dirEntriesOverflow = true;
+        break;
+      }
+      const name = dirent.name;
+      if (!isDotenvEntryName(name)) continue;
+      if (envFiles.length < MAX_ENV_FILES) {
+        insertSorted(envFiles, name);
+      } else {
+        envFilesOverflow = true;
+        if (name < envFiles[envFiles.length - 1]!) {
+          envFiles.pop();
+          insertSorted(envFiles, name);
+        }
+      }
+    }
   } catch {
     incompleteReasons.push(`unreadable_dir:${root}`);
+  } finally {
+    await dirHandle?.close().catch(() => {});
   }
-  const envFiles = entries.filter((name) => isSecretEnvBasename(normalizePathForCheck(name, false))).sort();
-  if (envFiles.length > MAX_ENV_FILES) {
+  if (dirEntriesOverflow) {
+    incompleteReasons.push("budget_exceeded:dir_entries");
+  }
+  if (envFilesOverflow) {
     incompleteReasons.push("budget_exceeded:env_files");
   }
-  for (const f of envFiles.slice(0, MAX_ENV_FILES)) {
+  for (const f of envFiles) {
     const text = await readWithinBudget(f, join(root, f), false);
     if (text === "") continue;
     const parsed = parseDotenv(text);
@@ -528,12 +622,14 @@ export async function collectLocalSecrets(
  */
 export function findLocalSecretMatch(text: string, localSecrets: readonly LocalSecret[]): string | null {
   const normalizedText = text.replace(/\r\n?/gu, "\n");
-  const clean = stripInvisible(normalizedText);
+  const cleanText = stripInvisible(normalizedText);
   for (const s of localSecrets) {
     if (s.value === "") continue;
-    if (text.includes(s.value) || normalizedText.includes(s.value) || clean.includes(s.value)) {
-      return s.name;
-    }
+    if (text.includes(s.value)) return s.name;
+    const normalizedSecret = s.value.replace(/\r\n?/gu, "\n");
+    if (normalizedSecret !== "" && normalizedText.includes(normalizedSecret)) return s.name;
+    const cleanSecret = stripInvisible(normalizedSecret);
+    if (cleanSecret !== "" && cleanText.includes(cleanSecret)) return s.name;
   }
   return null;
 }

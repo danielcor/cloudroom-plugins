@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -278,11 +278,26 @@ describe("local secret collection and matching", () => {
     const homeCount = await mkdtemp(join(tmpdir(), "ship-sec-budget-cnt-home-"));
     dirs.push(homeCount);
     for (let i = 0; i < 70; i++) {
-      await writeFile(join(dirCount, `.env.f${String(i).padStart(2, "0")}`), `KEY_${i}=secret_${i}\n`, "utf8");
+      const padded = String(i).padStart(2, "0");
+      await writeFile(join(dirCount, `.env.f${padded}`), `KEY_${padded}=secret_${padded}\n`, "utf8");
     }
     const countRes = await collectLocalSecrets(dirCount, { PATH: process.env.PATH }, homeCount);
     expect(countRes.incomplete).toBe(true);
     expect(countRes.incompleteReasons).toContain("budget_exceeded:env_files");
+    expect(findLocalSecretMatch("secret_00", countRes.secrets)).toBe("KEY_00 in .env.f00");
+    expect(findLocalSecretMatch("secret_69", countRes.secrets)).toBeNull();
+
+    const dirEntries = await mkdtemp(join(tmpdir(), "ship-sec-budget-entries-"));
+    dirs.push(dirEntries);
+    const homeEntries = await mkdtemp(join(tmpdir(), "ship-sec-budget-entries-home-"));
+    dirs.push(homeEntries);
+    for (let i = 0; i < 4100; i++) {
+      const h = await open(join(dirEntries, `f${i}`), "w");
+      await h.close();
+    }
+    const entriesRes = await collectLocalSecrets(dirEntries, { PATH: process.env.PATH }, homeEntries);
+    expect(entriesRes.incomplete).toBe(true);
+    expect(entriesRes.incompleteReasons).toContain("budget_exceeded:dir_entries");
   });
 
   it("marks ENOTDIR GH_CONFIG_DIR and missing root directory as incomplete (S9)", async () => {
@@ -351,5 +366,88 @@ describe("local secret collection and matching", () => {
     expect(res.incomplete).toBe(false);
     expect(findLocalSecretMatch("backslash_dotdot_secret", res.secrets)).toBe("POSIX_KEY in .env.local\\..\\backup");
     expect(findLocalSecretMatch("backslash_secret", res.secrets)).toBe("POSIX_TOKEN in .env.local\\backup");
+  });
+
+  it("scales linearly on long uppercase keys and handles S2/S3/S4/S5/S6/S7 edge cases", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ship-sec-r2-"));
+    dirs.push(dir);
+    const homeDir = await mkdtemp(join(tmpdir(), "ship-sec-r2-home-"));
+    dirs.push(homeDir);
+
+    const ghDir = join(homeDir, ".config", "gh");
+    await mkdir(ghDir, { recursive: true });
+    await writeFile(
+      join(ghDir, "hosts.yml"),
+      "github.com:\n  oauth_token: !!binary Z2hwX3Rlc3R0b2tlbg==\n  user: testuser\n",
+      "utf8",
+    );
+
+    const stateDir = join(homeDir, ".state");
+    await mkdir(stateDir, { recursive: true });
+    const { stdout: ghTokenOut } = await execFileAsync("gh", ["auth", "token", "--hostname", "github.com"], {
+      env: {
+        PATH: process.env.PATH,
+        HOME: homeDir,
+        GH_CONFIG_DIR: ghDir,
+        XDG_CONFIG_HOME: join(homeDir, ".config"),
+        XDG_STATE_HOME: stateDir,
+        XDG_DATA_HOME: stateDir,
+        XDG_CACHE_HOME: stateDir,
+        GH_NO_UPDATE_NOTIFIER: "1",
+      },
+    });
+    expect(ghTokenOut.trim()).toBe("Z2hwX3Rlc3R0b2tlbg==");
+
+    await writeFile(
+      join(homeDir, ".git-credentials"),
+      "https://ghp_user%2Btok:x-oauth-basic@github.com\n",
+      "utf8",
+    );
+
+    const longUpperKey = `${"A".repeat(25_000)}_KEY`;
+    await writeFile(
+      join(dir, ".env"),
+      `${longUpperKey}=fast_key_val\nDOUBLE_BS_SECRET="a\\\\nb"\nCR_SECRET="part1\\rpart2"\n`,
+      "utf8",
+    );
+    await writeFile(join(dir, "\uFF0Eenv"), "FW_SECRET=fullwidth_dot_env_secret\n", "utf8");
+    await writeFile(join(dir, ".\u0435nv"), "CYR_SECRET=cyrillic_e_env_secret\n", "utf8");
+    await writeFile(join(dir, "\uFF0Eenv.example"), "FW_EX=fullwidth_example_ignored\n", "utf8");
+    await writeFile(join(dir, ".\u0435nv.example"), "CYR_EX=cyrillic_example_ignored\n", "utf8");
+
+    const t0 = performance.now();
+    const res = await collectLocalSecrets(dir, { PATH: process.env.PATH }, homeDir);
+    const elapsedMs = performance.now() - t0;
+
+    expect(res.incomplete).toBe(false);
+    expect(elapsedMs).toBeLessThan(500);
+    expect(findLocalSecretMatch("fast_key_val", res.secrets)).toBe(`${longUpperKey} in .env`);
+    expect(findLocalSecretMatch("ghp_user%2Btok", res.secrets)).toBe("git credential");
+    expect(findLocalSecretMatch("ghp_user+tok", res.secrets)).toBe("git credential");
+    expect(findLocalSecretMatch("x-oauth-basic", res.secrets)).toBeNull();
+    expect(findLocalSecretMatch("a\\\nb", res.secrets)).toBe("DOUBLE_BS_SECRET in .env");
+    expect(findLocalSecretMatch("a\\nb", res.secrets)).toBe("DOUBLE_BS_SECRET in .env");
+    expect(findLocalSecretMatch("part1\rpart2", res.secrets)).toBe("CR_SECRET in .env");
+    expect(findLocalSecretMatch("part1\npart2", res.secrets)).toBe("CR_SECRET in .env");
+    expect(findLocalSecretMatch("part1\r\npart2", res.secrets)).toBe("CR_SECRET in .env");
+    expect(findLocalSecretMatch("fullwidth_dot_env_secret", res.secrets)).toBe("FW_SECRET in \uFF0Eenv");
+    expect(findLocalSecretMatch("cyrillic_e_env_secret", res.secrets)).toBe("CYR_SECRET in .\u0435nv");
+    expect(findLocalSecretMatch("fullwidth_example_ignored", res.secrets)).toBeNull();
+    expect(findLocalSecretMatch("cyrillic_example_ignored", res.secrets)).toBeNull();
+    expect(findLocalSecretMatch("Z2hwX3Rlc3R0b2tlbg==", res.secrets)).toBe("gh oauth_token");
+    expect(findLocalSecretMatch("plain text", [{ name: "inv", value: "\u200B" }])).toBeNull();
+    expect(findLocalSecretMatch("a\u200Bb", [{ name: "inv", value: "\u200B" }])).toBe("inv");
+
+    // S4: dangling hosts.yml and .git-credentials symlinks must report incomplete
+    const symlinkHome = await mkdtemp(join(tmpdir(), "ship-sec-symlink-home-"));
+    dirs.push(symlinkHome);
+    await mkdir(join(symlinkHome, ".config", "gh"), { recursive: true });
+    await symlink(join(symlinkHome, "missing-hosts"), join(symlinkHome, ".config", "gh", "hosts.yml"));
+    await symlink(join(symlinkHome, "missing-creds"), join(symlinkHome, ".git-credentials"));
+    const symlinkRes = await collectLocalSecrets(dir, { PATH: process.env.PATH }, symlinkHome);
+    expect(symlinkRes.incomplete).toBe(true);
+    expect(symlinkRes.incompleteReasons).toEqual(
+      expect.arrayContaining(["unreadable:gh hosts.yml", "unreadable:.git-credentials"]),
+    );
   });
 });
