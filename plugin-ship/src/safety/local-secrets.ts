@@ -190,8 +190,7 @@ function decodeShellUnquoted(raw: string): { value: string; hadEscapes: boolean 
   return { value: out, hadEscapes };
 }
 
-function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolean } {
-  const src = (text.startsWith("\uFEFF") ? text.slice(1) : text).replace(/\r\n/gu, "\n");
+function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boolean } {
   const n = src.length;
   const entries: DotenvEntry[] = [];
   let incomplete = false;
@@ -288,8 +287,8 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
       }
       if (!closed) incomplete = true;
       const rawBody = src.slice(bodyStart, closed ? bodyEnd : i);
-      const nodeStyle = rawBody.replace(/\r/gu, "").replace(/\\n/gu, "\n");
-      const dotenvStyle = rawBody.replace(/\r\n?/gu, "\n").replace(/\\n/gu, "\n").replace(/\\r/gu, "\r");
+      const nodeStyle = rawBody.replace(/\\n/gu, "\n");
+      const dotenvStyle = rawBody.replace(/\\n/gu, "\n").replace(/\\r/gu, "\r");
       for (const v of new Set([decoded, shellStyle, nodeStyle, dotenvStyle])) {
         entries.push({ key, value: v, quote: "double" });
       }
@@ -308,19 +307,11 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
       const closeIdx = src.indexOf(quote, i);
       if (closeIdx === -1) {
         incomplete = true;
-        const val = src.slice(i);
-        entries.push({ key, value: val, quote: qKind });
-        if (val.includes("\r")) {
-          entries.push({ key, value: val.replace(/\r/gu, ""), quote: qKind });
-        }
+        entries.push({ key, value: src.slice(i), quote: qKind });
         i = n;
         continue;
       }
-      const val = src.slice(i, closeIdx);
-      entries.push({ key, value: val, quote: qKind });
-      if (val.includes("\r")) {
-        entries.push({ key, value: val.replace(/\r/gu, ""), quote: qKind });
-      }
+      entries.push({ key, value: src.slice(i, closeIdx), quote: qKind });
       i = closeIdx + 1;
       const restEnd = src.indexOf("\n", i);
       const stop = restEnd === -1 ? n : restEnd;
@@ -338,26 +329,17 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
     if (/(?:^|[^\\])(?:\\\\)*\\$/u.test(raw)) {
       incomplete = true;
     }
-    const collectUnquoted = (rawLine: string): string[] => {
-      const vals: string[] = [];
-      const hashIdx = rawLine.indexOf("#");
-      if (hashIdx === -1) {
-        vals.push(rawLine.trim());
-      } else if (hashIdx === 0 || /[ \t]/u.test(rawLine[hashIdx - 1]!)) {
-        vals.push(rawLine.slice(0, hashIdx).trim());
-      } else {
-        const stripped = rawLine.slice(0, hashIdx).trim();
-        if (stripped !== "") vals.push(stripped);
-        const full = rawLine.trim();
-        if (full !== "" && full !== stripped) vals.push(full);
-      }
-      return vals;
-    };
-    const unquotedVals = collectUnquoted(raw);
-    if (raw.includes("\r")) {
-      for (const v of collectUnquoted(raw.replace(/\r/gu, ""))) {
-        if (v !== "") unquotedVals.push(v);
-      }
+    const unquotedVals: string[] = [];
+    const hashIdx = raw.indexOf("#");
+    if (hashIdx === -1) {
+      unquotedVals.push(raw.trim());
+    } else if (hashIdx === 0 || /[ \t]/u.test(raw[hashIdx - 1]!)) {
+      unquotedVals.push(raw.slice(0, hashIdx).trim());
+    } else {
+      const stripped = raw.slice(0, hashIdx).trim();
+      if (stripped !== "") unquotedVals.push(stripped);
+      const full = raw.trim();
+      if (full !== "" && full !== stripped) unquotedVals.push(full);
     }
     const emitted = new Map<string, boolean>();
     for (const v of unquotedVals) {
@@ -382,6 +364,32 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
   }
 
   return { entries, incomplete };
+}
+
+function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolean } {
+  const lfNormalized = (text.startsWith("\uFEFF") ? text.slice(1) : text).replace(/\r\n/gu, "\n");
+  if (!lfNormalized.includes("\r")) {
+    return parseDotenvPass(lfNormalized);
+  }
+  const noCr = parseDotenvPass(lfNormalized.replace(/\r/gu, ""));
+  const crToLf = parseDotenvPass(lfNormalized.replace(/\r/gu, "\n"));
+  const literalCr = parseDotenvPass(lfNormalized);
+  const byKeyVal = new Map<string, DotenvEntry>();
+  for (const view of [noCr, crToLf, literalCr]) {
+    for (const entry of view.entries) {
+      const id = `${entry.key}\0${entry.value}`;
+      const prev = byKeyVal.get(id);
+      const isExplicit = entry.quote !== "none" || entry.literal === true;
+      const prevExplicit = prev !== undefined && (prev.quote !== "none" || prev.literal === true);
+      if (!prev || (isExplicit && !prevExplicit)) {
+        byKeyVal.set(id, entry);
+      }
+    }
+  }
+  return {
+    entries: [...byKeyVal.values()],
+    incomplete: noCr.incomplete || crToLf.incomplete || literalCr.incomplete,
+  };
 }
 
 function parseGhHostsYml(text: string): { tokens: string[]; incomplete: boolean } {
