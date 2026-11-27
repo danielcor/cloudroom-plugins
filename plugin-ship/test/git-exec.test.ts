@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -151,8 +151,6 @@ describe("git-exec and process runner", () => {
       ["for-each-ref", "--sort=signature"],
       ["merge-tree", "--write-tree", first, second],
       ["merge-tree", first, second],
-      ["rev-parse", "--git-path", "index", ":file.txt"],
-      ["rev-parse", "--git-path", "index", "--", "HEAD"],
       ["cat-file", "--textconv", "HEAD:file.txt"],
       ["cat-file", "--textcon", "HEAD:file.txt"],
       ["cat-file", "--filters", "HEAD:file.txt"],
@@ -587,14 +585,8 @@ describe("git-exec and process runner", () => {
     const indexAfter = await readFile(indexPath);
     expect(Buffer.compare(indexBefore, indexAfter)).toBe(0);
 
-    // S4: split-index sharedindex.* mtime and .git/index bytes must remain untouched across plumbing reads.
+    // Split-index reads leave .git/index bytes untouched and report the real index path.
     await execFileAsync("git", ["update-index", "--split-index"], { cwd: repo, env });
-    const sharedFile = (await readdir(join(repo, ".git"))).find((f) => f.startsWith("sharedindex."));
-    expect(sharedFile).toBeDefined();
-    const sharedPath = join(repo, ".git", sharedFile!);
-    const oldTime = new Date("2020-01-01T00:00:00Z");
-    await utimes(sharedPath, oldTime, oldTime);
-    const sharedMtimeBefore = (await stat(sharedPath)).mtimeMs;
     const splitIndexBefore = await readFile(indexPath);
 
     const idxPathRes = await defaultGitExec(repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], { env });
@@ -611,11 +603,10 @@ describe("git-exec and process runner", () => {
     expect((await defaultGitExec(repo, ["cat-file", "--batch"], { env, stdin: ":file.txt\n" })).code).toBe(0);
     expect((await defaultGitExec(repo, ["ls-tree", "-r", "HEAD"], { env })).code).toBe(0);
 
-    expect((await stat(sharedPath)).mtimeMs).toBe(sharedMtimeBefore);
     expect(Buffer.compare(splitIndexBefore, await readFile(indexPath))).toBe(0);
   });
 
-  it("snapshots index state for staged .gitattributes, staged objects, and SHA-256 split-index without mutating repo files (S1/S4)", async () => {
+  it("preserves staged .gitattributes, staged objects, and SHA-256 split-index reads without mutating .git/index bytes (S1)", async () => {
     const repo = await initEmptyRepo();
     const env = isolatedGitEnv(repo);
     await writeFile(join(repo, "file.txt"), "hello\n", "utf8");
@@ -630,12 +621,6 @@ describe("git-exec and process runner", () => {
     await rm(join(repo, ".gitattributes"));
 
     await execFileAsync("git", ["update-index", "--split-index"], { cwd: repo, env });
-    const sharedFile = (await readdir(join(repo, ".git"))).find((f) => f.startsWith("sharedindex."));
-    expect(sharedFile).toBeDefined();
-    const sharedPath = join(repo, ".git", sharedFile!);
-    const oldTime = new Date("2020-01-01T00:00:00Z");
-    await utimes(sharedPath, oldTime, oldTime);
-    const sharedMtimeBefore = (await stat(sharedPath)).mtimeMs;
     const indexPath = join(repo, ".git", "index");
     const splitIndexBefore = await readFile(indexPath);
 
@@ -656,9 +641,6 @@ describe("git-exec and process runner", () => {
     expect(revStaged.code).toBe(0);
     expect(revStaged.stdout.trim()).toMatch(/^[0-9a-f]{40}$/u);
 
-    await defaultGitExec(repo, ["for-each-ref", "--merged", ":staged.txt"], { env });
-
-    expect((await stat(sharedPath)).mtimeMs).toBe(sharedMtimeBefore);
     expect(Buffer.compare(splitIndexBefore, await readFile(indexPath))).toBe(0);
 
     const nativeDiff = await execFileAsync("git", ["diff-tree", "-p", first, second], { cwd: repo, env });
@@ -672,19 +654,16 @@ describe("git-exec and process runner", () => {
     await writeFile(join(s256Repo, "x.txt"), "s256\n", "utf8");
     await gitCommitAll(s256Repo, "init", s256Env);
     await execFileAsync("git", ["update-index", "--split-index"], { cwd: s256Repo, env: s256Env });
-    const s256Shared = (await readdir(join(s256Repo, ".git"))).find((f) => f.startsWith("sharedindex."));
-    expect(s256Shared).toBeDefined();
-    const s256SharedPath = join(s256Repo, ".git", s256Shared!);
-    await utimes(s256SharedPath, oldTime, oldTime);
-    const s256MtimeBefore = (await stat(s256SharedPath)).mtimeMs;
+    const s256IndexPath = join(s256Repo, ".git", "index");
+    const s256IndexBefore = await readFile(s256IndexPath);
 
     const s256Cat = await defaultGitExec(s256Repo, ["cat-file", "-p", ":x.txt"], { env: s256Env });
     expect(s256Cat.code).toBe(0);
     expect(s256Cat.stdout).toBe("s256\n");
-    expect((await stat(s256SharedPath)).mtimeMs).toBe(s256MtimeBefore);
+    expect(Buffer.compare(s256IndexBefore, await readFile(s256IndexPath))).toBe(0);
   });
 
-  it("converts temporary directory setup and cleanup failures into ExecResult diagnostics (S5/S15)", async () => {
+  it("operates without any TMPDIR dependency even when TMPDIR is an unusable regular file", async () => {
     const repo = await initEmptyRepo();
     const env = isolatedGitEnv(repo);
     await writeFile(join(repo, "file.txt"), "one\n", "utf8");
@@ -693,7 +672,7 @@ describe("git-exec and process runner", () => {
     const second = await gitCommitAll(repo, "second", env);
     await execFileAsync("git", ["config", "--global", "ship.globalKey", "global-ok"], { cwd: repo, env });
 
-    const tmpFixtureDir = await mkdtemp(join(tmpdir(), "ship-ge-s15-"));
+    const tmpFixtureDir = await mkdtemp(join(tmpdir(), "ship-ge-notmp-"));
     dirs.push(tmpFixtureDir);
     const badTmpFile = join(tmpFixtureDir, "not-a-dir");
     await writeFile(badTmpFile, "file\n", "utf8");
@@ -701,12 +680,13 @@ describe("git-exec and process runner", () => {
     const savedTmpdir = process.env.TMPDIR;
     process.env.TMPDIR = badTmpFile;
     try {
-      const tmpFailPlumbing = await defaultGitExec(repo, ["diff-tree", "-r", first, second], { env });
-      expect(tmpFailPlumbing.code).not.toBe(0);
-      expect(tmpFailPlumbing.errorCode).toBe("ENOTDIR");
+      const diffOk = await defaultGitExec(repo, ["diff-tree", "-r", first, second], { env });
+      expect(diffOk.code).toBe(0);
 
-      const metadataStillOk = await defaultGitExec(repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], { env });
-      expect(metadataStillOk.code).toBe(0);
+      const metadataOk = await defaultGitExec(repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], {
+        env,
+      });
+      expect(metadataOk.code).toBe(0);
 
       const configGlobalOk = await defaultGitExec(repo, ["config", "--global", "--list"], { env });
       expect(configGlobalOk.code).toBe(0);
@@ -714,61 +694,6 @@ describe("git-exec and process runner", () => {
       const configListOk = await defaultGitExec(repo, ["config", "--list"], { env });
       expect(configListOk.code).toBe(0);
     } finally {
-      if (savedTmpdir === undefined) delete process.env.TMPDIR;
-      else process.env.TMPDIR = savedTmpdir;
-    }
-
-    const parentTmp = await mkdtemp(join(tmpdir(), "ship-ge-rmfail-"));
-    dirs.push(parentTmp);
-    const mockBinDir = join(tmpFixtureDir, "bin");
-    await mkdir(mockBinDir, { recursive: true });
-    await writeFile(
-      join(mockBinDir, "git"),
-      [
-        "#!/bin/sh",
-        'if [ "$1" = "--version" ]; then',
-        '  echo "git version 2.56.1"',
-        "  exit 0",
-        "fi",
-        'if [ -z "$GIT_INDEX_FILE" ]; then',
-        "  exit 1",
-        "fi",
-        'chmod 0500 "$(dirname "$(dirname "$GIT_INDEX_FILE")")"',
-        'if [ "$SHIP_TEST_FAIL" = "1" ]; then',
-        '  echo "semantic failure" >&2',
-        "  exit 1",
-        "fi",
-        "exit 0",
-      ].join("\n"),
-      { mode: 0o755 },
-    );
-
-    process.env.TMPDIR = parentTmp;
-    try {
-      try {
-        const cleanCmdRmFail = await defaultGitExec(repo, ["diff-tree", "-r", first, second], {
-          env: { ...env, PATH: `${mockBinDir}:${env.PATH ?? ""}` },
-        });
-        expect(cleanCmdRmFail.code).toBe(1);
-        expect(cleanCmdRmFail.errorCode).toBe("EACCES");
-        expect(cleanCmdRmFail.stderr).toContain("Failed to remove temporary index directory");
-      } finally {
-        await chmod(parentTmp, 0o700);
-      }
-
-      try {
-        const errCmdRmFail = await defaultGitExec(repo, ["diff-tree", "-r", first, second], {
-          env: { ...env, PATH: `${mockBinDir}:${env.PATH ?? ""}`, SHIP_TEST_FAIL: "1" },
-        });
-        expect(errCmdRmFail.code).toBe(1);
-        expect(errCmdRmFail.errorCode).toBe("EACCES");
-        expect(errCmdRmFail.stderr).toContain("semantic failure");
-        expect(errCmdRmFail.stderr).toContain("Failed to remove temporary index directory");
-      } finally {
-        await chmod(parentTmp, 0o700);
-      }
-    } finally {
-      await chmod(parentTmp, 0o700);
       if (savedTmpdir === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = savedTmpdir;
     }
