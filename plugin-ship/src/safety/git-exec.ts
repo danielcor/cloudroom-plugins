@@ -1,8 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 
 export interface ExecResult {
   code: number;
@@ -27,83 +27,32 @@ export function mergeEnv(base: NodeJS.ProcessEnv, overrides?: NodeJS.ProcessEnv)
   const out: NodeJS.ProcessEnv = { ...base };
   if (!overrides) return out;
   for (const [k, v] of Object.entries(overrides)) {
-    if (v === undefined) {
-      delete out[k];
-    } else {
-      out[k] = v;
-    }
+    if (v === undefined) delete out[k];
+    else out[k] = v;
   }
   return out;
 }
 
 export const SAFE_GIT_FLAGS = [
-  "--no-pager",
-  "-c",
-  "safe.bareRepository=explicit",
-  "--no-replace-objects",
-  "-c",
-  "core.commitGraph=false",
-  "-c",
-  "core.multiPackIndex=false",
-  "-c",
-  "core.fsmonitor=false",
-  "-c",
-  "diff.external=",
-  "-c",
-  "diff.submodule=short",
-  "-c",
-  "diff.autoRefreshIndex=false",
-  "-c",
-  "format.pretty=medium",
-  "-c",
-  "log.showSignature=false",
-  "-c",
-  "merge.renormalize=false",
-  "--literal-pathspecs",
-  "--no-optional-locks",
+  "--no-pager", "-c", "safe.bareRepository=explicit", "--no-replace-objects",
+  "-c", "core.commitGraph=false", "-c", "core.multiPackIndex=false", "-c", "core.fsmonitor=false",
+  "-c", "diff.external=", "-c", "diff.submodule=short", "-c", "diff.autoRefreshIndex=false",
+  "-c", "format.pretty=medium", "-c", "log.showSignature=false", "--literal-pathspecs", "--no-optional-locks",
 ] as const;
 
 const REPO_LOCAL_GIT_ENV_KEYS = new Set([
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_IMPLICIT_WORK_TREE",
-  "GIT_COMMON_DIR",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_NAMESPACE",
-  "GIT_PREFIX",
-  "GIT_SUPER_PREFIX",
-  "GIT_SHALLOW_FILE",
-  "GIT_GRAFT_FILE",
-  "GIT_NO_REPLACE_OBJECTS",
-  "GIT_REPLACE_REF_BASE",
-  "GIT_CONFIG",
-  "GIT_CONFIG_PARAMETERS",
-  "GIT_CONFIG_COUNT",
-  "GIT_GLOB_PATHSPECS",
-  "GIT_NOGLOB_PATHSPECS",
-  "GIT_ICASE_PATHSPECS",
-  "GIT_LITERAL_PATHSPECS",
-  "GIT_EXTERNAL_DIFF",
-  "GIT_DIFF_OPTS",
-  "GIT_PAGER",
-  "GIT_ATTR_NOSYSTEM",
-  "GIT_ATTR_SOURCE",
-  "GIT_EXEC_PATH",
-  "GIT_TEMPLATE_DIR",
-  "GIT_SSH",
-  "GIT_SSH_COMMAND",
-  "GIT_ASKPASS",
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX",
+  "GIT_SUPER_PREFIX", "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+  "GIT_REPLACE_REF_BASE", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+  "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_LITERAL_PATHSPECS",
+  "GIT_EXTERNAL_DIFF", "GIT_DIFF_OPTS", "GIT_PAGER", "GIT_ATTR_NOSYSTEM", "GIT_ATTR_SOURCE",
+  "GIT_EXEC_PATH", "GIT_TEMPLATE_DIR", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS",
 ]);
 
 const NON_REPO_CLEAR_KEYS = new Set([
-  "GIT_DIR",
-  "GIT_COMMON_DIR",
-  "GIT_WORK_TREE",
-  "GIT_INDEX_FILE",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
 ]);
 
 const GIT_CONFIG_INDEXED_RE = /^GIT_CONFIG_(?:KEY|VALUE)_/u;
@@ -117,16 +66,11 @@ function stripRepoLocalGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
-/** Remove all Git config and callback overrides from `env` for internal runner queries. */
-function cleanInternalConfigEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+/** Clear repo-pointing and config-overriding variables for uncached `git --version` probes. */
+function cleanVersionProbeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(env)) {
-    if (
-      v === undefined ||
-      k === "GIT_ATTR_SOURCE" ||
-      k.startsWith("GIT_CONFIG") ||
-      GIT_CONFIG_INDEXED_RE.test(k)
-    ) {
+    if (v === undefined || k === "GIT_ATTR_SOURCE" || k.startsWith("GIT_CONFIG") || NON_REPO_CLEAR_KEYS.has(k)) {
       continue;
     }
     out[k] = v;
@@ -143,20 +87,10 @@ function cleanInternalConfigEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
-/** Remove repo-pointing environment variables in addition to internal config overrides. */
-function cleanNoRepoEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const out = cleanInternalConfigEnv(env);
-  for (const k of NON_REPO_CLEAR_KEYS) {
-    delete out[k];
-  }
-  return out;
-}
-
 const MIN_GIT_MAJOR = 2;
 const MIN_GIT_MINOR = 45;
 const MIN_GIT_PATCH = 1;
 const GIT_VERSION_RE = /\bgit version (\d+)\.(\d+)(?:\.(\d+))?/u;
-const verifiedGitBinaryCache = new Set<string>();
 
 export function parseGitVersion(output: string): { major: number; minor: number; patch: number } | null {
   const m = GIT_VERSION_RE.exec(output);
@@ -176,26 +110,16 @@ export function isSupportedGitVersion(output: string): boolean {
   return parsed.patch >= MIN_GIT_PATCH;
 }
 
-interface ResolvedGitBinary {
-  path: string;
-  cacheKey: string;
-}
-
-async function resolveGitBinary(cwd: string, pathEnv: string | undefined): Promise<ResolvedGitBinary | null> {
+async function resolveGitBinary(cwd: string, pathEnv: string | undefined): Promise<string | null> {
   if (pathEnv === undefined || pathEnv === "") return null;
   const exeName = process.platform === "win32" ? "git.exe" : "git";
   for (const entry of pathEnv.split(delimiter)) {
-    const dir = resolve(cwd, entry || ".");
-    const candidate = join(dir, exeName);
+    const candidate = join(resolve(cwd, entry || "."), exeName);
     try {
       await access(candidate, constants.X_OK);
       const st = await stat(candidate);
       if (!st.isFile()) continue;
-      const realBin = await realpath(candidate);
-      return {
-        path: realBin,
-        cacheKey: `${realBin}\0${st.dev}:${st.ino}:${st.mtimeMs}:${st.size}`,
-      };
+      return await realpath(candidate);
     } catch {
       continue;
     }
@@ -492,10 +416,9 @@ export function runProcess(
 
 interface SubcommandRule {
   exact: Set<string>;
-  valueFlags?: Map<string, RegExp | undefined>;
+  valueFlags?: Set<string>;
   patterns?: RegExp[];
   inject?: readonly string[];
-  isolatedMergeTree?: boolean;
   validate?: (flags: string[], positionals: string[]) => boolean;
 }
 
@@ -504,57 +427,26 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
     "rev-parse",
     {
       exact: new Set([
-        "--show-toplevel",
-        "--git-dir",
-        "--git-common-dir",
-        "--is-inside-work-tree",
-        "--is-bare-repository",
-        "--verify",
-        "--quiet",
-        "-q",
-        "--short",
-        "--abbrev-ref",
-        "--symbolic",
-        "--symbolic-full-name",
-        "--show-prefix",
-        "--show-cdup",
-        "--path-format=absolute",
-        "--path-format=relative",
-        "--end-of-options",
-        "--",
+        "--show-toplevel", "--git-dir", "--git-common-dir", "--is-inside-work-tree",
+        "--is-bare-repository", "--verify", "--quiet", "-q", "--short", "--abbrev-ref",
+        "--symbolic", "--symbolic-full-name", "--show-prefix", "--show-cdup",
+        "--path-format=absolute", "--path-format=relative", "--end-of-options", "--",
       ]),
-      valueFlags: new Map([["--git-path", undefined]]),
+      valueFlags: new Set(["--git-path"]),
       patterns: [/^--short=[0-9]+$/u],
+      validate: (flags, positionals) => !(flags.includes("--git-path") && positionals.length > 0),
     },
   ],
   [
     "config",
     {
       exact: new Set([
-        "--list",
-        "-l",
-        "--get",
-        "--get-all",
-        "--get-regexp",
-        "--show-scope",
-        "--show-origin",
-        "--null",
-        "-z",
-        "--name-only",
-        "--includes",
-        "--no-includes",
-        "--local",
-        "--global",
-        "--system",
-        "--worktree",
-        "--fixed-value",
-        "--type=path",
-        "--type=bool",
-        "--type=int",
-        "--end-of-options",
-        "--",
+        "--list", "-l", "--get", "--get-all", "--get-regexp", "--show-scope", "--show-origin",
+        "--null", "-z", "--name-only", "--includes", "--no-includes", "--local", "--global",
+        "--system", "--worktree", "--fixed-value", "--type=path", "--type=bool", "--type=int",
+        "--end-of-options", "--",
       ]),
-      valueFlags: new Map([["--default", undefined]]),
+      valueFlags: new Set(["--default"]),
       patterns: [/^--default=/u],
       validate: (flags, positionals) => {
         const hasList = flags.includes("--list") || flags.includes("-l");
@@ -573,61 +465,17 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
   ],
   [
     "merge-base",
-    {
-      exact: new Set(["--is-ancestor", "--octopus", "--all", "--fork-point", "--end-of-options", "--"]),
-    },
-  ],
-  [
-    "merge-tree",
-    {
-      exact: new Set([
-        "--write-tree",
-        "--no-messages",
-        "--name-only",
-        "-z",
-        "--allow-unrelated-histories",
-        "--end-of-options",
-        "--",
-      ]),
-      patterns: [/^--merge-base=.+$/u],
-      isolatedMergeTree: true,
-      validate: (flags) => flags.includes("--write-tree"),
-    },
+    { exact: new Set(["--is-ancestor", "--octopus", "--all", "--fork-point", "--end-of-options", "--"]) },
   ],
   [
     "diff-tree",
     {
       exact: new Set([
-        "-r",
-        "-t",
-        "-z",
-        "--name-only",
-        "--name-status",
-        "--numstat",
-        "--stat",
-        "--raw",
-        "--root",
-        "--no-commit-id",
-        "--no-renames",
-        "-M",
-        "--find-renames",
-        "--ignore-submodules=none",
-        "--ignore-submodules=all",
-        "--ignore-submodules=dirty",
-        "--ignore-submodules=untracked",
-        "--submodule=short",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--no-patch",
-        "-s",
-        "-p",
-        "-u",
-        "--binary",
-        "--full-index",
-        "--abbrev",
-        "--no-color",
-        "--end-of-options",
-        "--",
+        "-r", "-t", "-z", "--name-only", "--name-status", "--numstat", "--stat", "--raw", "--root",
+        "--no-commit-id", "--no-renames", "-M", "--find-renames", "--ignore-submodules=none",
+        "--ignore-submodules=all", "--ignore-submodules=dirty", "--ignore-submodules=untracked",
+        "--submodule=short", "--no-ext-diff", "--no-textconv", "--no-patch", "-s", "-p", "-u",
+        "--binary", "--full-index", "--abbrev", "--no-color", "--end-of-options", "--",
       ]),
       patterns: [/^-(?:U|M)[0-9]+$/u, /^--unified=[0-9]+$/u, /^--abbrev=[0-9]+$/u],
       inject: ["--no-ext-diff", "--no-textconv", "--submodule=short"],
@@ -637,19 +485,8 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
     "cat-file",
     {
       exact: new Set([
-        "-p",
-        "-t",
-        "-s",
-        "-e",
-        "--batch",
-        "--batch-check",
-        "--batch-all-objects",
-        "-z",
-        "-Z",
-        "--unordered",
-        "--buffer",
-        "--end-of-options",
-        "--",
+        "-p", "-t", "-s", "-e", "--batch", "--batch-check", "--batch-all-objects",
+        "-z", "-Z", "--unordered", "--buffer", "--end-of-options", "--",
       ]),
     },
   ],
@@ -657,18 +494,8 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
     "ls-tree",
     {
       exact: new Set([
-        "-r",
-        "-t",
-        "-d",
-        "-l",
-        "-z",
-        "--name-only",
-        "--name-status",
-        "--full-tree",
-        "--full-name",
-        "--object-only",
-        "--end-of-options",
-        "--",
+        "-r", "-t", "-d", "-l", "-z", "--name-only", "--name-status", "--full-tree",
+        "--full-name", "--object-only", "--end-of-options", "--",
       ]),
     },
   ],
@@ -680,22 +507,14 @@ type ValidatedGitArgs =
       isVersionQuery: boolean;
       globalPrefix: string[];
       subcommandAndArgs: string[];
-      isolatedMergeTree: boolean;
+      needsIndexIsolation: boolean;
     }
   | { ok: false; disallowed: string };
 
 function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
-  if (args.length === 0) {
-    return { ok: false, disallowed: "(empty)" };
-  }
+  if (args.length === 0) return { ok: false, disallowed: "(empty)" };
   if (args.length === 1 && args[0] === "--version") {
-    return {
-      ok: true,
-      isVersionQuery: true,
-      globalPrefix: [],
-      subcommandAndArgs: ["--version"],
-      isolatedMergeTree: false,
-    };
+    return { ok: true, isVersionQuery: true, globalPrefix: [], subcommandAndArgs: ["--version"], needsIndexIsolation: false };
   }
 
   const globalPrefix: string[] = [];
@@ -705,18 +524,13 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
     if (!arg.startsWith("-")) break;
     if (arg === "--git-dir" || arg === "--work-tree") {
       const val = args[idx + 1];
-      if (val === undefined || val === "") {
-        return { ok: false, disallowed: arg };
-      }
+      if (val === undefined || val === "") return { ok: false, disallowed: arg };
       globalPrefix.push(arg, val);
       idx += 2;
       continue;
     }
     if (arg.startsWith("--git-dir=") || arg.startsWith("--work-tree=")) {
-      const eq = arg.indexOf("=");
-      if (eq === arg.length - 1) {
-        return { ok: false, disallowed: arg };
-      }
+      if (arg.indexOf("=") === arg.length - 1) return { ok: false, disallowed: arg };
       globalPrefix.push(arg);
       idx += 1;
       continue;
@@ -730,9 +544,7 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
 
   const sub = args[idx]!;
   const rule = SUBCOMMAND_RULES.get(sub);
-  if (!rule) {
-    return { ok: false, disallowed: sub };
-  }
+  if (!rule) return { ok: false, disallowed: sub };
 
   const subArgs: string[] = [sub, ...(rule.inject ?? [])];
   const seenFlags: string[] = [];
@@ -747,18 +559,14 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
       continue;
     }
     if (arg === "--" || arg === "--end-of-options") {
-      if (!rule.exact.has(arg)) {
-        return { ok: false, disallowed: arg };
-      }
+      if (!rule.exact.has(arg)) return { ok: false, disallowed: arg };
       literalOnly = true;
       subArgs.push(arg);
       continue;
     }
-
     if (rule.valueFlags?.has(arg)) {
       const val = args[i + 1];
-      const valRe = rule.valueFlags.get(arg);
-      if (val === undefined || val === "" || (valRe && !valRe.test(val))) {
+      if (val === undefined || val === "") {
         return { ok: false, disallowed: val === undefined ? arg : `${arg} ${val}` };
       }
       seenFlags.push(arg);
@@ -769,9 +577,7 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
 
     const matchesExact = rule.exact.has(arg);
     const matchesPattern = !matchesExact && (rule.patterns?.some((re) => re.test(arg)) ?? false);
-    if (!matchesExact && !matchesPattern) {
-      return { ok: false, disallowed: arg };
-    }
+    if (!matchesExact && !matchesPattern) return { ok: false, disallowed: arg };
 
     seenFlags.push(arg);
     subArgs.push(arg);
@@ -786,53 +592,33 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
     isVersionQuery: false,
     globalPrefix,
     subcommandAndArgs: subArgs,
-    isolatedMergeTree: rule.isolatedMergeTree === true,
+    // Metadata-only rev-parse queries must observe real repo paths without touching split-index files.
+    needsIndexIsolation: !(sub === "rev-parse" && positionals.length === 0),
   };
 }
 
-function isSameOrDescendant(candidate: string, ancestor: string): boolean {
-  const rel = relative(ancestor, candidate);
-  if (rel === "") return true;
-  if (isAbsolute(rel)) return false;
-  return rel !== ".." && !rel.startsWith(`..${sep}`);
-}
-
-function pathsOverlap(a: string, b: string): boolean {
-  return isSameOrDescendant(a, b) || isSameOrDescendant(b, a);
-}
-
-async function resolveExistingDir(dirPath: string): Promise<string | null> {
-  if (!dirPath || !isAbsolute(dirPath)) return null;
-  try {
-    const st = await stat(dirPath);
-    if (!st.isDirectory()) return null;
-    return await realpath(dirPath);
-  } catch {
-    return null;
-  }
-}
-
 async function ensureSupportedGitVersion(
-  gitBin: ResolvedGitBinary,
+  gitBin: string,
   cwd: string,
   env: NodeJS.ProcessEnv,
   signal: AbortSignal | undefined,
   timeoutMs: number,
   binary: boolean | undefined,
 ): Promise<{ ok: true } | { ok: false; result: ExecResult }> {
-  if (verifiedGitBinaryCache.has(gitBin.cacheKey)) {
-    return { ok: true };
-  }
-  const versionRes = await runProcess(gitBin.path, ["--version"], {
+  const versionRes = await runProcess(gitBin, ["--version"], {
     cwd,
-    env: cleanNoRepoEnv(env),
+    env: cleanVersionProbeEnv(env),
     signal,
     timeoutMs,
   });
   if (versionRes.errorCode !== undefined || versionRes.code !== 0) {
     return {
       ok: false,
-      result: binary ? { ...versionRes, stdout: "", stdoutBuffer: Buffer.alloc(0) } : versionRes,
+      result: {
+        ...versionRes,
+        stdout: "",
+        ...(binary ? { stdoutBuffer: Buffer.alloc(0) } : {}),
+      },
     };
   }
   if (!isSupportedGitVersion(versionRes.stdout)) {
@@ -847,298 +633,12 @@ async function ensureSupportedGitVersion(
       },
     };
   }
-  verifiedGitBinaryCache.add(gitBin.cacheKey);
   return { ok: true };
 }
 
-async function resolveCommitInSource(
-  gitBin: string,
-  cwd: string,
-  globalPrefix: readonly string[],
-  rev: string,
-  sourceEnv: NodeJS.ProcessEnv,
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-  binary: boolean | undefined,
-): Promise<{ ok: true; sha: string } | { ok: false; result: ExecResult }> {
-  const res = await runProcess(
-    gitBin,
-    [...SAFE_GIT_FLAGS, ...globalPrefix, "rev-parse", "--verify", "--quiet", "--end-of-options", `${rev}^{commit}`],
-    {
-      cwd,
-      env: sourceEnv,
-      signal,
-      timeoutMs,
-    },
-  );
-  if (res.errorCode !== undefined || res.code !== 0) {
-    return {
-      ok: false,
-      result: binary ? { ...res, stdout: "", stdoutBuffer: Buffer.alloc(0) } : res,
-    };
-  }
-  return { ok: true, sha: res.stdout.trim() };
-}
-
-async function runIsolatedMergeTree(
-  gitBin: string,
-  cwd: string,
-  validated: Extract<ValidatedGitArgs, { ok: true }>,
-  env: NodeJS.ProcessEnv,
-  callerEnv: NodeJS.ProcessEnv | undefined,
-  emptyIdxPath: string,
-  opts: GitExecOptions,
-  deadline: number | undefined,
-  totalTimeoutMs: number,
-  remainingTimeoutMs: () => number,
-  failResult: (code: number, stderr: string, errorCode?: string) => ExecResult,
-): Promise<ExecResult> {
-  const rawObjDir = callerEnv?.GIT_OBJECT_DIRECTORY;
-  const realObjDir = rawObjDir ? await resolveExistingDir(rawObjDir) : null;
-  if (!realObjDir) {
-    return failResult(
-      1,
-      "merge-tree --write-tree requires an existing absolute scratch GIT_OBJECT_DIRECTORY.",
-      "EINVAL",
-    );
-  }
-
-  const realAlts: string[] = [];
-  const rawAlts = callerEnv?.GIT_ALTERNATE_OBJECT_DIRECTORIES;
-  if (rawAlts !== undefined && rawAlts !== "") {
-    const parts = rawAlts.split(delimiter).filter(Boolean);
-    if (parts.length === 0) {
-      return failResult(1, "Invalid GIT_ALTERNATE_OBJECT_DIRECTORIES for merge-tree.", "EINVAL");
-    }
-    for (const part of parts) {
-      const resolvedAlt = await resolveExistingDir(part);
-      if (!resolvedAlt) {
-        return failResult(1, `Invalid GIT_ALTERNATE_OBJECT_DIRECTORIES entry for merge-tree: ${part}`, "EINVAL");
-      }
-      if (pathsOverlap(realObjDir, resolvedAlt)) {
-        return failResult(1, "merge-tree scratch GIT_OBJECT_DIRECTORY must be distinct from alternate objects.", "EINVAL");
-      }
-      realAlts.push(resolvedAlt);
-    }
-  }
-
-  if (deadline !== undefined && Date.now() >= deadline) {
-    return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
-  }
-
-  const scratchRepoProbe = await runProcess(
-    gitBin,
-    ["-c", "safe.bareRepository=all", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-    {
-      cwd: realObjDir,
-      env: cleanNoRepoEnv(env),
-      signal: opts.signal,
-      timeoutMs: remainingTimeoutMs(),
-    },
-  );
-  if (scratchRepoProbe.errorCode !== undefined) {
-    return opts.binary ? { ...scratchRepoProbe, stdout: "", stdoutBuffer: Buffer.alloc(0) } : scratchRepoProbe;
-  }
-  if (scratchRepoProbe.code === 0) {
-    return failResult(1, "merge-tree scratch GIT_OBJECT_DIRECTORY must not be inside any Git repository.", "EINVAL");
-  }
-
-  if (deadline !== undefined && Date.now() >= deadline) {
-    return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
-  }
-
-  const sourceEnv = mergeEnv(cleanInternalConfigEnv(env), {
-    GIT_OBJECT_DIRECTORY: undefined,
-    GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
-    GIT_INDEX_FILE: emptyIdxPath,
-  });
-
-  const repoInfoRes = await runProcess(
-    gitBin,
-    [
-      ...SAFE_GIT_FLAGS,
-      ...validated.globalPrefix,
-      "rev-parse",
-      "--path-format=absolute",
-      "--git-common-dir",
-      "--git-dir",
-      "--is-inside-work-tree",
-      "--show-object-format",
-    ],
-    {
-      cwd,
-      env: sourceEnv,
-      signal: opts.signal,
-      timeoutMs: remainingTimeoutMs(),
-    },
-  );
-  if (repoInfoRes.errorCode !== undefined) {
-    return opts.binary ? { ...repoInfoRes, stdout: "", stdoutBuffer: Buffer.alloc(0) } : repoInfoRes;
-  }
-  if (repoInfoRes.code !== 0) {
-    return failResult(
-      1,
-      repoInfoRes.stderr.trim() || "merge-tree requires a valid, unambiguously discovered source repository.",
-      "EINVAL",
-    );
-  }
-
-  const infoLines = repoInfoRes.stdout.trim().split(/\r?\n/u);
-  const realCommonDir = infoLines[0] ? await resolveExistingDir(infoLines[0].trim()) : null;
-  const realGitDir = infoLines[1] ? await resolveExistingDir(infoLines[1].trim()) : null;
-  const insideWorkTree = infoLines[2]?.trim() === "true";
-  const objectFormat = infoLines[3]?.trim() === "sha256" ? "sha256" : "sha1";
-
-  if (!realCommonDir || !realGitDir) {
-    return failResult(1, "merge-tree could not resolve source repository paths.", "EINVAL");
-  }
-  if (pathsOverlap(realObjDir, realCommonDir) || pathsOverlap(realObjDir, realGitDir)) {
-    return failResult(1, "merge-tree scratch GIT_OBJECT_DIRECTORY must be distinct from the repository.", "EINVAL");
-  }
-
-  if (insideWorkTree) {
-    if (deadline !== undefined && Date.now() >= deadline) {
-      return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
-    }
-    const topRes = await runProcess(
-      gitBin,
-      [...SAFE_GIT_FLAGS, ...validated.globalPrefix, "rev-parse", "--path-format=absolute", "--show-toplevel"],
-      {
-        cwd,
-        env: sourceEnv,
-        signal: opts.signal,
-        timeoutMs: remainingTimeoutMs(),
-      },
-    );
-    if (topRes.errorCode !== undefined) {
-      return opts.binary ? { ...topRes, stdout: "", stdoutBuffer: Buffer.alloc(0) } : topRes;
-    }
-    const realTopLevel = topRes.code === 0 ? await resolveExistingDir(topRes.stdout.trim()) : null;
-    if (!realTopLevel) {
-      return failResult(1, "merge-tree could not resolve source worktree root.", "EINVAL");
-    }
-    if (pathsOverlap(realObjDir, realTopLevel)) {
-      return failResult(1, "merge-tree scratch GIT_OBJECT_DIRECTORY must be distinct from the worktree.", "EINVAL");
-    }
-  }
-
-  if (realAlts.length === 0) {
-    const sourceObjects = await resolveExistingDir(resolve(realCommonDir, "objects"));
-    if (!sourceObjects || pathsOverlap(realObjDir, sourceObjects)) {
-      return failResult(1, "merge-tree could not resolve source object store.", "EINVAL");
-    }
-    realAlts.push(sourceObjects);
-  }
-
-  const resolvedArgs: string[] = ["merge-tree"];
-  const resolvedPositionals: string[] = [];
-  let literalOnly = false;
-  for (let i = 1; i < validated.subcommandAndArgs.length; i++) {
-    const arg = validated.subcommandAndArgs[i]!;
-    if (!literalOnly && (arg === "--" || arg === "--end-of-options")) {
-      literalOnly = true;
-      resolvedArgs.push(arg);
-      continue;
-    }
-    if (!literalOnly && arg.startsWith("--merge-base=")) {
-      if (deadline !== undefined && Date.now() >= deadline) {
-        return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
-      }
-      const baseRev = arg.slice("--merge-base=".length);
-      const baseRes = await resolveCommitInSource(
-        gitBin,
-        cwd,
-        validated.globalPrefix,
-        baseRev,
-        sourceEnv,
-        opts.signal,
-        remainingTimeoutMs(),
-        opts.binary,
-      );
-      if (!baseRes.ok) return baseRes.result;
-      resolvedArgs.push(`--merge-base=${baseRes.sha}`);
-      continue;
-    }
-    if (!literalOnly && arg.startsWith("-") && arg !== "-") {
-      resolvedArgs.push(arg);
-      continue;
-    }
-    if (deadline !== undefined && Date.now() >= deadline) {
-      return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
-    }
-    const revRes = await resolveCommitInSource(
-      gitBin,
-      cwd,
-      validated.globalPrefix,
-      arg,
-      sourceEnv,
-      opts.signal,
-      remainingTimeoutMs(),
-      opts.binary,
-    );
-    if (!revRes.ok) return revRes.result;
-    resolvedPositionals.push(revRes.sha);
-    resolvedArgs.push(revRes.sha);
-  }
-
-  if (deadline !== undefined && Date.now() >= deadline) {
-    return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
-  }
-
-  let runnerGitDir: string;
-  try {
-    runnerGitDir = await mkdtemp(join(tmpdir(), "ship-ge-mt-"));
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    return failResult(1, e.message, e.code ?? "EIO");
-  }
-
-  let res: ExecResult;
-  try {
-    await mkdir(join(runnerGitDir, "refs"), { recursive: true, mode: 0o700 });
-    await writeFile(join(runnerGitDir, "HEAD"), "ref: refs/heads/main\n", "utf8");
-    const bareConfig =
-      objectFormat === "sha256"
-        ? "[core]\n\trepositoryformatversion = 1\n\tbare = true\n[extensions]\n\tobjectformat = sha256\n"
-        : "[core]\n\trepositoryformatversion = 0\n\tbare = true\n";
-    await writeFile(join(runnerGitDir, "config"), bareConfig, "utf8");
-
-    const sealedEnv = mergeEnv(cleanNoRepoEnv(env), {
-      GIT_DIR: runnerGitDir,
-      GIT_COMMON_DIR: runnerGitDir,
-      GIT_OBJECT_DIRECTORY: realObjDir,
-      GIT_ALTERNATE_OBJECT_DIRECTORIES: realAlts.join(delimiter),
-      ...(resolvedPositionals[0] ? { GIT_ATTR_SOURCE: resolvedPositionals[0] } : {}),
-    });
-
-    res = await runProcess(gitBin, [...SAFE_GIT_FLAGS, "--git-dir", runnerGitDir, ...resolvedArgs], {
-      cwd: runnerGitDir,
-      stdin: opts.stdin,
-      binary: opts.binary,
-      timeoutMs: remainingTimeoutMs(),
-      maxBuffer: opts.maxBuffer,
-      signal: opts.signal,
-      env: sealedEnv,
-    });
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    res = failResult(1, e.message, e.code ?? "EIO");
-  }
-
-  try {
-    await rm(runnerGitDir, { recursive: true, force: true });
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (res.code === 0) {
-      res = failResult(1, e.message, e.code ?? "EIO");
-    }
-  }
-  return res;
-}
-
 /**
- * Execute an allowlisted read-only Git plumbing command (or isolated `merge-tree --write-tree`)
- * using a single resolved Git >= 2.45.1 executable, isolated index metadata, and callback hardening.
+ * Execute an allowlisted read-only Git plumbing command using an uncached Git >= 2.45.1
+ * executable, isolated index metadata, and callback hardening.
  */
 export async function defaultGitExec(
   cwd: string,
@@ -1157,6 +657,9 @@ export async function defaultGitExec(
   if (!validated.ok) {
     return failResult(1, `Disallowed git option or subcommand: ${validated.disallowed}`, "EINVAL");
   }
+  if (opts.signal?.aborted) {
+    return failResult(1, "Operation aborted.", "ABORT_ERR");
+  }
 
   const env = mergeEnv(stripRepoLocalGitEnv(process.env), {
     ...opts.env,
@@ -1168,42 +671,48 @@ export async function defaultGitExec(
 
   const totalTimeoutMs = opts.timeoutMs ?? 20_000;
   const deadline = totalTimeoutMs > 0 ? Date.now() + totalTimeoutMs : undefined;
-  const remainingTimeoutMs = (): number => {
-    if (deadline === undefined) return 0;
-    return Math.max(1, deadline - Date.now());
-  };
+  const remainingTimeoutMs = (): number => (deadline === undefined ? 0 : Math.max(1, deadline - Date.now()));
 
-  const resolvedGit = await resolveGitBinary(cwd, env.PATH);
-  if (!resolvedGit) {
-    return failResult(1, "spawn git ENOENT", "ENOENT");
-  }
+  const gitBin = await resolveGitBinary(cwd, env.PATH);
+  if (!gitBin) return failResult(1, "spawn git ENOENT", "ENOENT");
 
   if (validated.isVersionQuery) {
-    return runProcess(resolvedGit.path, ["--version"], {
+    return runProcess(gitBin, ["--version"], {
       cwd,
       stdin: opts.stdin,
       binary: opts.binary,
       timeoutMs: remainingTimeoutMs(),
       maxBuffer: opts.maxBuffer,
       signal: opts.signal,
-      env: cleanNoRepoEnv(env),
+      env: cleanVersionProbeEnv(env),
     });
   }
 
   const versionCheck = await ensureSupportedGitVersion(
-    resolvedGit,
+    gitBin,
     cwd,
     env,
     opts.signal,
     remainingTimeoutMs(),
     opts.binary,
   );
-  if (!versionCheck.ok) {
-    return versionCheck.result;
-  }
-
+  if (!versionCheck.ok) return versionCheck.result;
+  if (opts.signal?.aborted) return failResult(1, "Operation aborted.", "ABORT_ERR");
   if (deadline !== undefined && Date.now() >= deadline) {
     return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+  }
+
+  const fullArgs = [...SAFE_GIT_FLAGS, ...validated.globalPrefix, ...validated.subcommandAndArgs];
+  if (!validated.needsIndexIsolation) {
+    return runProcess(gitBin, fullArgs, {
+      cwd,
+      stdin: opts.stdin,
+      binary: opts.binary,
+      timeoutMs: remainingTimeoutMs(),
+      maxBuffer: opts.maxBuffer,
+      signal: opts.signal,
+      env,
+    });
   }
 
   let idxTmpDir: string;
@@ -1213,51 +722,28 @@ export async function defaultGitExec(
     const e = err as NodeJS.ErrnoException;
     return failResult(1, e.message, e.code ?? "EIO");
   }
-  const emptyIdxPath = join(idxTmpDir, "index");
 
-  let res: ExecResult;
-  try {
-    if (validated.isolatedMergeTree) {
-      res = await runIsolatedMergeTree(
-        resolvedGit.path,
-        cwd,
-        validated,
-        env,
-        opts.env,
-        emptyIdxPath,
-        opts,
-        deadline,
-        totalTimeoutMs,
-        remainingTimeoutMs,
-        failResult,
-      );
-    } else {
-      res = await runProcess(
-        resolvedGit.path,
-        [...SAFE_GIT_FLAGS, ...validated.globalPrefix, ...validated.subcommandAndArgs],
-        {
-          cwd,
-          stdin: opts.stdin,
-          binary: opts.binary,
-          timeoutMs: remainingTimeoutMs(),
-          maxBuffer: opts.maxBuffer,
-          signal: opts.signal,
-          env: mergeEnv(env, { GIT_INDEX_FILE: emptyIdxPath }),
-        },
-      );
-    }
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    res = failResult(1, e.message, e.code ?? "EIO");
-  }
+  let res = await runProcess(gitBin, fullArgs, {
+    cwd,
+    stdin: opts.stdin,
+    binary: opts.binary,
+    timeoutMs: remainingTimeoutMs(),
+    maxBuffer: opts.maxBuffer,
+    signal: opts.signal,
+    env: mergeEnv(env, { GIT_INDEX_FILE: join(idxTmpDir, "index") }),
+  });
 
   try {
     await rm(idxTmpDir, { recursive: true, force: true });
   } catch (err) {
     const e = err as NodeJS.ErrnoException;
-    if (res.code === 0) {
-      res = failResult(1, e.message, e.code ?? "EIO");
-    }
+    const cleanupMsg = `Failed to remove temporary index directory ${idxTmpDir}: ${e.message}`;
+    res = {
+      ...res,
+      code: res.code === 0 ? 1 : res.code,
+      stderr: res.stderr ? `${res.stderr}\n${cleanupMsg}` : cleanupMsg,
+      errorCode: res.errorCode ?? e.code ?? "EIO",
+    };
   }
   return res;
 }
