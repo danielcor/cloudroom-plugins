@@ -199,24 +199,22 @@ export function runProcess(
       }
     };
 
-    const signalTree = (sig: NodeJS.Signals) => {
-      if (groupRetired || finalGroupSignalSent) return;
+    const signalGroupTerm = () => {
+      if (groupRetired || finalGroupSignalSent || childExited) return;
       const pid = child?.pid;
       if (pid === undefined) return;
       if (useProcessGroup) {
         try {
-          process.kill(-pid, sig);
+          process.kill(-pid, "SIGTERM");
           return;
         } catch (err) {
           if ((err as NodeJS.ErrnoException).code === "ESRCH") return;
         }
       }
-      if (!childExited) {
-        try {
-          child?.kill(sig);
-        } catch {
-          // Child already exited.
-        }
+      try {
+        child?.kill("SIGTERM");
+      } catch {
+        // Child already exited.
       }
     };
 
@@ -234,7 +232,26 @@ export function runProcess(
     const retireGroup = (maxWaitMs = 200): Promise<void> => {
       if (groupTeardownPromise) return groupTeardownPromise;
       const pid = child?.pid;
-      if (groupRetired || !useProcessGroup || pid === undefined || !isGroupAlive()) {
+      if (groupRetired || finalGroupSignalSent || pid === undefined) {
+        finalGroupSignalSent = true;
+        groupRetired = true;
+        groupTeardownPromise = Promise.resolve();
+        return groupTeardownPromise;
+      }
+      if (!useProcessGroup) {
+        finalGroupSignalSent = true;
+        groupRetired = true;
+        if (!childExited) {
+          try {
+            child?.kill("SIGKILL");
+          } catch {
+            // Child already exited.
+          }
+        }
+        groupTeardownPromise = Promise.resolve();
+        return groupTeardownPromise;
+      }
+      if (!isGroupAlive()) {
         finalGroupSignalSent = true;
         groupRetired = true;
         groupTeardownPromise = Promise.resolve();
@@ -247,7 +264,16 @@ export function runProcess(
         process.kill(-pid, "SIGKILL");
         signaled = true;
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ESRCH") signaled = true;
+        if ((err as NodeJS.ErrnoException).code !== "ESRCH") {
+          signaled = true;
+          if (!childExited) {
+            try {
+              child?.kill("SIGKILL");
+            } catch {
+              // Child already exited.
+            }
+          }
+        }
       }
       finalGroupSignalSent = true;
       if (!signaled) {
@@ -329,7 +355,7 @@ export function runProcess(
       // Keep cleanup deadline referenced so a detached pipe-holder cannot hang shutdown or leave early.
       cleanupTimer = setTimeout(() => {
         if (settled) return;
-        signalTree("SIGKILL");
+        void retireGroup(200);
         child?.stdout?.destroy();
         child?.stderr?.destroy();
         child?.stdin?.destroy();
@@ -349,15 +375,15 @@ export function runProcess(
         return;
       }
       if (reason === "maxBuffer" || graceMs <= 0) {
-        signalTree("SIGKILL");
+        void retireGroup(200);
         scheduleForcedCleanup();
         return;
       }
-      signalTree("SIGTERM");
+      signalGroupTerm();
       // Keep grace timer referenced so standalone event loops stay alive until SIGKILL escalation completes.
       killTimer = setTimeout(() => {
         if (settled) return;
-        signalTree("SIGKILL");
+        void retireGroup(200);
         scheduleForcedCleanup();
       }, graceMs);
     };
@@ -416,6 +442,13 @@ export function runProcess(
       // Send the final group signal (if any same-group descendant remains) and retire this PGID so later
       // timeout/abort cleanup for a detached pipe-holder can never signal a reused PGID.
       void retireGroup(200);
+      if (stopReason !== undefined) {
+        if (killTimer) {
+          clearTimeout(killTimer);
+          killTimer = undefined;
+        }
+        scheduleForcedCleanup();
+      }
     });
 
     child.once("error", (err: NodeJS.ErrnoException) => {
