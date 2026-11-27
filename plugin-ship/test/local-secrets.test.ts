@@ -397,6 +397,7 @@ describe("local secret collection and matching", () => {
         'CR_SECRET="part1\\rpart2"',
         'DQ_CR_SECRET="left\rright"',
         "SQ_CR_SECRET='sleft\rsright'",
+        "UNQ_CR_SECRET=uleft\ruright",
         "",
       ].join("\n"),
       "utf8",
@@ -430,6 +431,11 @@ describe("local secret collection and matching", () => {
     expect(findLocalSecretMatch("sleftsright", res.secrets)).toBe("SQ_CR_SECRET in .env");
     expect(findLocalSecretMatch("sleft\nsright", res.secrets)).toBe("SQ_CR_SECRET in .env");
     expect(res.secrets.some((s) => s.value === "sleft\rsright")).toBe(true);
+    expect(findLocalSecretMatch("ulefturight", res.secrets)).toBe("UNQ_CR_SECRET in .env");
+    expect(findLocalSecretMatch("uleft\ruright", res.secrets)).toBe("UNQ_CR_SECRET in .env");
+    expect(findLocalSecretMatch("uleft\nuright", res.secrets)).toBe("UNQ_CR_SECRET in .env");
+    expect(res.secrets.some((s) => s.value === "ulefturight")).toBe(true);
+    expect(res.secrets.some((s) => s.value === "uleft\ruright")).toBe(true);
     expect(findLocalSecretMatch("fullwidth_dot_env_secret", res.secrets)).toBe("FW_SECRET in \uFF0Eenv");
     expect(findLocalSecretMatch("cyrillic_e_env_secret", res.secrets)).toBe("CYR_SECRET in .\u0435nv");
     expect(findLocalSecretMatch("fullwidth_example_ignored", res.secrets)).toBeNull();
@@ -460,7 +466,7 @@ describe("local secret collection and matching", () => {
     );
   });
 
-  it("handles bare CR before quotes, CR-delimited files, literal-CR candidates, and malformed CR files (S12)", async () => {
+  it("handles bare CR before quotes, CR-delimited files, literal-CR candidates, and malformed CR files (S12/S13)", async () => {
     const crQuoteDir = await mkdtemp(join(tmpdir(), "ship-sec-cr-quote-"));
     dirs.push(crQuoteDir);
     const crQuoteHome = await mkdtemp(join(tmpdir(), "ship-sec-cr-quote-home-"));
@@ -471,11 +477,10 @@ describe("local secret collection and matching", () => {
       "utf8",
     );
     const crQuoteRes = await collectLocalSecrets(crQuoteDir, { PATH: process.env.PATH }, crQuoteHome);
+    expect(crQuoteRes.incomplete).toBe(false);
     expect(findLocalSecretMatch("fixture_al#pha42", crQuoteRes.secrets)).toBe("API_TOKEN in .env");
     expect(crQuoteRes.secrets.some((s) => s.value === "fixture_al#pha42")).toBe(true);
     expect(findLocalSecretMatch("fixture_key_cr", crQuoteRes.secrets)).toBe("KEY_CR_SECRET in .env");
-    expect(crQuoteRes.incomplete).toBe(true);
-    expect(crQuoteRes.incompleteReasons).toContain("parse_error:.env");
 
     const crDelimDir = await mkdtemp(join(tmpdir(), "ship-sec-cr-delim-"));
     dirs.push(crDelimDir);
@@ -501,20 +506,9 @@ describe("local secret collection and matching", () => {
       "utf8",
     );
     const crQuotedDelimRes = await collectLocalSecrets(crQuotedDelimDir, { PATH: process.env.PATH }, crQuotedDelimHome);
+    expect(crQuotedDelimRes.incomplete).toBe(false);
     expect(findLocalSecretMatch("cr_q_first", crQuotedDelimRes.secrets)).toBe("FIRST_Q_SECRET in .env");
     expect(findLocalSecretMatch("cr_q_second", crQuotedDelimRes.secrets)).toBe("SECOND_Q_SECRET in .env");
-
-    const unqCrDir = await mkdtemp(join(tmpdir(), "ship-sec-unq-cr-"));
-    dirs.push(unqCrDir);
-    const unqCrHome = await mkdtemp(join(tmpdir(), "ship-sec-unq-cr-home-"));
-    dirs.push(unqCrHome);
-    await writeFile(join(unqCrDir, ".env"), "UNQ_CR_SECRET=uleft\ruright\n", "utf8");
-    const unqCrRes = await collectLocalSecrets(unqCrDir, { PATH: process.env.PATH }, unqCrHome);
-    expect(unqCrRes.secrets.some((s) => s.value === "ulefturight")).toBe(true);
-    expect(unqCrRes.secrets.some((s) => s.value === "uleft\ruright")).toBe(true);
-    expect(findLocalSecretMatch("ulefturight", unqCrRes.secrets)).toBe("UNQ_CR_SECRET in .env");
-    expect(findLocalSecretMatch("uleft\ruright", unqCrRes.secrets)).toBe("UNQ_CR_SECRET in .env");
-    expect(findLocalSecretMatch("uleft\nuright", unqCrRes.secrets)).toBe("UNQ_CR_SECRET in .env");
 
     const badCrDir = await mkdtemp(join(tmpdir(), "ship-sec-bad-cr-"));
     dirs.push(badCrDir);
@@ -528,5 +522,14 @@ describe("local secret collection and matching", () => {
     const badCrRes = await collectLocalSecrets(badCrDir, { PATH: process.env.PATH }, badCrHome);
     expect(badCrRes.incomplete).toBe(true);
     expect(badCrRes.incompleteReasons).toContain("parse_error:.env");
+
+    const badLfCrDir = await mkdtemp(join(tmpdir(), "ship-sec-bad-lf-cr-"));
+    dirs.push(badLfCrDir);
+    const badLfCrHome = await mkdtemp(join(tmpdir(), "ship-sec-bad-lf-cr-home-"));
+    dirs.push(badLfCrHome);
+    await writeFile(join(badLfCrDir, ".env"), 'API_TOKEN=\r"unclosed\n', "utf8");
+    const badLfCrRes = await collectLocalSecrets(badLfCrDir, { PATH: process.env.PATH }, badLfCrHome);
+    expect(badLfCrRes.incomplete).toBe(true);
+    expect(badLfCrRes.incompleteReasons).toContain("parse_error:.env");
   });
 });

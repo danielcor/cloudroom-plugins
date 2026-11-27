@@ -190,10 +190,17 @@ function decodeShellUnquoted(raw: string): { value: string; hadEscapes: boolean 
   return { value: out, hadEscapes };
 }
 
-function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boolean } {
+function parseDotenvPass(src: string): {
+  entries: DotenvEntry[];
+  incomplete: boolean;
+  valueError: boolean;
+  assignmentCount: number;
+} {
   const n = src.length;
   const entries: DotenvEntry[] = [];
   let incomplete = false;
+  let valueError = false;
+  let assignmentCount = 0;
   let i = 0;
 
   while (i < n) {
@@ -217,6 +224,7 @@ function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boo
     }
 
     const key = headMatch[1]!;
+    assignmentCount += 1;
     i += headMatch[0].length;
     const afterEq = i;
     while (i < n && (src[i] === " " || src[i] === "\t")) {
@@ -249,6 +257,7 @@ function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boo
         if (ch === "\\") {
           if (i + 1 >= n) {
             incomplete = true;
+            valueError = true;
             decoded += "\\";
             shellStyle += "\\";
             i += 1;
@@ -285,7 +294,10 @@ function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boo
         shellStyle += ch;
         i += 1;
       }
-      if (!closed) incomplete = true;
+      if (!closed) {
+        incomplete = true;
+        valueError = true;
+      }
       const rawBody = src.slice(bodyStart, closed ? bodyEnd : i);
       const nodeStyle = rawBody.replace(/\\n/gu, "\n");
       const dotenvStyle = rawBody.replace(/\\n/gu, "\n").replace(/\\r/gu, "\r");
@@ -296,6 +308,7 @@ function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boo
       const stop = restEnd === -1 ? n : restEnd;
       if (!/^[ \t]*(?:#.*)?$/u.test(src.slice(i, stop))) {
         incomplete = true;
+        valueError = true;
       }
       i = stop + 1;
       continue;
@@ -307,6 +320,7 @@ function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boo
       const closeIdx = src.indexOf(quote, i);
       if (closeIdx === -1) {
         incomplete = true;
+        valueError = true;
         entries.push({ key, value: src.slice(i), quote: qKind });
         i = n;
         continue;
@@ -317,6 +331,7 @@ function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boo
       const stop = restEnd === -1 ? n : restEnd;
       if (!/^[ \t]*(?:#.*)?$/u.test(src.slice(i, stop))) {
         incomplete = true;
+        valueError = true;
       }
       i = stop + 1;
       continue;
@@ -328,6 +343,7 @@ function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boo
     i = stop + 1;
     if (/(?:^|[^\\])(?:\\\\)*\\$/u.test(raw)) {
       incomplete = true;
+      valueError = true;
     }
     const unquotedVals: string[] = [];
     const hashIdx = raw.indexOf("#");
@@ -363,13 +379,14 @@ function parseDotenvPass(src: string): { entries: DotenvEntry[]; incomplete: boo
     }
   }
 
-  return { entries, incomplete };
+  return { entries, incomplete, valueError, assignmentCount };
 }
 
 function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolean } {
   const lfNormalized = (text.startsWith("\uFEFF") ? text.slice(1) : text).replace(/\r\n/gu, "\n");
   if (!lfNormalized.includes("\r")) {
-    return parseDotenvPass(lfNormalized);
+    const parsed = parseDotenvPass(lfNormalized);
+    return { entries: parsed.entries, incomplete: parsed.incomplete };
   }
   const noCr = parseDotenvPass(lfNormalized.replace(/\r/gu, ""));
   const crToLf = parseDotenvPass(lfNormalized.replace(/\r/gu, "\n"));
@@ -386,9 +403,14 @@ function parseDotenv(text: string): { entries: DotenvEntry[]; incomplete: boolea
       }
     }
   }
+  const crSyntaxValid = !crToLf.incomplete;
+  const crLikelyDelimited =
+    (!lfNormalized.includes("\n") && lfNormalized.endsWith("\r")) ||
+    crToLf.assignmentCount > noCr.assignmentCount;
+  const lfSyntaxValid = !noCr.incomplete && !crToLf.valueError && !crLikelyDelimited;
   return {
     entries: [...byKeyVal.values()],
-    incomplete: noCr.incomplete || crToLf.incomplete || literalCr.incomplete,
+    incomplete: !(crSyntaxValid || lfSyntaxValid),
   };
 }
 
