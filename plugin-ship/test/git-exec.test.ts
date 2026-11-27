@@ -309,26 +309,6 @@ describe("git-exec and process runner", () => {
     expect(downgradedInPlace.code).not.toBe(0);
     expect(downgradedInPlace.errorCode).toBe("ENOTSUP");
 
-    // S3: Long PATH lookup honors abort and timeout deadlines instead of falling through to ENOENT.
-    const longPath = Array.from({ length: 20_000 }, (_, i) => join(inPlaceDir, `missing-${i}`)).join(delimiter);
-    const s3TimeoutRes = await defaultGitExec(inPlaceDir, ["rev-parse", "--is-inside-work-tree"], {
-      env: { PATH: longPath },
-      timeoutMs: 1,
-    });
-    expect(s3TimeoutRes.code).not.toBe(0);
-    expect(s3TimeoutRes.errorCode).toBe("ETIMEDOUT");
-
-    const s3Ac = new AbortController();
-    const abortTimer = setTimeout(() => s3Ac.abort(), 5);
-    const s3AbortRes = await defaultGitExec(inPlaceDir, ["rev-parse", "--is-inside-work-tree"], {
-      env: { PATH: longPath },
-      signal: s3Ac.signal,
-      timeoutMs: 10_000,
-    });
-    clearTimeout(abortTimer);
-    expect(s3AbortRes.code).not.toBe(0);
-    expect(s3AbortRes.errorCode).toBe("ABORT_ERR");
-
     // S4 (PATH traversal): Relative PATH=../bin through a symlinked working directory follows filesystem '..'.
     const symRoot = await mkdtemp(join(tmpdir(), "ship-ge-s4sym-"));
     dirs.push(symRoot);
@@ -982,6 +962,67 @@ describe("git-exec and process runner", () => {
       expect(inheritOrphanPid).toBeGreaterThan(0);
       pidsToCleanup.push(inheritOrphanPid);
       expect(isPidAlive(inheritOrphanPid)).toBe(false);
+
+      // Detached child keeping stdout open past leader exit obeys caller deadline instead of truncating at 250ms.
+      const detachedDelayedFile = join(dir, "detached-delayed.pid");
+      const detachedDelayedScript = `
+        const { spawn } = require("node:child_process");
+        const fs = require("node:fs");
+        const child = spawn(
+          process.execPath,
+          [
+            "-e",
+            'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.stdout.write("detached-final\\\\n", () => process.exit(0)), 350);',
+            ${JSON.stringify(detachedDelayedFile)},
+          ],
+          { detached: true, stdio: ["ignore", 1, 2] },
+        );
+        child.unref();
+        const timer = setInterval(() => {
+          if (fs.existsSync(${JSON.stringify(detachedDelayedFile)})) {
+            clearInterval(timer);
+            process.stdout.write("leader-first\\n", () => process.exit(0));
+          }
+        }, 5);
+      `;
+      const delayedRes = await runProcess(process.execPath, ["-e", detachedDelayedScript], {
+        cwd: dir,
+        timeoutMs: 1000,
+      });
+      pidsToCleanup.push(Number.parseInt((await readFile(detachedDelayedFile, "utf8")).trim(), 10));
+      expect(delayedRes.code).toBe(0);
+      expect(delayedRes.errorCode).toBeUndefined();
+      expect(delayedRes.stdout).toContain("leader-first\n");
+      expect(delayedRes.stdout).toContain("detached-final\n");
+
+      const detachedHungFile = join(dir, "detached-hung.pid");
+      const detachedHungScript = `
+        const { spawn } = require("node:child_process");
+        const fs = require("node:fs");
+        const child = spawn(
+          process.execPath,
+          [
+            "-e",
+            'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(0), 2000);',
+            ${JSON.stringify(detachedHungFile)},
+          ],
+          { detached: true, stdio: ["ignore", 1, 2] },
+        );
+        child.unref();
+        const timer = setInterval(() => {
+          if (fs.existsSync(${JSON.stringify(detachedHungFile)})) {
+            clearInterval(timer);
+            process.stdout.write("leader-only\\n", () => process.exit(0));
+          }
+        }, 5);
+      `;
+      const hungRes = await runProcess(process.execPath, ["-e", detachedHungScript], {
+        cwd: dir,
+        timeoutMs: 120,
+      });
+      pidsToCleanup.push(Number.parseInt((await readFile(detachedHungFile, "utf8")).trim(), 10));
+      expect(hungRes.code).not.toBe(0);
+      expect(hungRes.errorCode).toBe("ETIMEDOUT");
     } finally {
       for (const pid of pidsToCleanup) {
         try {
@@ -993,7 +1034,7 @@ describe("git-exec and process runner", () => {
     }
   });
 
-  it("keeps cleanup timers referenced in Node 20+ .mjs callers and cancels PATH probes when libuv workers are blocked (S1/S5/S9)", async () => {
+  it("keeps cleanup timers referenced in Node 20+ .mjs callers so standalone callers await full process-group teardown (S5/S9)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ship-ge-standalone-"));
     dirs.push(dir);
     const parentPidFile = join(dir, "parent.pid");
@@ -1052,54 +1093,5 @@ describe("git-exec and process runner", () => {
         }
       }
     }
-
-    // S1: Blocked libuv worker during PATH probe must still settle timeout and abort immediately.
-    const fifoPath = join(dir, "block.fifo");
-    await execFileAsync("mkfifo", [fifoPath]);
-    const blockedWorkerScript = `
-      import fs from "node:fs";
-      import { defaultGitExec } from ${JSON.stringify(gitExecUrl)};
-
-      const fifoPath = ${JSON.stringify(fifoPath)};
-      const blocker = fs.promises.open(fifoPath, "r").then((fh) => fh.close()).catch(() => {});
-      await new Promise((r) => setTimeout(r, 15));
-
-      let resultLine = "";
-      try {
-        const t0 = performance.now();
-        const toRes = await defaultGitExec(${JSON.stringify(dir)}, ["rev-parse", "HEAD"], { timeoutMs: 15 });
-        const toMs = performance.now() - t0;
-        if (toMs >= 500) throw new Error("timeout stalled: " + toMs);
-
-        const ac = new AbortController();
-        ac.signal.addEventListener("abort", (e) => e.stopImmediatePropagation());
-        const abortTimer = setTimeout(() => ac.abort(), 15);
-        const t1 = performance.now();
-        const abRes = await defaultGitExec(${JSON.stringify(dir)}, ["rev-parse", "HEAD"], {
-          signal: ac.signal,
-          timeoutMs: 10_000,
-        });
-        clearTimeout(abortTimer);
-        const abMs = performance.now() - t1;
-        if (abMs >= 500) throw new Error("abort stalled: " + abMs);
-
-        resultLine = "S1_OK:" + toRes.errorCode + ":" + abRes.errorCode;
-      } finally {
-        try {
-          const wfd = fs.openSync(fifoPath, "w");
-          fs.closeSync(wfd);
-        } catch {}
-        await blocker;
-      }
-      console.log(resultLine);
-    `;
-    const blockedScriptPath = join(dir, "blocked-worker.mjs");
-    await writeFile(blockedScriptPath, blockedWorkerScript, "utf8");
-    const { stdout: s1Out } = await execFileAsync(process.execPath, [blockedScriptPath], {
-      cwd: dir,
-      env: { ...process.env, UV_THREADPOOL_SIZE: "1" },
-      timeout: 5000,
-    });
-    expect(s1Out.trim()).toBe("S1_OK:ETIMEDOUT:ABORT_ERR");
   });
 });
