@@ -40,6 +40,8 @@ export const SAFE_GIT_FLAGS = [
   "-c", "format.pretty=medium", "-c", "log.showSignature=false", "--literal-pathspecs", "--no-optional-locks",
 ] as const;
 
+const SAFE_CONFIG_GIT_FLAGS = ["--no-pager", "--no-optional-locks"] as const;
+
 const REPO_LOCAL_GIT_ENV_KEYS = new Set([
   "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
   "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX",
@@ -115,49 +117,60 @@ function joinRawPath(base: string, part: string): string {
   return base.endsWith(sep) ? `${base}${part}` : `${base}${sep}${part}`;
 }
 
-type ResolveGitBinaryResult =
-  | { ok: true; path: string }
-  | { ok: false; reason: "enoent" | "abort" | "timeout" };
+const PATH_SKIP_ERROR_CODES = new Set(["ENOENT", "EACCES", "ENOTDIR", "EISDIR", "ELOOP", "ENAMETOOLONG"]);
 
-async function resolveGitBinary(
-  cwd: string,
-  pathEnv: string | undefined,
+async function raceCancellation<T>(
+  work: Promise<T>,
   signal: AbortSignal | undefined,
   deadline: number | undefined,
-): Promise<ResolveGitBinaryResult> {
-  const checkCancelled = (): { ok: false; reason: "abort" | "timeout" } | null => {
-    if (signal?.aborted) return { ok: false, reason: "abort" };
-    if (deadline !== undefined && Date.now() >= deadline) return { ok: false, reason: "timeout" };
-    return null;
-  };
+): Promise<{ ok: true; value: T } | { ok: false; reason: "abort" | "timeout" }> {
+  void work.catch(() => {});
+  if (signal?.aborted) return { ok: false, reason: "abort" };
+  if (deadline !== undefined && Date.now() >= deadline) return { ok: false, reason: "timeout" };
 
-  const initialCancelled = checkCancelled();
-  if (initialCancelled) return initialCancelled;
-  if (pathEnv === undefined || pathEnv === "") return { ok: false, reason: "enoent" };
+  let timer: NodeJS.Timeout | undefined;
+  let abortSub: Disposable | undefined;
+  const blockers: Promise<{ ok: false; reason: "abort" | "timeout" }>[] = [];
 
-  const exeName = process.platform === "win32" ? "git.exe" : "git";
-  const baseCwd = cwd || ".";
-  for (const entry of pathEnv.split(delimiter)) {
-    const iterCancelled = checkCancelled();
-    if (iterCancelled) return iterCancelled;
-
-    const dir = entry === "" ? baseCwd : isAbsolute(entry) ? entry : joinRawPath(baseCwd, entry);
-    const candidate = joinRawPath(dir, exeName);
-    try {
-      await access(candidate, constants.X_OK);
-      const st = await stat(candidate);
-      if (!st.isFile()) continue;
-      const realBin = await realpath(candidate);
-      const postCancelled = checkCancelled();
-      if (postCancelled) return postCancelled;
-      return { ok: true, path: realBin };
-    } catch {
-      const postCancelled = checkCancelled();
-      if (postCancelled) return postCancelled;
-      continue;
-    }
+  if (signal) {
+    blockers.push(
+      new Promise((resolveCancel) => {
+        abortSub = addAbortListener(signal, () => resolveCancel({ ok: false, reason: "abort" }));
+      }),
+    );
   }
-  return checkCancelled() ?? { ok: false, reason: "enoent" };
+  if (deadline !== undefined) {
+    const remaining = Math.max(0, deadline - Date.now());
+    blockers.push(
+      new Promise((resolveCancel) => {
+        timer = setTimeout(() => resolveCancel({ ok: false, reason: "timeout" }), remaining);
+      }),
+    );
+  }
+
+  try {
+    const wrapped = work.then((value) => ({ ok: true as const, value }));
+    return blockers.length === 0 ? await wrapped : await Promise.race([wrapped, ...blockers]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    abortSub?.[Symbol.dispose]();
+  }
+}
+
+async function probeCandidatePath(
+  candidate: string,
+  state: { cancelled: boolean },
+): Promise<{ kind: "found"; realBin: string } | { kind: "skip"; eacces: boolean }> {
+  try {
+    await access(candidate, constants.X_OK);
+    if (state.cancelled) return { kind: "skip", eacces: false };
+    const st = await stat(candidate);
+    if (state.cancelled) return { kind: "skip", eacces: false };
+    if (!st.isFile()) return { kind: "skip", eacces: st.isDirectory() };
+    return { kind: "found", realBin: await realpath(candidate) };
+  } catch (err) {
+    return { kind: "skip", eacces: (err as NodeJS.ErrnoException).code === "EACCES" };
+  }
 }
 
 type StopReason = "timeout" | "abort" | "maxBuffer";
@@ -258,7 +271,7 @@ export function runProcess(
 
     const waitForGroupExit = async (maxWaitMs = 200): Promise<void> => {
       if (!useProcessGroup || child?.pid === undefined || !isGroupAlive()) return;
-      // Escalate immediately when a child closes stdio while leaving a process-group descendant alive.
+      // Escalate immediately to tear down any remaining same-group descendant after leader exit or stdio close.
       signalTree("SIGKILL");
       const deadline = Date.now() + maxWaitMs;
       while (isGroupAlive() && Date.now() < deadline) {
@@ -279,9 +292,7 @@ export function runProcess(
       }
 
       void (async () => {
-        if (stopReason !== undefined) {
-          await waitForGroupExit(200);
-        }
+        await waitForGroupExit(200);
 
         const stdoutBuf = Buffer.concat(stdoutChunks);
         const stderrText = Buffer.concat(stderrChunks).toString("utf8");
@@ -537,6 +548,7 @@ type ValidatedGitArgs =
   | {
       ok: true;
       isVersionQuery: boolean;
+      isConfigQuery: boolean;
       globalPrefix: string[];
       subcommandAndArgs: string[];
     }
@@ -545,7 +557,13 @@ type ValidatedGitArgs =
 function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
   if (args.length === 0) return { ok: false, disallowed: "(empty)" };
   if (args.length === 1 && args[0] === "--version") {
-    return { ok: true, isVersionQuery: true, globalPrefix: [], subcommandAndArgs: ["--version"] };
+    return {
+      ok: true,
+      isVersionQuery: true,
+      isConfigQuery: false,
+      globalPrefix: [],
+      subcommandAndArgs: ["--version"],
+    };
   }
 
   const globalPrefix: string[] = [];
@@ -621,54 +639,121 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
   return {
     ok: true,
     isVersionQuery: false,
+    isConfigQuery: sub === "config",
     globalPrefix,
     subcommandAndArgs: subArgs,
   };
 }
 
-async function ensureSupportedGitVersion(
-  gitBin: string,
+type ResolveAndVerifyResult =
+  | { ok: true; isVersionResult: true; result: ExecResult }
+  | { ok: true; isVersionResult: false; gitBin: string }
+  | { ok: false; result: ExecResult };
+
+async function resolveAndVerifyGitBinary(
   cwd: string,
   env: NodeJS.ProcessEnv,
-  signal: AbortSignal | undefined,
-  timeoutMs: number,
-  binary: boolean | undefined,
-): Promise<{ ok: true } | { ok: false; result: ExecResult }> {
-  const versionRes = await runProcess(gitBin, ["--version"], {
-    cwd,
-    env: cleanVersionProbeEnv(env),
-    signal,
-    timeoutMs,
-  });
-  if (versionRes.errorCode !== undefined || versionRes.code !== 0) {
-    return {
-      ok: false,
-      result: {
-        ...versionRes,
-        stdout: "",
-        ...(binary ? { stdoutBuffer: Buffer.alloc(0) } : {}),
-      },
-    };
+  opts: GitExecOptions,
+  isVersionQuery: boolean,
+  deadline: number | undefined,
+  totalTimeoutMs: number,
+  remainingTimeoutMs: () => number,
+  failResult: (code: number, stderr: string, errorCode?: string) => ExecResult,
+): Promise<ResolveAndVerifyResult> {
+  const checkCancel = (): ExecResult | null => {
+    if (opts.signal?.aborted) return failResult(1, "Operation aborted.", "ABORT_ERR");
+    if (deadline !== undefined && Date.now() >= deadline) {
+      return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+    }
+    return null;
+  };
+
+  const exeName = process.platform === "win32" ? "git.exe" : "git";
+  const baseCwd = cwd || ".";
+  const effectivePath = env.PATH ?? (process.platform === "win32" ? "" : "/bin:/usr/bin");
+  let sawEacces = false;
+
+  for (const entry of effectivePath.split(delimiter)) {
+    const cancelErr = checkCancel();
+    if (cancelErr) return { ok: false, result: cancelErr };
+
+    const dir = entry === "" ? baseCwd : isAbsolute(entry) ? entry : joinRawPath(baseCwd, entry);
+    const candidate = joinRawPath(dir, exeName);
+    const probeState = { cancelled: false };
+    const probed = await raceCancellation(probeCandidatePath(candidate, probeState), opts.signal, deadline);
+    if (!probed.ok) {
+      probeState.cancelled = true;
+      return {
+        ok: false,
+        result:
+          probed.reason === "abort"
+            ? failResult(1, "Operation aborted.", "ABORT_ERR")
+            : failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT"),
+      };
+    }
+    if (probed.value.kind === "skip") {
+      sawEacces ||= probed.value.eacces;
+      continue;
+    }
+
+    const preSpawnErr = checkCancel();
+    if (preSpawnErr) return { ok: false, result: preSpawnErr };
+
+    const versionRes = await runProcess(probed.value.realBin, ["--version"], {
+      cwd,
+      env: cleanVersionProbeEnv(env),
+      signal: opts.signal,
+      timeoutMs: remainingTimeoutMs(),
+      ...(isVersionQuery ? { stdin: opts.stdin, binary: opts.binary, maxBuffer: opts.maxBuffer } : {}),
+    });
+
+    if (versionRes.errorCode === "ABORT_ERR" || versionRes.errorCode === "ETIMEDOUT") {
+      return {
+        ok: false,
+        result: isVersionQuery
+          ? versionRes
+          : { ...versionRes, stdout: "", ...(opts.binary ? { stdoutBuffer: Buffer.alloc(0) } : {}) },
+      };
+    }
+
+    if (versionRes.errorCode !== undefined && PATH_SKIP_ERROR_CODES.has(versionRes.errorCode)) {
+      if (versionRes.errorCode === "EACCES") sawEacces = true;
+      continue;
+    }
+
+    if (isVersionQuery) {
+      return { ok: true, isVersionResult: true, result: versionRes };
+    }
+    if (versionRes.errorCode !== undefined || versionRes.code !== 0) {
+      return {
+        ok: false,
+        result: { ...versionRes, stdout: "", ...(opts.binary ? { stdoutBuffer: Buffer.alloc(0) } : {}) },
+      };
+    }
+    if (!isSupportedGitVersion(versionRes.stdout)) {
+      return {
+        ok: false,
+        result: failResult(
+          1,
+          `Git >= 2.45.1 is required for authoritative GIT_NO_LAZY_FETCH support (found: ${versionRes.stdout.trim() || "unknown"}).`,
+          "ENOTSUP",
+        ),
+      };
+    }
+    return { ok: true, isVersionResult: false, gitBin: probed.value.realBin };
   }
-  if (!isSupportedGitVersion(versionRes.stdout)) {
-    return {
-      ok: false,
-      result: {
-        code: 1,
-        stdout: "",
-        stderr: `Git >= 2.45.1 is required for authoritative GIT_NO_LAZY_FETCH support (found: ${versionRes.stdout.trim() || "unknown"}).`,
-        errorCode: "ENOTSUP",
-        ...(binary ? { stdoutBuffer: Buffer.alloc(0) } : {}),
-      },
-    };
-  }
-  return { ok: true };
+
+  const endCancelErr = checkCancel();
+  if (endCancelErr) return { ok: false, result: endCancelErr };
+  return sawEacces
+    ? { ok: false, result: failResult(1, "spawn git EACCES", "EACCES") }
+    : { ok: false, result: failResult(1, "spawn git ENOENT", "ENOENT") };
 }
 
 /**
  * Execute an allowlisted read-only Git plumbing command using an uncached Git >= 2.45.1
- * executable with callback/lock hardening (--no-optional-locks, diff.autoRefreshIndex=false,
- * core.fsmonitor=false). Native Git index reads (including Git's internal sharedindex.* mtime
+ * executable with callback/lock hardening (`--no-optional-locks`, `diff.autoRefreshIndex=false`,
+ * `core.fsmonitor=false`). Native Git index reads (including Git's internal `sharedindex.*` mtime
  * freshening) are preserved without mutating repository bytes or creating temp directories.
  */
 export async function defaultGitExec(
@@ -711,43 +796,24 @@ export async function defaultGitExec(
     GIT_PAGER: "cat",
   });
 
-  const resolved = await resolveGitBinary(cwd, env.PATH, opts.signal, deadline);
-  if (!resolved.ok) {
-    if (resolved.reason === "abort") return failResult(1, "Operation aborted.", "ABORT_ERR");
-    if (resolved.reason === "timeout") return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
-    return failResult(1, "spawn git ENOENT", "ENOENT");
-  }
-  const gitBin = resolved.path;
-
-  const preVersionErr = checkAbortOrTimeout();
-  if (preVersionErr) return preVersionErr;
-
-  if (validated.isVersionQuery) {
-    return runProcess(gitBin, ["--version"], {
-      cwd,
-      stdin: opts.stdin,
-      binary: opts.binary,
-      timeoutMs: remainingTimeoutMs(),
-      maxBuffer: opts.maxBuffer,
-      signal: opts.signal,
-      env: cleanVersionProbeEnv(env),
-    });
-  }
-
-  const versionCheck = await ensureSupportedGitVersion(
-    gitBin,
+  const resolved = await resolveAndVerifyGitBinary(
     cwd,
     env,
-    opts.signal,
-    remainingTimeoutMs(),
-    opts.binary,
+    opts,
+    validated.isVersionQuery,
+    deadline,
+    totalTimeoutMs,
+    remainingTimeoutMs,
+    failResult,
   );
-  if (!versionCheck.ok) return versionCheck.result;
+  if (!resolved.ok) return resolved.result;
+  if (resolved.isVersionResult) return resolved.result;
 
   const postVersionErr = checkAbortOrTimeout();
   if (postVersionErr) return postVersionErr;
 
-  return runProcess(gitBin, [...SAFE_GIT_FLAGS, ...validated.globalPrefix, ...validated.subcommandAndArgs], {
+  const safetyFlags = validated.isConfigQuery ? SAFE_CONFIG_GIT_FLAGS : SAFE_GIT_FLAGS;
+  return runProcess(resolved.gitBin, [...safetyFlags, ...validated.globalPrefix, ...validated.subcommandAndArgs], {
     cwd,
     stdin: opts.stdin,
     binary: opts.binary,

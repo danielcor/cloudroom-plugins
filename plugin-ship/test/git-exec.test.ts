@@ -3,8 +3,9 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import ts from "typescript";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   defaultGitExec,
@@ -90,6 +91,16 @@ async function waitForPidFile(path: string, timeoutMs = 2000): Promise<number> {
     await new Promise((r) => setTimeout(r, 15));
   }
   throw new Error(`Timed out waiting for pid file ${path}`);
+}
+
+async function transpileGitExecModule(dir: string): Promise<string> {
+  const src = await readFile(fileURLToPath(new URL("../src/safety/git-exec.ts", import.meta.url)), "utf8");
+  const { outputText } = ts.transpileModule(src, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
+  });
+  const outPath = join(dir, "git-exec.mjs");
+  await writeFile(outPath, outputText, "utf8");
+  return pathToFileURL(outPath).href;
 }
 
 describe("git-exec and process runner", () => {
@@ -338,6 +349,41 @@ describe("git-exec and process runner", () => {
     });
     expect(symPathRes.code).toBe(0);
     expect(symPathRes.stdout.trim()).toBe("symlink-ok");
+
+    // S2: Honor PATH="" for cwd/git, skip bad-shebang launch errors to later entries, and stop at older Git.
+    const emptyPathDir = await mkdtemp(join(tmpdir(), "ship-ge-s2empty-"));
+    const badShebangDir = await mkdtemp(join(tmpdir(), "ship-ge-s2badsheb-"));
+    const goodFallbackDir = await mkdtemp(join(tmpdir(), "ship-ge-s2good-"));
+    dirs.push(emptyPathDir, badShebangDir, goodFallbackDir);
+
+    await writeFile(
+      join(emptyPathDir, "git"),
+      '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "git version 2.56.1"; exit 0; fi\necho "empty-path-ok"\n',
+      { mode: 0o755 },
+    );
+    const emptyPathRes = await defaultGitExec(emptyPathDir, ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: "" },
+    });
+    expect(emptyPathRes.code).toBe(0);
+    expect(emptyPathRes.stdout.trim()).toBe("empty-path-ok");
+
+    await writeFile(join(badShebangDir, "git"), "#!/nonexistent/ship-interp\necho no\n", { mode: 0o755 });
+    await writeFile(
+      join(goodFallbackDir, "git"),
+      '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "git version 2.56.1"; exit 0; fi\necho "after-bad-shebang"\n',
+      { mode: 0o755 },
+    );
+    const fallbackRes = await defaultGitExec(process.cwd(), ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: `${badShebangDir}${delimiter}${goodFallbackDir}` },
+    });
+    expect(fallbackRes.code).toBe(0);
+    expect(fallbackRes.stdout.trim()).toBe("after-bad-shebang");
+
+    const oldBeforeGoodRes = await defaultGitExec(process.cwd(), ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: `${oldBinDir}${delimiter}${goodFallbackDir}` },
+    });
+    expect(oldBeforeGoodRes.code).not.toBe(0);
+    expect(oldBeforeGoodRes.errorCode).toBe("ENOTSUP");
 
     const mockBinDir = await mkdtemp(join(tmpdir(), "ship-ge-mockgit-"));
     dirs.push(mockBinDir);
@@ -699,6 +745,32 @@ describe("git-exec and process runner", () => {
     }
   });
 
+  it("preserves repository callback-related config values in allowlisted config queries without executing them (S4)", async () => {
+    const repo = await initEmptyRepo();
+    const sentinelDir = await mkdtemp(join(tmpdir(), "ship-ge-cfg-"));
+    dirs.push(sentinelDir);
+    const env = isolatedGitEnv(repo);
+    const extSentinel = join(sentinelDir, "ext.ran");
+    const extScript = await makeSentinelScript(sentinelDir, "ext.sh", extSentinel);
+
+    await execFileAsync("git", ["config", "core.fsmonitor", "true"], { cwd: repo, env });
+    await execFileAsync("git", ["config", "diff.external", extScript], { cwd: repo, env });
+
+    const fsm = await defaultGitExec(repo, ["config", "--get", "core.fsmonitor"], { env });
+    expect(fsm.code).toBe(0);
+    expect(fsm.stdout.trim()).toBe("true");
+
+    const ext = await defaultGitExec(repo, ["config", "--get", "diff.external"], { env });
+    expect(ext.code).toBe(0);
+    expect(ext.stdout.trim()).toBe(extScript);
+
+    const list = await defaultGitExec(repo, ["config", "--list", "--show-scope"], { env });
+    expect(list.code).toBe(0);
+    expect(list.stdout).not.toContain("command\tcore.fsmonitor=false");
+    expect(list.stdout).not.toContain("command\tdiff.external=");
+    expect(existsSync(extSentinel)).toBe(false);
+  });
+
   it("forcibly kills SIGTERM-ignoring children on maxBuffer overflow even with timeout disabled (S20)", async () => {
     const t0 = performance.now();
     const res = await runProcess(
@@ -816,6 +888,33 @@ describe("git-exec and process runner", () => {
               : "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
         );
       }
+
+      // S3: Normal leader exit (code 0) still tears down lingering same-group descendants with closed stdio.
+      const orphanFile = join(dir, "normal-orphan.pid");
+      const normalLeaderScript = `
+        const { spawn } = require("node:child_process");
+        const fs = require("node:fs");
+        spawn(
+          process.execPath,
+          ["-e", 'process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(0), 10000);', ${JSON.stringify(orphanFile)}],
+          { stdio: "ignore" },
+        );
+        const timer = setInterval(() => {
+          if (fs.existsSync(${JSON.stringify(orphanFile)})) {
+            clearInterval(timer);
+            process.exit(0);
+          }
+        }, 5);
+      `;
+      const normalRes = await runProcess(process.execPath, ["-e", normalLeaderScript], {
+        cwd: dir,
+        timeoutMs: 5000,
+      });
+      expect(normalRes.code).toBe(0);
+      const orphanPid = Number.parseInt((await readFile(orphanFile, "utf8")).trim(), 10);
+      expect(orphanPid).toBeGreaterThan(0);
+      pidsToCleanup.push(orphanPid);
+      expect(isPidAlive(orphanPid)).toBe(false);
     } finally {
       for (const pid of pidsToCleanup) {
         try {
@@ -827,12 +926,12 @@ describe("git-exec and process runner", () => {
     }
   });
 
-  it("keeps cleanup timers referenced so standalone callers await full process-group teardown (S9)", async () => {
+  it("keeps cleanup timers referenced in Node 20+ .mjs callers and cancels PATH probes when libuv workers are blocked (S1/S5/S9)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ship-ge-standalone-"));
     dirs.push(dir);
     const parentPidFile = join(dir, "parent.pid");
     const grandchildPidFile = join(dir, "grandchild.pid");
-    const gitExecUrl = pathToFileURL(join(process.cwd(), "src", "safety", "git-exec.ts")).href;
+    const gitExecUrl = await transpileGitExecModule(dir);
 
     const standaloneScript = `
       import { readFile } from "node:fs/promises";
@@ -868,7 +967,7 @@ describe("git-exec and process runner", () => {
       console.log("SETTLED:" + res.errorCode);
     `;
 
-    const scriptPath = join(dir, "standalone.mts");
+    const scriptPath = join(dir, "standalone.mjs");
     await writeFile(scriptPath, standaloneScript, "utf8");
     let grandchildPid = 0;
     try {
@@ -886,5 +985,54 @@ describe("git-exec and process runner", () => {
         }
       }
     }
+
+    // S1: Blocked libuv worker during PATH probe must still settle timeout and abort immediately.
+    const fifoPath = join(dir, "block.fifo");
+    await execFileAsync("mkfifo", [fifoPath]);
+    const blockedWorkerScript = `
+      import fs from "node:fs";
+      import { defaultGitExec } from ${JSON.stringify(gitExecUrl)};
+
+      const fifoPath = ${JSON.stringify(fifoPath)};
+      const blocker = fs.promises.open(fifoPath, "r").then((fh) => fh.close()).catch(() => {});
+      await new Promise((r) => setTimeout(r, 15));
+
+      let resultLine = "";
+      try {
+        const t0 = performance.now();
+        const toRes = await defaultGitExec(${JSON.stringify(dir)}, ["rev-parse", "HEAD"], { timeoutMs: 15 });
+        const toMs = performance.now() - t0;
+        if (toMs >= 500) throw new Error("timeout stalled: " + toMs);
+
+        const ac = new AbortController();
+        ac.signal.addEventListener("abort", (e) => e.stopImmediatePropagation());
+        const abortTimer = setTimeout(() => ac.abort(), 15);
+        const t1 = performance.now();
+        const abRes = await defaultGitExec(${JSON.stringify(dir)}, ["rev-parse", "HEAD"], {
+          signal: ac.signal,
+          timeoutMs: 10_000,
+        });
+        clearTimeout(abortTimer);
+        const abMs = performance.now() - t1;
+        if (abMs >= 500) throw new Error("abort stalled: " + abMs);
+
+        resultLine = "S1_OK:" + toRes.errorCode + ":" + abRes.errorCode;
+      } finally {
+        try {
+          const wfd = fs.openSync(fifoPath, "w");
+          fs.closeSync(wfd);
+        } catch {}
+        await blocker;
+      }
+      console.log(resultLine);
+    `;
+    const blockedScriptPath = join(dir, "blocked-worker.mjs");
+    await writeFile(blockedScriptPath, blockedWorkerScript, "utf8");
+    const { stdout: s1Out } = await execFileAsync(process.execPath, [blockedScriptPath], {
+      cwd: dir,
+      env: { ...process.env, UV_THREADPOOL_SIZE: "1" },
+      timeout: 5000,
+    });
+    expect(s1Out.trim()).toBe("S1_OK:ETIMEDOUT:ABORT_ERR");
   });
 });
