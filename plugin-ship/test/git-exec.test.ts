@@ -1,11 +1,18 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { defaultGitExec, mergeEnv, runProcess } from "../src/safety/git-exec.js";
+import {
+  defaultGitExec,
+  isSupportedGitVersion,
+  mergeEnv,
+  parseGitVersion,
+  runProcess,
+} from "../src/safety/git-exec.js";
 
 const execFileAsync = promisify(execFile);
 const dirs: string[] = [];
@@ -47,8 +54,19 @@ async function gitCommitAll(repo: string, message: string, env = isolatedGitEnv(
   return stdout.trim();
 }
 
-function nodeSentinelCmd(sentinelPath: string): string {
-  return `"${process.execPath}" -e "require('node:fs').writeFileSync(${JSON.stringify(sentinelPath)}, 'pwned')"`;
+async function makeSentinelScript(
+  dir: string,
+  name: string,
+  sentinelPath: string,
+  exitCode = 0,
+): Promise<string> {
+  const scriptPath = join(dir, name);
+  await writeFile(
+    scriptPath,
+    `#!/bin/sh\nprintf 'pwned\\n' > ${JSON.stringify(sentinelPath)}\nexit ${exitCode}\n`,
+    { mode: 0o755 },
+  );
+  return scriptPath;
 }
 
 function isPidAlive(pid: number): boolean {
@@ -74,6 +92,20 @@ async function waitForPidFile(path: string, timeoutMs = 2000): Promise<number> {
   throw new Error(`Timed out waiting for pid file ${path}`);
 }
 
+async function listObjectEntries(objectsDir: string): Promise<string[]> {
+  const entries: string[] = [];
+  for (const sub of (await readdir(objectsDir)).sort()) {
+    const subPath = join(objectsDir, sub);
+    try {
+      const children = (await readdir(subPath)).sort();
+      for (const c of children) entries.push(`${sub}/${c}`);
+    } catch {
+      entries.push(sub);
+    }
+  }
+  return entries;
+}
+
 describe("git-exec and process runner", () => {
   it("merges environment variables and deletes keys set to undefined", () => {
     const merged = mergeEnv(
@@ -84,11 +116,13 @@ describe("git-exec and process runner", () => {
     expect("DROP" in merged).toBe(false);
   });
 
-  it("enforces the strict git subcommand and flag allowlist while allowing literal -- pathspecs", async () => {
+  it("enforces the strict read-only plumbing allowlist while allowing literal -- pathspecs", async () => {
     const repo = await initEmptyRepo();
     const env = isolatedGitEnv(repo);
     await writeFile(join(repo, "file.txt"), "hello\n", "utf8");
-    await gitCommitAll(repo, "init", env);
+    const first = await gitCommitAll(repo, "init", env);
+    await writeFile(join(repo, "file.txt"), "hello 2\n", "utf8");
+    const second = await gitCommitAll(repo, "second", env);
 
     const version = await defaultGitExec(repo, ["--version"]);
     expect(version.code).toBe(0);
@@ -102,39 +136,47 @@ describe("git-exec and process runner", () => {
 
     for (const badArgs of [
       [],
-      ["--paginate", "status"],
-      ["-c", "core.fsmonitor=echo", "status"],
-      ["-C", tmpdir(), "status"],
+      ["--paginate", "rev-parse", "HEAD"],
+      ["-c", "core.fsmonitor=echo", "rev-parse", "HEAD"],
+      ["-C", tmpdir(), "rev-parse", "HEAD"],
       ["push", "origin", "main"],
       ["fetch", "origin"],
       ["clone", repo, "copy"],
       ["checkout", "HEAD"],
+      ["diff"],
+      ["status"],
+      ["show", "HEAD"],
+      ["log", "-1"],
       ["range-diff", "HEAD~1", "HEAD"],
       ["stash", "show"],
       ["reflog", "show"],
       ["blame", "file.txt"],
       ["grep", "hello"],
+      ["ls-files", "-m"],
+      ["ls-files", "--modified"],
       ["config", "user.name", "evil"],
       ["config", "--edit"],
       ["config", "--list", "extra-pos"],
+      ["for-each-ref", "-z"],
+      ["for-each-ref", "--format=%(signature)"],
+      ["for-each-ref", "--sort=signature"],
+      ["merge-tree", first, second],
       ["cat-file", "--textconv", "HEAD:file.txt"],
       ["cat-file", "--textcon", "HEAD:file.txt"],
       ["cat-file", "--filters", "HEAD:file.txt"],
       ["cat-file", "--batch-command"],
-      ["diff", "--ext-diff"],
-      ["diff", "--textconv"],
-      ["diff", "--submodule=diff"],
-      ["diff", "--ignore-submodules=none"],
-      ["diff", "--no-index", "a", "b"],
-      ["status", "--ignore-submodules=none"],
+      ["diff-tree", "--ext-diff", first, second],
+      ["diff-tree", "--textconv", first, second],
+      ["diff-tree", "--submodule=diff", first, second],
+      ["diff-tree", "--output=/tmp/out", first, second],
     ]) {
       const res = await defaultGitExec(repo, badArgs, { env });
       expect(res.code).not.toBe(0);
       expect(res.errorCode).toBe("EINVAL");
     }
 
-    const literalDiff = await defaultGitExec(repo, ["diff", "--", "--ext-diff"], { env });
-    expect(literalDiff.code).toBe(0);
+    const literalDt = await defaultGitExec(repo, ["diff-tree", "-r", first, second, "--", "--ext-diff"], { env });
+    expect(literalDt.code).toBe(0);
   });
 
   it("handles EPIPE, AbortSignal, ENOENT, and closes stdin promptly when omitted", async () => {
@@ -161,7 +203,48 @@ describe("git-exec and process runner", () => {
     expect(eofRes.stdout).toBe("eof");
   });
 
-  it("strips inherited repo-local, config, and pathspec Git env vars unless explicitly overridden", async () => {
+  it("enforces Git >= 2.45.0, strips inherited Git env, and makes GIT_NO_LAZY_FETCH authoritative (S5)", async () => {
+    expect(parseGitVersion("git version 2.45.0")).toEqual({ major: 2, minor: 45, patch: 0 });
+    expect(isSupportedGitVersion("git version 2.43.2")).toBe(false);
+    expect(isSupportedGitVersion("git version 2.45.0")).toBe(true);
+    expect(isSupportedGitVersion("git version 2.56.1")).toBe(true);
+    expect(isSupportedGitVersion("git version 3.0.0")).toBe(true);
+
+    const oldBinDir = await mkdtemp(join(tmpdir(), "ship-ge-oldgit-"));
+    dirs.push(oldBinDir);
+    await writeFile(
+      join(oldBinDir, "git"),
+      "#!/bin/sh\necho 'git version 2.43.0'\n",
+      { mode: 0o755 },
+    );
+    const oldRes = await defaultGitExec(process.cwd(), ["rev-parse", "HEAD"], {
+      env: { PATH: oldBinDir },
+    });
+    expect(oldRes.code).not.toBe(0);
+    expect(oldRes.errorCode).toBe("ENOTSUP");
+
+    const mockBinDir = await mkdtemp(join(tmpdir(), "ship-ge-mockgit-"));
+    dirs.push(mockBinDir);
+    const capturedEnvFile = join(mockBinDir, "lazy.env");
+    await writeFile(
+      join(mockBinDir, "git"),
+      [
+        "#!/bin/sh",
+        'if [ "$1" = "--version" ]; then',
+        '  echo "git version 2.50.0"',
+        "  exit 0",
+        "fi",
+        `printf 'LAZY=%s\\nTERM=%s\\n' "$GIT_NO_LAZY_FETCH" "$GIT_TERMINAL_PROMPT" > ${JSON.stringify(capturedEnvFile)}`,
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const mockRes = await defaultGitExec(process.cwd(), ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: mockBinDir, GIT_NO_LAZY_FETCH: "0", GIT_TERMINAL_PROMPT: "1" },
+    });
+    expect(mockRes.code).toBe(0);
+    expect(await readFile(capturedEnvFile, "utf8")).toBe("LAZY=1\nTERM=0\n");
+
     const repoA = await initEmptyRepo();
     const repoB = await initEmptyRepo();
     const cfgDir = await mkdtemp(join(tmpdir(), "ship-ge-env-"));
@@ -182,9 +265,7 @@ describe("git-exec and process runner", () => {
       "GIT_EXTERNAL_DIFF",
       "GIT_PAGER",
     ];
-    for (const k of keysToDirty) {
-      saved[k] = process.env[k];
-    }
+    for (const k of keysToDirty) saved[k] = process.env[k];
 
     try {
       process.env.GIT_DIR = join(repoA, ".git");
@@ -201,20 +282,13 @@ describe("git-exec and process runner", () => {
       const resB = await defaultGitExec(repoB, ["rev-parse", "--path-format=absolute", "--git-dir"]);
       expect(resB.code).toBe(0);
       expect(resB.stdout.trim()).toBe(join(repoB, ".git"));
-
-      const cfgRes = await defaultGitExec(repoB, ["config", "--get", "ship.indexed"]);
-      expect(cfgRes.code).toBe(1);
-
-      const paramRes = await defaultGitExec(repoB, ["config", "--get", "ship.param"]);
-      expect(paramRes.code).toBe(1);
-
-      const lsGlob = await defaultGitExec(repoB, ["ls-files"]);
-      expect(lsGlob.code).toBe(0);
+      expect((await defaultGitExec(repoB, ["config", "--get", "ship.indexed"])).code).toBe(1);
+      expect((await defaultGitExec(repoB, ["config", "--get", "ship.param"])).code).toBe(1);
+      expect((await defaultGitExec(repoB, ["ls-files"])).code).toBe(0);
 
       delete process.env.GIT_GLOB_PATHSPECS;
       process.env.GIT_ICASE_PATHSPECS = "1";
-      const lsIcase = await defaultGitExec(repoB, ["ls-files"]);
-      expect(lsIcase.code).toBe(0);
+      expect((await defaultGitExec(repoB, ["ls-files"])).code).toBe(0);
 
       const resExplicitA = await defaultGitExec(repoB, ["rev-parse", "--path-format=absolute", "--git-dir"], {
         env: { GIT_DIR: join(repoA, ".git") },
@@ -229,174 +303,227 @@ describe("git-exec and process runner", () => {
     }
   });
 
-  it("blocks external diff, textconv, fsmonitor, cat-file transforms, filters, submodules, and merge drivers (S16/S17/S18)", async () => {
+  it("blocks ext-diff, textconv, gpg verification, and leaves index unchanged on stat-only edits (S1/S6/S10/S16/S17)", async () => {
     const repo = await initEmptyRepo();
-    const subOrigin = await initEmptyRepo();
     const sentinelDir = await mkdtemp(join(tmpdir(), "ship-ge-sentinels-"));
     dirs.push(sentinelDir);
     const env = isolatedGitEnv(repo);
 
-    await writeFile(join(subOrigin, "sub.txt"), "sub v1\n", "utf8");
-    const subSentinel = join(sentinelDir, "sub.ran");
-    await execFileAsync("git", ["config", "diff.external", nodeSentinelCmd(subSentinel)], { cwd: subOrigin, env });
-    await gitCommitAll(subOrigin, "sub init", env);
-
     await writeFile(join(repo, "file.txt"), "hello world\n", "utf8");
+    await writeFile(join(repo, "plain.log"), "plain v1\n", "utf8");
     await writeFile(join(repo, ".gitattributes"), "*.txt diff=evil\n", "utf8");
-    await gitCommitAll(repo, "init", env);
+    const first = await gitCommitAll(repo, "init", env);
+    await writeFile(join(repo, "file.txt"), "hello updated\n", "utf8");
+    await writeFile(join(repo, "plain.log"), "plain v2\n", "utf8");
+    const second = await gitCommitAll(repo, "update", env);
 
-    await execFileAsync("git", ["-c", "protocol.file.allow=always", "submodule", "add", subOrigin, "submod"], {
+    const { stdout: rawCommit } = await execFileAsync("git", ["cat-file", "-p", second], { cwd: repo, env });
+    const sepIdx = rawCommit.indexOf("\n\n");
+    const signedRaw =
+      rawCommit.slice(0, sepIdx) +
+      "\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n fake\n -----END PGP SIGNATURE-----" +
+      rawCommit.slice(sepIdx);
+    const hashRes = await runProcess("git", ["hash-object", "-t", "commit", "-w", "--stdin"], {
       cwd: repo,
       env,
+      stdin: signedRaw,
     });
-    await gitCommitAll(repo, "add submodule", env);
+    expect(hashRes.code).toBe(0);
+    const signedSha = hashRes.stdout.trim();
+    await execFileAsync("git", ["update-ref", "refs/heads/signed", signedSha], { cwd: repo, env });
 
     const extSentinel = join(sentinelDir, "ext.ran");
     const drvSentinel = join(sentinelDir, "drv.ran");
     const txtSentinel = join(sentinelDir, "txt.ran");
-    const fsmSentinel = join(sentinelDir, "fsm.ran");
-    const subCleanSentinel = join(sentinelDir, "subclean.ran");
-    await execFileAsync("git", ["config", "core.fsmonitor", nodeSentinelCmd(fsmSentinel)], { cwd: repo, env });
-    await execFileAsync("git", ["config", "diff.external", nodeSentinelCmd(extSentinel)], { cwd: repo, env });
-    await execFileAsync("git", ["config", "diff.evil.command", nodeSentinelCmd(drvSentinel)], { cwd: repo, env });
-    await execFileAsync("git", ["config", "diff.evil.textconv", nodeSentinelCmd(txtSentinel)], { cwd: repo, env });
-    await execFileAsync("git", ["config", "diff.submodule", "diff"], { cwd: repo, env });
-    await execFileAsync("git", ["config", "status.submoduleSummary", "true"], { cwd: repo, env });
-    await execFileAsync("git", ["config", "submodule.submod.ignore", "none"], { cwd: repo, env });
+    const gpgSentinel = join(sentinelDir, "gpg.ran");
+    const extScript = await makeSentinelScript(sentinelDir, "ext.sh", extSentinel);
+    const drvScript = await makeSentinelScript(sentinelDir, "drv.sh", drvSentinel);
+    const txtScript = await makeSentinelScript(sentinelDir, "txt.sh", txtSentinel);
+    const gpgScript = await makeSentinelScript(sentinelDir, "gpg.sh", gpgSentinel);
 
-    const subGitCfgDir = join(repo, ".git", "modules", "submod");
-    await execFileAsync("git", ["--git-dir", subGitCfgDir, "config", "diff.external", nodeSentinelCmd(subSentinel)], {
-      cwd: repo,
-      env,
-    });
-    await execFileAsync("git", ["--git-dir", subGitCfgDir, "config", "filter.subf.clean", nodeSentinelCmd(subCleanSentinel)], {
-      cwd: repo,
-      env,
-    });
-    await writeFile(join(repo, "submod", ".gitattributes"), "* filter=subf\n", "utf8");
-    await writeFile(join(repo, "submod", "sub.txt"), "dirty submodule change\n", "utf8");
-    await writeFile(join(repo, "file.txt"), "hello updated\n", "utf8");
+    await execFileAsync("git", ["config", "diff.external", extScript], { cwd: repo, env });
+    await execFileAsync("git", ["config", "diff.evil.command", drvScript], { cwd: repo, env });
+    await execFileAsync("git", ["config", "diff.evil.textconv", txtScript], { cwd: repo, env });
+    await execFileAsync("git", ["config", "gpg.program", gpgScript], { cwd: repo, env });
+    await execFileAsync("git", ["config", "log.showSignature", "true"], { cwd: repo, env });
+    await execFileAsync("git", ["config", "format.pretty", "format:%h %G?"], { cwd: repo, env });
 
-    const diffRes = await defaultGitExec(repo, ["diff"], { env });
-    expect(diffRes.code).toBe(0);
-    expect(diffRes.stdout).toContain("diff --git a/file.txt b/file.txt");
+    // Positive controls (S10): unhardened git triggers external diff, driver, textconv, and gpg.
+    await execFileAsync("git", ["diff-tree", "-p", "--ext-diff", first, second, "--", "file.txt"], { cwd: repo, env });
+    expect(existsSync(drvSentinel)).toBe(true);
+    await execFileAsync("git", ["diff", first, second, "--", "plain.log"], { cwd: repo, env });
+    expect(existsSync(extSentinel)).toBe(true);
+    await execFileAsync("git", ["diff-tree", "-p", "--textconv", first, second, "--", "file.txt"], { cwd: repo, env });
+    expect(existsSync(txtSentinel)).toBe(true);
+    await execFileAsync("git", ["show", "-s", signedSha], { cwd: repo, env });
+    expect(existsSync(gpgSentinel)).toBe(true);
 
-    const statusRes = await defaultGitExec(repo, ["status", "--short"], { env });
-    expect(statusRes.code).toBe(0);
+    for (const s of [extSentinel, drvSentinel, txtSentinel, gpgSentinel]) {
+      await rm(s, { force: true });
+    }
 
-    const showRes = await defaultGitExec(repo, ["show", "HEAD"], { env });
-    expect(showRes.code).toBe(0);
-
-    const logRes = await defaultGitExec(repo, ["log", "-p", "-1"], { env });
-    expect(logRes.code).toBe(0);
-
-    const dtRes = await defaultGitExec(repo, ["diff-tree", "-r", "-z", "--no-renames", "--ignore-submodules=none", "HEAD~1", "HEAD"], {
-      env,
-    });
-    expect(dtRes.code).toBe(0);
-
-    // S17: cat-file raw object modes work without running textconv/filters.
+    const dtTwo = await defaultGitExec(repo, ["diff-tree", "-p", first, second], { env });
+    expect(dtTwo.code).toBe(0);
+    const dtOne = await defaultGitExec(repo, ["diff-tree", "-p", signedSha], { env });
+    expect(dtOne.code).toBe(0);
+    const fer = await defaultGitExec(repo, ["for-each-ref", "--count=2", "refs/heads"], { env });
+    expect(fer.code).toBe(0);
     for (const flag of ["-p", "-t", "-s", "-e"]) {
       const cf = await defaultGitExec(repo, ["cat-file", flag, "HEAD:file.txt"], { env });
       expect(cf.code).toBe(0);
     }
 
-    for (const s of [extSentinel, drvSentinel, txtSentinel, fsmSentinel, subSentinel, subCleanSentinel]) {
+    for (const s of [extSentinel, drvSentinel, txtSentinel, gpgSentinel]) {
       expect(existsSync(s)).toBe(false);
     }
 
-    // S18: clean and process filters (even with required=true) are neutralized on worktree commands.
-    const cleanSentinel = join(sentinelDir, "clean.ran");
-    const procSentinel = join(sentinelDir, "proc.ran");
-    await writeFile(join(repo, ".gitattributes"), "*.txt filter=evil\n*.dat filter=evilproc\n", "utf8");
-    await writeFile(join(repo, "data.dat"), "payload\n", "utf8");
-    await execFileAsync("git", ["config", "filter.evil.clean", nodeSentinelCmd(cleanSentinel)], { cwd: repo, env });
-    await execFileAsync("git", ["config", "filter.evil.required", "true"], { cwd: repo, env });
-    await execFileAsync("git", ["config", "filter.evilproc.process", nodeSentinelCmd(procSentinel)], { cwd: repo, env });
-    await execFileAsync("git", ["config", "filter.evilproc.required", "true"], { cwd: repo, env });
+    // S6: stat-only modification on a tracked file must leave .git/index byte-for-byte identical.
+    const indexPath = join(repo, ".git", "index");
+    const indexBefore = await readFile(indexPath);
+    const future = new Date(Date.now() + 10_000);
+    await utimes(join(repo, "file.txt"), future, future);
 
-    expect((await defaultGitExec(repo, ["diff"], { env })).code).toBe(0);
-    expect((await defaultGitExec(repo, ["status", "--short"], { env })).code).toBe(0);
-    expect((await defaultGitExec(repo, ["ls-files", "-m"], { env })).code).toBe(0);
-    expect(existsSync(cleanSentinel)).toBe(false);
-    expect(existsSync(procSentinel)).toBe(false);
-
-    // Non-overridable filter subsection name must fail closed with EPERM.
-    const badSubSentinel = join(sentinelDir, "badsub.ran");
-    await execFileAsync("git", ["config", "filter.bad=name.clean", nodeSentinelCmd(badSubSentinel)], { cwd: repo, env });
-    const badFilterDiff = await defaultGitExec(repo, ["diff"], { env });
-    expect(badFilterDiff.code).not.toBe(0);
-    expect(badFilterDiff.errorCode).toBe("EPERM");
-    expect(existsSync(badSubSentinel)).toBe(false);
+    expect((await defaultGitExec(repo, ["diff-tree", "-r", first, second], { env })).code).toBe(0);
+    expect((await defaultGitExec(repo, ["ls-files", "-z"], { env })).code).toBe(0);
+    expect((await defaultGitExec(repo, ["ls-tree", "-r", "HEAD"], { env })).code).toBe(0);
+    const indexAfter = await readFile(indexPath);
+    expect(Buffer.compare(indexBefore, indexAfter)).toBe(0);
   });
 
-  it("executes core read-only config, rev-parse, for-each-ref, and isolated merge-tree helpers while failing closed on merge drivers", async () => {
+  it("isolates merge-tree writes to scratch objects and disables merge drivers and renormalize filters (S2/S3/S7/S10)", async () => {
     const repo = await initEmptyRepo();
     const scratchBare = await initEmptyRepo(true);
+    const sentinelDir = await mkdtemp(join(tmpdir(), "ship-ge-mt-sentinels-"));
+    dirs.push(sentinelDir);
     const env = isolatedGitEnv(repo);
 
-    await writeFile(join(repo, "a.txt"), "base\n", "utf8");
+    await writeFile(join(repo, ".gitattributes"), "*.drv merge=evil\n*.ren filter=evil\n", "utf8");
+    await writeFile(join(repo, "a.drv"), "base line\n", "utf8");
+    await writeFile(join(repo, "r.ren"), "line1\nline2\nline3\n", "utf8");
+    await writeFile(join(repo, "clean.txt"), "base clean\n", "utf8");
     const baseSha = await gitCommitAll(repo, "base", env);
+
     await execFileAsync("git", ["checkout", "-b", "branch-a"], { cwd: repo, env });
-    await writeFile(join(repo, "a.txt"), "from a\n", "utf8");
+    await writeFile(join(repo, "a.drv"), "from branch a\n", "utf8");
+    await writeFile(join(repo, "r.ren"), "line1-a\nline2\nline3\n", "utf8");
     const shaA = await gitCommitAll(repo, "a", env);
+
     await execFileAsync("git", ["checkout", "-b", "branch-b", baseSha], { cwd: repo, env });
-    await writeFile(join(repo, "b.txt"), "from b\n", "utf8");
-    const shaB = await gitCommitAll(repo, "b", env);
+    await writeFile(join(repo, "a.drv"), "from branch b\n", "utf8");
+    await writeFile(join(repo, "r.ren"), "line1\nline2\nline3-b\n", "utf8");
+    const shaConflict = await gitCommitAll(repo, "b conflict", env);
 
-    const cfgList = await defaultGitExec(repo, ["config", "--show-scope", "--show-origin", "--null", "--list"], { env });
-    expect(cfgList.code).toBe(0);
+    await execFileAsync("git", ["checkout", "-b", "branch-c", baseSha], { cwd: repo, env });
+    await writeFile(join(repo, "clean.txt"), "from branch c\n", "utf8");
+    const shaClean = await gitCommitAll(repo, "c clean", env);
 
-    const cfgIncludes = await defaultGitExec(
+    const mergeSentinel = join(sentinelDir, "merge-driver.ran");
+    const cleanSentinel = join(sentinelDir, "renorm-clean.ran");
+    const mergeScript = await makeSentinelScript(sentinelDir, "merge-driver.sh", mergeSentinel, 1);
+    const cleanScript = join(sentinelDir, "renorm-clean.sh");
+    await writeFile(
+      cleanScript,
+      `#!/bin/sh\nprintf 'pwned\\n' > ${JSON.stringify(cleanSentinel)}\nexec cat\n`,
+      { mode: 0o755 },
+    );
+
+    await execFileAsync("git", ["config", "merge.evil.driver", `${mergeScript} %O %A %B`], { cwd: repo, env });
+    await execFileAsync("git", ["config", "filter.evil.clean", cleanScript], { cwd: repo, env });
+    await execFileAsync("git", ["config", "filter.evil.smudge", cleanScript], { cwd: repo, env });
+    await execFileAsync("git", ["config", "filter.evil.required", "true"], { cwd: repo, env });
+    await execFileAsync("git", ["config", "merge.renormalize", "true"], { cwd: repo, env });
+
+    const maliciousGitConfig = join(sentinelDir, "malicious.gitconfig");
+    await writeFile(
+      maliciousGitConfig,
+      `[merge "evil"]\n\tdriver = ${mergeScript} %O %A %B\n[merge]\n\trenormalize = true\n`,
+      "utf8",
+    );
+
+    // Positive controls (S10): unhardened merge-tree invokes both the renormalize clean filter and merge driver.
+    await execFileAsync("git", ["merge-tree", "--write-tree", shaA, shaConflict], { cwd: repo, env }).catch(() => {});
+    expect(existsSync(cleanSentinel)).toBe(true);
+    expect(existsSync(mergeSentinel)).toBe(true);
+    await rm(mergeSentinel, { force: true });
+    await rm(cleanSentinel, { force: true });
+
+    // Missing, repo-internal, or bare-repo GIT_OBJECT_DIRECTORY must be rejected with EINVAL.
+    const noScratch = await defaultGitExec(repo, ["merge-tree", "--write-tree", shaA, shaClean], { env });
+    expect(noScratch.code).not.toBe(0);
+    expect(noScratch.errorCode).toBe("EINVAL");
+
+    const sameObjDir = await defaultGitExec(repo, ["merge-tree", "--write-tree", shaA, shaClean], {
+      env: { ...env, GIT_OBJECT_DIRECTORY: join(repo, ".git", "objects") },
+    });
+    expect(sameObjDir.code).not.toBe(0);
+    expect(sameObjDir.errorCode).toBe("EINVAL");
+
+    const bareRepoDirReject = await defaultGitExec(
+      scratchBare,
+      ["--git-dir", scratchBare, "merge-tree", "--write-tree", shaA, shaClean],
+      {
+        env: {
+          ...env,
+          GIT_OBJECT_DIRECTORY: join(scratchBare, "objects"),
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: join(repo, ".git", "objects"),
+        },
+      },
+    );
+    expect(bareRepoDirReject.code).not.toBe(0);
+    expect(bareRepoDirReject.errorCode).toBe("EINVAL");
+
+    const repoObjectsBefore = await listObjectEntries(join(repo, ".git", "objects"));
+
+    // Pattern 1: direct repo + caller-owned scratch GIT_OBJECT_DIRECTORY + hostile GIT_CONFIG.
+    const scratchObjDir = await mkdtemp(join(tmpdir(), "ship-ge-scratch-obj-"));
+    dirs.push(scratchObjDir);
+    const cleanRes = await defaultGitExec(repo, ["merge-tree", "--write-tree", shaA, shaClean], {
+      env: { ...env, GIT_CONFIG: maliciousGitConfig, GIT_OBJECT_DIRECTORY: scratchObjDir },
+    });
+    expect(cleanRes.code).toBe(0);
+    const cleanTreeSha = cleanRes.stdout.split("\n")[0]?.trim() ?? "";
+    expect(cleanTreeSha).toMatch(/^[0-9a-f]{40,}$/u);
+
+    const conflictRes = await defaultGitExec(repo, ["merge-tree", "--write-tree", shaA, shaConflict], {
+      env: { ...env, GIT_CONFIG: maliciousGitConfig, GIT_OBJECT_DIRECTORY: scratchObjDir },
+    });
+    expect(conflictRes.code).toBe(1);
+    const conflictTreeSha = conflictRes.stdout.split("\n")[0]?.trim() ?? "";
+    expect(conflictTreeSha).toMatch(/^[0-9a-f]{40,}$/u);
+
+    expect(existsSync(mergeSentinel)).toBe(false);
+    expect(existsSync(cleanSentinel)).toBe(false);
+    expect(await listObjectEntries(join(repo, ".git", "objects"))).toEqual(repoObjectsBefore);
+
+    // Pattern 2: plain scratch object dir (not a git repo) with explicit GIT_ALTERNATE_OBJECT_DIRECTORIES.
+    const scratchObjDir2 = await mkdtemp(join(tmpdir(), "ship-ge-scratch-obj2-"));
+    dirs.push(scratchObjDir2);
+    const altRes = await defaultGitExec(scratchObjDir2, ["merge-tree", "--write-tree", shaA, shaClean], {
+      env: {
+        ...env,
+        GIT_OBJECT_DIRECTORY: scratchObjDir2,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: join(repo, ".git", "objects"),
+        GIT_CONFIG: maliciousGitConfig,
+      },
+    });
+    expect(altRes.code).toBe(0);
+    const altTreeSha = altRes.stdout.split("\n")[0]?.trim() ?? "";
+    expect(altTreeSha).toMatch(/^[0-9a-f]{40,}$/u);
+    const dtRes = await defaultGitExec(
       repo,
-      ["config", "--show-origin", "-z", "--type=path", "--get-regexp", String.raw`^include(if\..*)?\.path$`],
-      { env },
+      ["diff-tree", "-r", "-z", "--no-renames", "--ignore-submodules=none", shaA, altTreeSha],
+      {
+        env: {
+          ...env,
+          GIT_OBJECT_DIRECTORY: scratchObjDir2,
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: join(repo, ".git", "objects"),
+        },
+      },
     );
-    expect([0, 1]).toContain(cfgIncludes.code);
-
-    const rp = await defaultGitExec(repo, ["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"], {
-      env,
-    });
-    expect(rp.code).toBe(0);
-    expect(rp.stdout.trim()).toBe(shaB);
-
-    const fer = await defaultGitExec(repo, ["for-each-ref", "--count=1", "refs/heads"], { env });
-    expect(fer.code).toBe(0);
-
-    const mb = await defaultGitExec(repo, ["merge-base", "--is-ancestor", baseSha, shaB], { env });
-    expect(mb.code).toBe(0);
-
-    await execFileAsync("git", ["push", scratchBare, `${shaA}:refs/heads/a`, `${shaB}:refs/heads/b`], {
-      cwd: repo,
-      env,
-    });
-    const mt = await defaultGitExec(
-      scratchBare,
-      ["--git-dir", scratchBare, "merge-tree", "--write-tree", shaA, shaB],
-      { env },
-    );
-    expect(mt.code).toBe(0);
-    const treeSha = mt.stdout.trim();
-    expect(treeSha).toMatch(/^[0-9a-f]{40,}$/u);
-
-    const dt = await defaultGitExec(
-      scratchBare,
-      ["--git-dir", scratchBare, "diff-tree", "-r", "-z", "--no-renames", "--ignore-submodules=none", shaA, treeSha],
-      { env },
-    );
-    expect(dt.code).toBe(0);
-
-    await execFileAsync("git", ["--git-dir", scratchBare, "config", "merge.evil.driver", "false"], {
-      cwd: repo,
-      env,
-    });
-    const blockedMt = await defaultGitExec(
-      scratchBare,
-      ["--git-dir", scratchBare, "merge-tree", "--write-tree", shaA, shaB],
-      { env },
-    );
-    expect(blockedMt.code).not.toBe(0);
-    expect(blockedMt.errorCode).toBe("EPERM");
+    expect(dtRes.code).toBe(0);
+    expect(existsSync(mergeSentinel)).toBe(false);
+    expect(existsSync(cleanSentinel)).toBe(false);
+    expect(await listObjectEntries(join(repo, ".git", "objects"))).toEqual(repoObjectsBefore);
   });
 
   it("forcibly kills SIGTERM-ignoring children on maxBuffer overflow even with timeout disabled (S20)", async () => {
@@ -415,75 +542,172 @@ describe("git-exec and process runner", () => {
     expect(elapsedMs).toBeLessThan(1500);
   });
 
-  it("kills the entire process tree (including stdio-closing and SIGTERM-ignoring descendants) before settling on abort and timeout (S21)", async () => {
+  it("kills the process tree and enforces the cleanup deadline when a detached descendant holds pipes open (S8/S21)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ship-ge-tree-"));
     dirs.push(dir);
+    const pidsToCleanup: number[] = [];
 
-    const spawnedPids: number[] = [];
     const spawnTreeScript = `
       const { spawn } = require("node:child_process");
       const fs = require("node:fs");
       const [parentFile, openChildFile, closedChildFile] = process.argv.slice(1);
       process.on("SIGTERM", () => {});
       const childBody = 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(0), 10000);';
-      const c1 = spawn(process.execPath, ["-e", childBody, openChildFile], { stdio: "inherit" });
-      const c2 = spawn(process.execPath, ["-e", childBody, closedChildFile], { stdio: "ignore" });
+      spawn(process.execPath, ["-e", childBody, openChildFile], { stdio: "inherit" });
+      spawn(process.execPath, ["-e", childBody, closedChildFile], { stdio: "ignore" });
       fs.writeFileSync(parentFile, String(process.pid));
-      setTimeout(() => { void c1; void c2; process.exit(0); }, 10000);
+      setTimeout(() => process.exit(0), 10000);
+    `;
+
+    const detachedHolderScript = `
+      const { spawn } = require("node:child_process");
+      const fs = require("node:fs");
+      const [parentFile, detachedFile, mode] = process.argv.slice(1);
+      process.on("SIGTERM", () => {});
+      const detached = spawn(
+        process.execPath,
+        ["-e", 'const fs = require("node:fs"); fs.writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(0), 10000);', detachedFile],
+        { detached: true, stdio: ["ignore", 1, 2] },
+      );
+      detached.unref();
+      fs.writeFileSync(parentFile, String(process.pid));
+      if (mode === "flood") {
+        const chunk = Buffer.alloc(64 * 1024, 66);
+        const spam = () => { process.stdout.write(chunk); setImmediate(spam); };
+        spam();
+      } else {
+        setTimeout(() => process.exit(0), 10000);
+      }
     `;
 
     try {
-      const abortParent = join(dir, "abort-parent.pid");
-      const abortOpen = join(dir, "abort-open.pid");
-      const abortClosed = join(dir, "abort-closed.pid");
-      const ac = new AbortController();
-      const abortPromise = runProcess(
-        process.execPath,
-        ["-e", spawnTreeScript, abortParent, abortOpen, abortClosed],
-        { cwd: dir, signal: ac.signal, timeoutMs: 10_000 },
-      );
+      // S21: abort & timeout kill parent, open-stdio grandchild, and closed-stdio grandchild.
+      const abortPids = await (async () => {
+        const ac = new AbortController();
+        const pf = join(dir, "ap.pid");
+        const of = join(dir, "ao.pid");
+        const cf = join(dir, "ac.pid");
+        const p = runProcess(process.execPath, ["-e", spawnTreeScript, pf, of, cf], {
+          cwd: dir,
+          signal: ac.signal,
+          timeoutMs: 10_000,
+        });
+        const pids = await Promise.all([waitForPidFile(pf), waitForPidFile(of), waitForPidFile(cf)]);
+        pidsToCleanup.push(...pids);
+        ac.abort();
+        const res = await p;
+        expect(res.errorCode).toBe("ABORT_ERR");
+        return pids;
+      })();
+      for (const pid of abortPids) expect(isPidAlive(pid)).toBe(false);
 
-      const abortPids = await Promise.all([
-        waitForPidFile(abortParent),
-        waitForPidFile(abortOpen),
-        waitForPidFile(abortClosed),
-      ]);
-      spawnedPids.push(...abortPids);
+      const toPids = await (async () => {
+        const pf = join(dir, "tp.pid");
+        const of = join(dir, "to.pid");
+        const cf = join(dir, "tc.pid");
+        const p = runProcess(process.execPath, ["-e", spawnTreeScript, pf, of, cf], {
+          cwd: dir,
+          timeoutMs: 200,
+        });
+        const pids = await Promise.all([waitForPidFile(pf), waitForPidFile(of), waitForPidFile(cf)]);
+        pidsToCleanup.push(...pids);
+        const res = await p;
+        expect(res.errorCode).toBe("ETIMEDOUT");
+        return pids;
+      })();
+      for (const pid of toPids) expect(isPidAlive(pid)).toBe(false);
 
-      ac.abort();
-      const abortRes = await abortPromise;
-      expect(abortRes.code).not.toBe(0);
-      expect(abortRes.errorCode).toBe("ABORT_ERR");
-      for (const pid of abortPids) {
-        expect(isPidAlive(pid)).toBe(false);
-      }
-
-      const toParent = join(dir, "to-parent.pid");
-      const toOpen = join(dir, "to-open.pid");
-      const toClosed = join(dir, "to-closed.pid");
-      const toPromise = runProcess(
-        process.execPath,
-        ["-e", spawnTreeScript, toParent, toOpen, toClosed],
-        { cwd: dir, timeoutMs: 250 },
-      );
-
-      const toPids = await Promise.all([
-        waitForPidFile(toParent),
-        waitForPidFile(toOpen),
-        waitForPidFile(toClosed),
-      ]);
-      spawnedPids.push(...toPids);
-
-      const toRes = await toPromise;
-      expect(toRes.code).not.toBe(0);
-      expect(toRes.errorCode).toBe("ETIMEDOUT");
-      for (const pid of toPids) {
-        expect(isPidAlive(pid)).toBe(false);
+      // S8: detached pipe-holding grandchild must not hang abort, timeout, or maxBuffer settlement.
+      for (const mode of ["abort", "timeout", "flood"] as const) {
+        const pf = join(dir, `det-${mode}-p.pid`);
+        const df = join(dir, `det-${mode}-d.pid`);
+        const ac = new AbortController();
+        const t0 = performance.now();
+        const p = runProcess(process.execPath, ["-e", detachedHolderScript, pf, df, mode], {
+          cwd: dir,
+          ...(mode === "abort" ? { signal: ac.signal, timeoutMs: 10_000 } : {}),
+          ...(mode === "timeout" ? { timeoutMs: 120 } : {}),
+          ...(mode === "flood" ? { maxBuffer: 64 * 1024, timeoutMs: 0 } : {}),
+        });
+        const [ppid, dpid] = await Promise.all([waitForPidFile(pf), waitForPidFile(df)]);
+        pidsToCleanup.push(ppid, dpid);
+        if (mode === "abort") ac.abort();
+        const res = await p;
+        expect(performance.now() - t0).toBeLessThan(1500);
+        expect(res.code).not.toBe(0);
+        expect(res.errorCode).toBe(
+          mode === "abort"
+            ? "ABORT_ERR"
+            : mode === "timeout"
+              ? "ETIMEDOUT"
+              : "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        );
       }
     } finally {
-      for (const pid of spawnedPids) {
+      for (const pid of pidsToCleanup) {
         try {
           process.kill(pid, "SIGKILL");
+        } catch {
+          // Already exited.
+        }
+      }
+    }
+  });
+
+  it("keeps cleanup timers referenced so standalone callers await full process-group teardown (S9)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ship-ge-standalone-"));
+    dirs.push(dir);
+    const parentPidFile = join(dir, "parent.pid");
+    const grandchildPidFile = join(dir, "grandchild.pid");
+    const gitExecUrl = pathToFileURL(join(process.cwd(), "src", "safety", "git-exec.ts")).href;
+
+    const standaloneScript = `
+      import { readFile } from "node:fs/promises";
+      import { runProcess } from ${JSON.stringify(gitExecUrl)};
+
+      const parentBody = \`
+        const { spawn } = require("node:child_process");
+        const fs = require("node:fs");
+        spawn(process.execPath, ["-e", 'const fs = require("node:fs"); process.on("SIGTERM", () => {}); fs.writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(0), 10000);', ${JSON.stringify(grandchildPidFile)}], { stdio: "ignore" });
+        process.on("SIGTERM", () => process.exit(0));
+        fs.writeFileSync(${JSON.stringify(parentPidFile)}, String(process.pid));
+        setTimeout(() => process.exit(0), 10000);
+      \`;
+
+      const ac = new AbortController();
+      const promise = runProcess(process.execPath, ["-e", parentBody], {
+        cwd: ${JSON.stringify(dir)},
+        signal: ac.signal,
+        timeoutMs: 10_000,
+      });
+
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        try {
+          const p = Number.parseInt((await readFile(${JSON.stringify(parentPidFile)}, "utf8")).trim(), 10);
+          const g = Number.parseInt((await readFile(${JSON.stringify(grandchildPidFile)}, "utf8")).trim(), 10);
+          if (p > 0 && g > 0) break;
+        } catch {}
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      ac.abort();
+      const res = await promise;
+      console.log("SETTLED:" + res.errorCode);
+    `;
+
+    const scriptPath = join(dir, "standalone.mts");
+    await writeFile(scriptPath, standaloneScript, "utf8");
+    let grandchildPid = 0;
+    try {
+      const { stdout } = await execFileAsync(process.execPath, [scriptPath], { cwd: dir });
+      expect(stdout.trim()).toBe("SETTLED:ABORT_ERR");
+      grandchildPid = Number.parseInt((await readFile(grandchildPidFile, "utf8")).trim(), 10);
+      expect(grandchildPid).toBeGreaterThan(0);
+      expect(isPidAlive(grandchildPid)).toBe(false);
+    } finally {
+      if (grandchildPid > 0) {
+        try {
+          process.kill(grandchildPid, "SIGKILL");
         } catch {
           // Already exited.
         }

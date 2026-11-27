@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 
 export interface ExecResult {
   code: number;
@@ -48,7 +51,13 @@ export const SAFE_GIT_FLAGS = [
   "-c",
   "diff.submodule=short",
   "-c",
-  "status.submoduleSummary=false",
+  "diff.autoRefreshIndex=false",
+  "-c",
+  "format.pretty=medium",
+  "-c",
+  "log.showSignature=false",
+  "-c",
+  "merge.renormalize=false",
   "--literal-pathspecs",
   "--no-optional-locks",
 ] as const;
@@ -79,10 +88,15 @@ const REPO_LOCAL_GIT_ENV_KEYS = new Set([
   "GIT_DIFF_OPTS",
   "GIT_PAGER",
   "GIT_ATTR_NOSYSTEM",
+  "GIT_ATTR_SOURCE",
+  "GIT_EXEC_PATH",
+  "GIT_TEMPLATE_DIR",
+  "GIT_SSH",
+  "GIT_SSH_COMMAND",
+  "GIT_ASKPASS",
 ]);
 
 const GIT_CONFIG_INDEXED_RE = /^GIT_CONFIG_(?:KEY|VALUE)_/u;
-const SAFE_SUBSECTION_RE = /^[A-Za-z0-9._-]+$/u;
 
 function stripRepoLocalGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
@@ -93,7 +107,55 @@ function stripRepoLocalGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
+/** Remove all Git config and callback overrides from `env` for internal runner queries. */
+function cleanInternalConfigEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (
+      v === undefined ||
+      k === "GIT_ATTR_SOURCE" ||
+      k.startsWith("GIT_CONFIG") ||
+      GIT_CONFIG_INDEXED_RE.test(k)
+    ) {
+      continue;
+    }
+    out[k] = v;
+  }
+  out.GIT_CONFIG_NOSYSTEM = "1";
+  out.GIT_CONFIG_GLOBAL = "/dev/null";
+  out.GIT_CONFIG_SYSTEM = "/dev/null";
+  out.GIT_CONFIG_COUNT = "0";
+  out.GIT_ATTR_NOSYSTEM = "1";
+  out.GIT_PAGER = "cat";
+  out.GIT_TERMINAL_PROMPT = "0";
+  out.GIT_TEST_COMMIT_GRAPH = "0";
+  out.GIT_NO_LAZY_FETCH = "1";
+  return out;
+}
+
+const MIN_GIT_MAJOR = 2;
+const MIN_GIT_MINOR = 45;
+const GIT_VERSION_RE = /\bgit version (\d+)\.(\d+)(?:\.(\d+))?/u;
+const verifiedGitPathCache = new Set<string>();
+
+export function parseGitVersion(output: string): { major: number; minor: number; patch: number } | null {
+  const m = GIT_VERSION_RE.exec(output);
+  if (!m) return null;
+  const major = Number.parseInt(m[1]!, 10);
+  const minor = Number.parseInt(m[2]!, 10);
+  const patch = m[3] ? Number.parseInt(m[3], 10) : 0;
+  if (Number.isNaN(major) || Number.isNaN(minor) || Number.isNaN(patch)) return null;
+  return { major, minor, patch };
+}
+
+export function isSupportedGitVersion(output: string): boolean {
+  const parsed = parseGitVersion(output);
+  if (!parsed) return false;
+  return parsed.major > MIN_GIT_MAJOR || (parsed.major === MIN_GIT_MAJOR && parsed.minor >= MIN_GIT_MINOR);
+}
+
 type StopReason = "timeout" | "abort" | "maxBuffer";
+const CLEANUP_DEADLINE_MS = 250;
 
 /** Run an external binary with bounded stdio buffers, wall-clock timeout, abort support, and POSIX process-group cleanup. */
 export function runProcess(
@@ -139,6 +201,7 @@ export function runProcess(
     let stopReason: StopReason | undefined;
     let timeoutTimer: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
+    let cleanupTimer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
 
     const stdoutChunks: Buffer[] = [];
@@ -149,6 +212,7 @@ export function runProcess(
     const clearTimers = () => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (killTimer) clearTimeout(killTimer);
+      if (cleanupTimer) clearTimeout(cleanupTimer);
       if (opts.signal && onAbort) {
         opts.signal.removeEventListener("abort", onAbort);
       }
@@ -192,10 +256,77 @@ export function runProcess(
       const deadline = Date.now() + maxWaitMs;
       while (isGroupAlive() && Date.now() < deadline) {
         await new Promise<void>((r) => {
-          const t = setTimeout(r, 5);
-          t.unref?.();
+          // Keep timer referenced so standalone callers do not exit before group cleanup finishes.
+          setTimeout(r, 5);
         });
       }
+    };
+
+    const settle = (code: number | null, signal: NodeJS.Signals | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimers();
+
+      if (child?.stdin && !stdinFinished && !child.stdin.writableFinished) {
+        child.stdin.destroy();
+      }
+
+      void (async () => {
+        if (stopReason !== undefined) {
+          await waitForGroupExit(200);
+        }
+
+        const stdoutBuf = Buffer.concat(stdoutChunks);
+        const stderrText = Buffer.concat(stderrChunks).toString("utf8");
+
+        if (stopReason === "abort") {
+          resolve(buildResult(1, stdoutBuf, stderrText || "Operation aborted.", "ABORT_ERR"));
+          return;
+        }
+        if (stopReason === "timeout") {
+          const timeoutMsg = `Process timed out after ${timeoutMs}ms.`;
+          resolve(buildResult(1, stdoutBuf, stderrText ? `${stderrText}\n${timeoutMsg}` : timeoutMsg, "ETIMEDOUT"));
+          return;
+        }
+        if (stopReason === "maxBuffer") {
+          const overflowMsg = `maxBuffer length (${maxBuffer}) exceeded.`;
+          resolve(
+            buildResult(
+              1,
+              stdoutBuf,
+              stderrText ? `${stderrText}\n${overflowMsg}` : overflowMsg,
+              "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+            ),
+          );
+          return;
+        }
+
+        const writeComplete = stdinFinished || Boolean(child?.stdin?.writableFinished);
+        if (code === 0 && signal === null) {
+          if (stdinErr || !writeComplete) {
+            const msg = stdinErr?.message ?? "stdin closed before write finished";
+            resolve(buildResult(1, stdoutBuf, stderrText ? `${stderrText}\n${msg}` : msg, stdinErr?.code ?? "EPIPE"));
+            return;
+          }
+          resolve(buildResult(0, stdoutBuf, stderrText));
+          return;
+        }
+
+        resolve(buildResult(code ?? 1, stdoutBuf, stderrText, stdinErr?.code));
+      })();
+    };
+
+    const scheduleForcedCleanup = () => {
+      if (settled || cleanupTimer) return;
+      // Keep cleanup deadline referenced so a detached pipe-holder cannot hang shutdown or leave early.
+      cleanupTimer = setTimeout(() => {
+        if (settled) return;
+        signalTree("SIGKILL");
+        child?.stdout?.destroy();
+        child?.stderr?.destroy();
+        child?.stdin?.destroy();
+        settle(null, "SIGKILL");
+      }, CLEANUP_DEADLINE_MS);
     };
 
     const startTermination = (reason: StopReason, graceMs: number) => {
@@ -203,13 +334,16 @@ export function runProcess(
       stopReason = reason;
       if (reason === "maxBuffer" || graceMs <= 0) {
         signalTree("SIGKILL");
+        scheduleForcedCleanup();
         return;
       }
       signalTree("SIGTERM");
+      // Keep grace timer referenced so standalone event loops stay alive until SIGKILL escalation completes.
       killTimer = setTimeout(() => {
-        if (!settled) signalTree("SIGKILL");
+        if (settled) return;
+        signalTree("SIGKILL");
+        scheduleForcedCleanup();
       }, graceMs);
-      killTimer.unref?.();
     };
 
     const attachStreamCollector = (
@@ -273,57 +407,7 @@ export function runProcess(
     });
 
     child.once("close", (code, signal) => {
-      if (settled) return;
-      settled = true;
-      clearTimers();
-
-      if (child.stdin && !stdinFinished && !child.stdin.writableFinished) {
-        child.stdin.destroy();
-      }
-
-      void (async () => {
-        if (stopReason !== undefined) {
-          await waitForGroupExit(200);
-        }
-
-        const stdoutBuf = Buffer.concat(stdoutChunks);
-        const stderrText = Buffer.concat(stderrChunks).toString("utf8");
-
-        if (stopReason === "abort") {
-          resolve(buildResult(1, stdoutBuf, stderrText || "Operation aborted.", "ABORT_ERR"));
-          return;
-        }
-        if (stopReason === "timeout") {
-          const timeoutMsg = `Process timed out after ${timeoutMs}ms.`;
-          resolve(buildResult(1, stdoutBuf, stderrText ? `${stderrText}\n${timeoutMsg}` : timeoutMsg, "ETIMEDOUT"));
-          return;
-        }
-        if (stopReason === "maxBuffer") {
-          const overflowMsg = `maxBuffer length (${maxBuffer}) exceeded.`;
-          resolve(
-            buildResult(
-              1,
-              stdoutBuf,
-              stderrText ? `${stderrText}\n${overflowMsg}` : overflowMsg,
-              "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
-            ),
-          );
-          return;
-        }
-
-        const writeComplete = stdinFinished || Boolean(child?.stdin?.writableFinished);
-        if (code === 0 && signal === null) {
-          if (stdinErr || !writeComplete) {
-            const msg = stdinErr?.message ?? "stdin closed before write finished";
-            resolve(buildResult(1, stdoutBuf, stderrText ? `${stderrText}\n${msg}` : msg, stdinErr?.code ?? "EPIPE"));
-            return;
-          }
-          resolve(buildResult(0, stdoutBuf, stderrText));
-          return;
-        }
-
-        resolve(buildResult(code ?? 1, stdoutBuf, stderrText, stdinErr?.code));
-      })();
+      settle(code, signal);
     });
 
     if (timeoutMs > 0) {
@@ -358,55 +442,9 @@ interface SubcommandRule {
   valueFlags?: Map<string, RegExp | undefined>;
   patterns?: RegExp[];
   inject?: readonly string[];
-  needsMergeDriverCheck?: boolean;
-  needsWorktreeFilterCheck?: boolean;
-  needsWorktreeFilterWhen?: Set<string>;
+  isolatedMergeTree?: boolean;
   validate?: (flags: string[], positionals: string[]) => boolean;
 }
-
-const COMMIT_LOG_SHOW_RULE: SubcommandRule = {
-  exact: new Set([
-    "-p",
-    "-u",
-    "-s",
-    "--no-patch",
-    "--stat",
-    "--numstat",
-    "--name-only",
-    "--name-status",
-    "--raw",
-    "-z",
-    "--no-renames",
-    "--no-ext-diff",
-    "--no-textconv",
-    "--submodule=short",
-    "--ignore-submodules=none",
-    "--ignore-submodules=all",
-    "--ignore-submodules=dirty",
-    "--ignore-submodules=untracked",
-    "--binary",
-    "--full-index",
-    "--abbrev",
-    "--no-color",
-    "--oneline",
-    "--no-merges",
-    "--merges",
-    "--first-parent",
-    "--reverse",
-    "--ancestry-path",
-    "--left-right",
-    "--cherry-pick",
-    "--no-walk",
-    "--end-of-options",
-    "--",
-  ]),
-  valueFlags: new Map([
-    ["-n", /^[0-9]+$/u],
-    ["--max-count", /^[0-9]+$/u],
-  ]),
-  patterns: [/^-[0-9]+$/u, /^--max-count=[0-9]+$/u, /^-U[0-9]+$/u, /^--unified=[0-9]+$/u, /^--abbrev=[0-9]+$/u, /^--format=/u, /^--pretty=/u],
-  inject: ["--no-ext-diff", "--no-textconv", "--submodule=short"],
-};
 
 const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
   [
@@ -476,12 +514,8 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
   [
     "for-each-ref",
     {
-      exact: new Set(["-z", "--merged", "--no-merged", "--end-of-options", "--"]),
-      valueFlags: new Map([
-        ["--format", undefined],
-        ["--sort", undefined],
-      ]),
-      patterns: [/^--count=[0-9]+$/u, /^--format=/u, /^--sort=/u, /^--points-at=/u],
+      exact: new Set(["--merged", "--no-merged", "--end-of-options", "--"]),
+      patterns: [/^--count=[0-9]+$/u],
     },
   ],
   [
@@ -503,7 +537,8 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
         "--",
       ]),
       patterns: [/^--merge-base=.+$/u],
-      needsMergeDriverCheck: true,
+      isolatedMergeTree: true,
+      validate: (flags) => flags.includes("--write-tree"),
     },
   ],
   [
@@ -595,8 +630,6 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
         "--others",
         "-d",
         "--deleted",
-        "-m",
-        "--modified",
         "-s",
         "--stage",
         "-u",
@@ -607,80 +640,6 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
         "--end-of-options",
         "--",
       ]),
-      needsWorktreeFilterWhen: new Set(["-m", "--modified"]),
-    },
-  ],
-  ["show", COMMIT_LOG_SHOW_RULE],
-  ["log", COMMIT_LOG_SHOW_RULE],
-  [
-    "diff",
-    {
-      exact: new Set([
-        "--cached",
-        "--staged",
-        "--name-only",
-        "--name-status",
-        "--numstat",
-        "--stat",
-        "--raw",
-        "-z",
-        "--no-renames",
-        "-M",
-        "--find-renames",
-        "--no-ext-diff",
-        "--no-textconv",
-        "--submodule=short",
-        "--ignore-submodules=dirty",
-        "--ignore-submodules=all",
-        "--no-patch",
-        "-s",
-        "-p",
-        "-u",
-        "--binary",
-        "--full-index",
-        "--abbrev",
-        "--no-color",
-        "--quiet",
-        "--exit-code",
-        "--check",
-        "--end-of-options",
-        "--",
-      ]),
-      patterns: [/^-(?:U|M)[0-9]+$/u, /^--unified=[0-9]+$/u, /^--abbrev=[0-9]+$/u],
-      inject: ["--no-ext-diff", "--no-textconv", "--submodule=short", "--ignore-submodules=dirty"],
-      needsWorktreeFilterCheck: true,
-    },
-  ],
-  [
-    "status",
-    {
-      exact: new Set([
-        "--short",
-        "-s",
-        "--porcelain",
-        "--porcelain=v1",
-        "--porcelain=v2",
-        "--branch",
-        "-b",
-        "-z",
-        "--untracked-files=no",
-        "--untracked-files=normal",
-        "--untracked-files=all",
-        "-uno",
-        "-unormal",
-        "-uall",
-        "--ignored",
-        "--ignored=traditional",
-        "--ignored=no",
-        "--ignored=matching",
-        "--ignore-submodules=dirty",
-        "--ignore-submodules=all",
-        "--no-renames",
-        "--end-of-options",
-        "--",
-      ]),
-      inject: ["--ignore-submodules=dirty"],
-      needsWorktreeFilterCheck: true,
     },
   ],
 ]);
@@ -688,10 +647,10 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
 type ValidatedGitArgs =
   | {
       ok: true;
+      isVersionQuery: boolean;
       globalPrefix: string[];
       subcommandAndArgs: string[];
-      needsWorktreeFilterCheck: boolean;
-      needsMergeDriverCheck: boolean;
+      isolatedMergeTree: boolean;
     }
   | { ok: false; disallowed: string };
 
@@ -702,10 +661,10 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
   if (args.length === 1 && args[0] === "--version") {
     return {
       ok: true,
+      isVersionQuery: true,
       globalPrefix: [],
       subcommandAndArgs: ["--version"],
-      needsWorktreeFilterCheck: false,
-      needsMergeDriverCheck: false,
+      isolatedMergeTree: false,
     };
   }
 
@@ -749,7 +708,6 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
   const seenFlags: string[] = [];
   const positionals: string[] = [];
   let literalOnly = false;
-  let needsWorktreeFilterCheck = rule.needsWorktreeFilterCheck === true;
 
   for (let i = idx + 1; i < args.length; i++) {
     const arg = args[i]!;
@@ -786,9 +744,6 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
     }
 
     seenFlags.push(arg);
-    if (rule.needsWorktreeFilterWhen?.has(arg)) {
-      needsWorktreeFilterCheck = true;
-    }
     subArgs.push(arg);
   }
 
@@ -798,66 +753,189 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
 
   return {
     ok: true,
+    isVersionQuery: false,
     globalPrefix,
     subcommandAndArgs: subArgs,
-    needsWorktreeFilterCheck,
-    needsMergeDriverCheck: rule.needsMergeDriverCheck === true,
+    isolatedMergeTree: rule.isolatedMergeTree === true,
   };
 }
 
-function parseNullConfigRecords(stdout: string): Array<{ key: string; value?: string }> {
-  const out: Array<{ key: string; value?: string }> = [];
-  for (const rec of stdout.split("\0")) {
-    if (rec === "") continue;
-    const nl = rec.indexOf("\n");
-    if (nl === -1) {
-      out.push({ key: rec });
-    } else {
-      out.push({ key: rec.slice(0, nl), value: rec.slice(nl + 1) });
-    }
-  }
-  return out;
+function isSameOrDescendant(candidate: string, ancestor: string): boolean {
+  const rel = relative(ancestor, candidate);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
-const FILTER_KEY_RE = /^filter\.(.*)\.(clean|smudge|process)$/u;
+async function resolveExistingDir(dirPath: string): Promise<string | null> {
+  if (!dirPath || !isAbsolute(dirPath)) return null;
+  try {
+    const st = await stat(dirPath);
+    if (!st.isDirectory()) return null;
+    return await realpath(dirPath);
+  } catch {
+    return null;
+  }
+}
 
-type PreflightConfigResult =
-  | { status: "empty" }
-  | { status: "ok"; records: Array<{ key: string; value?: string }> }
-  | { status: "error"; result: ExecResult };
-
-async function queryPreflightConfig(
+async function ensureSupportedGitVersion(
   cwd: string,
   env: NodeJS.ProcessEnv,
-  globalPrefix: readonly string[],
-  pattern: string,
-  opts: { signal?: AbortSignal; timeoutMs: number; binary?: boolean },
-): Promise<PreflightConfigResult> {
-  const cfgRes = await runProcess(
-    "git",
-    [...SAFE_GIT_FLAGS, ...globalPrefix, "config", "--null", "--get-regexp", pattern],
-    {
-      cwd,
-      env,
-      signal: opts.signal,
-      timeoutMs: opts.timeoutMs,
-    },
-  );
-  if (cfgRes.errorCode !== undefined || (cfgRes.code !== 0 && cfgRes.code !== 1)) {
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  binary: boolean | undefined,
+): Promise<{ ok: true } | { ok: false; result: ExecResult }> {
+  const pathKey = env.PATH ?? "";
+  if (verifiedGitPathCache.has(pathKey)) {
+    return { ok: true };
+  }
+  const versionRes = await runProcess("git", ["--version"], {
+    cwd,
+    env: cleanInternalConfigEnv(env),
+    signal,
+    timeoutMs,
+  });
+  if (versionRes.errorCode !== undefined || versionRes.code !== 0) {
     return {
-      status: "error",
-      result: opts.binary ? { ...cfgRes, stdout: "", stdoutBuffer: Buffer.alloc(0) } : cfgRes,
+      ok: false,
+      result: binary ? { ...versionRes, stdout: "", stdoutBuffer: Buffer.alloc(0) } : versionRes,
     };
   }
-  if (cfgRes.code === 1) {
-    return { status: "empty" };
+  if (!isSupportedGitVersion(versionRes.stdout)) {
+    return {
+      ok: false,
+      result: {
+        code: 1,
+        stdout: "",
+        stderr: `Git >= 2.45.0 is required for GIT_NO_LAZY_FETCH support (found: ${versionRes.stdout.trim() || "unknown"}).`,
+        errorCode: "ENOTSUP",
+        ...(binary ? { stdoutBuffer: Buffer.alloc(0) } : {}),
+      },
+    };
   }
-  return { status: "ok", records: parseNullConfigRecords(cfgRes.stdout) };
+  verifiedGitPathCache.add(pathKey);
+  return { ok: true };
+}
+
+async function runIsolatedMergeTree(
+  cwd: string,
+  validated: Extract<ValidatedGitArgs, { ok: true }>,
+  env: NodeJS.ProcessEnv,
+  callerEnv: NodeJS.ProcessEnv | undefined,
+  opts: GitExecOptions,
+  deadline: number | undefined,
+  totalTimeoutMs: number,
+  remainingTimeoutMs: () => number,
+  failResult: (code: number, stderr: string, errorCode?: string) => ExecResult,
+): Promise<ExecResult> {
+  const rawObjDir = callerEnv?.GIT_OBJECT_DIRECTORY;
+  const realObjDir = rawObjDir ? await resolveExistingDir(rawObjDir) : null;
+  if (!realObjDir) {
+    return failResult(
+      1,
+      "merge-tree --write-tree requires an existing absolute scratch GIT_OBJECT_DIRECTORY.",
+      "EINVAL",
+    );
+  }
+
+  const realAlts: string[] = [];
+  const rawAlts = callerEnv?.GIT_ALTERNATE_OBJECT_DIRECTORIES;
+  if (rawAlts !== undefined && rawAlts !== "") {
+    const parts = rawAlts.split(delimiter).filter(Boolean);
+    if (parts.length === 0) {
+      return failResult(1, "Invalid GIT_ALTERNATE_OBJECT_DIRECTORIES for merge-tree.", "EINVAL");
+    }
+    for (const part of parts) {
+      const resolvedAlt = await resolveExistingDir(part);
+      if (!resolvedAlt) {
+        return failResult(1, `Invalid GIT_ALTERNATE_OBJECT_DIRECTORIES entry for merge-tree: ${part}`, "EINVAL");
+      }
+      if (isSameOrDescendant(realObjDir, resolvedAlt) || isSameOrDescendant(resolvedAlt, realObjDir)) {
+        return failResult(1, "merge-tree scratch GIT_OBJECT_DIRECTORY must be distinct from alternate objects.", "EINVAL");
+      }
+      realAlts.push(resolvedAlt);
+    }
+  }
+
+  if (deadline !== undefined && Date.now() >= deadline) {
+    return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+  }
+
+  const repoInfoRes = await runProcess(
+    "git",
+    [...SAFE_GIT_FLAGS, ...validated.globalPrefix, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    {
+      cwd,
+      env: cleanInternalConfigEnv(env),
+      signal: opts.signal,
+      timeoutMs: remainingTimeoutMs(),
+    },
+  );
+  if (repoInfoRes.errorCode !== undefined) {
+    return opts.binary ? { ...repoInfoRes, stdout: "", stdoutBuffer: Buffer.alloc(0) } : repoInfoRes;
+  }
+  if (repoInfoRes.code === 0) {
+    const commonDir = repoInfoRes.stdout.trim();
+    const realCommonDir = commonDir ? await resolveExistingDir(commonDir) : null;
+    if (realCommonDir) {
+      if (isSameOrDescendant(realObjDir, realCommonDir)) {
+        return failResult(
+          1,
+          "merge-tree scratch GIT_OBJECT_DIRECTORY must be distinct from the repository.",
+          "EINVAL",
+        );
+      }
+      if (realAlts.length === 0) {
+        const sourceObjects = await resolveExistingDir(resolve(realCommonDir, "objects"));
+        if (sourceObjects) {
+          realAlts.push(sourceObjects);
+        }
+      }
+    }
+  }
+
+  if (realAlts.length === 0) {
+    return failResult(1, "merge-tree could not resolve source object store.", "EINVAL");
+  }
+
+  if (deadline !== undefined && Date.now() >= deadline) {
+    return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+  }
+
+  const runnerGitDir = await mkdtemp(join(tmpdir(), "ship-ge-mt-"));
+  try {
+    await mkdir(join(runnerGitDir, "refs"), { recursive: true, mode: 0o700 });
+    await writeFile(join(runnerGitDir, "HEAD"), "ref: refs/heads/main\n", "utf8");
+    await writeFile(join(runnerGitDir, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = true\n", "utf8");
+
+    const sealedEnv = mergeEnv(cleanInternalConfigEnv(env), {
+      GIT_DIR: runnerGitDir,
+      GIT_COMMON_DIR: runnerGitDir,
+      GIT_WORK_TREE: undefined,
+      GIT_INDEX_FILE: undefined,
+      GIT_OBJECT_DIRECTORY: realObjDir,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: realAlts.join(delimiter),
+    });
+
+    return await runProcess(
+      "git",
+      [...SAFE_GIT_FLAGS, "--git-dir", runnerGitDir, ...validated.subcommandAndArgs],
+      {
+        cwd: runnerGitDir,
+        stdin: opts.stdin,
+        binary: opts.binary,
+        timeoutMs: remainingTimeoutMs(),
+        maxBuffer: opts.maxBuffer,
+        signal: opts.signal,
+        env: sealedEnv,
+      },
+    );
+  } finally {
+    await rm(runnerGitDir, { recursive: true, force: true });
+  }
 }
 
 /**
- * Execute an allowlisted read-only Git command with repository-local config, callback,
- * external diff/textconv, filter, and merge-driver safeguards enabled.
+ * Execute an allowlisted read-only Git plumbing command (or isolated `merge-tree --write-tree`)
+ * with Git >= 2.45 enforcement, authoritative `GIT_NO_LAZY_FETCH=1`, and repository callback hardening.
  */
 export async function defaultGitExec(
   cwd: string,
@@ -878,10 +956,11 @@ export async function defaultGitExec(
   }
 
   const env = mergeEnv(stripRepoLocalGitEnv(process.env), {
+    ...opts.env,
     GIT_TERMINAL_PROMPT: "0",
     GIT_TEST_COMMIT_GRAPH: "0",
     GIT_NO_LAZY_FETCH: "1",
-    ...opts.env,
+    GIT_PAGER: "cat",
   });
 
   const totalTimeoutMs = opts.timeoutMs ?? 20_000;
@@ -891,58 +970,16 @@ export async function defaultGitExec(
     return Math.max(1, deadline - Date.now());
   };
 
-  const extraConfigFlags: string[] = [];
-
-  if (validated.needsWorktreeFilterCheck) {
-    const preflight = await queryPreflightConfig(
+  if (!validated.isVersionQuery) {
+    const versionCheck = await ensureSupportedGitVersion(
       cwd,
       env,
-      validated.globalPrefix,
-      String.raw`^filter\..*\.(clean|smudge|process)$`,
-      { signal: opts.signal, timeoutMs: remainingTimeoutMs(), binary: opts.binary },
+      opts.signal,
+      remainingTimeoutMs(),
+      opts.binary,
     );
-    if (preflight.status === "error") return preflight.result;
-    if (preflight.status === "ok") {
-      const drivers = new Set<string>();
-      for (const rec of preflight.records) {
-        if (rec.value === "") continue;
-        const m = FILTER_KEY_RE.exec(rec.key);
-        const subsection = m?.[1];
-        if (!subsection || !SAFE_SUBSECTION_RE.test(subsection)) {
-          return failResult(1, "Refusing git worktree command: non-overridable filter configuration detected.", "EPERM");
-        }
-        drivers.add(subsection);
-      }
-      for (const drv of drivers) {
-        extraConfigFlags.push(
-          "-c",
-          `filter.${drv}.clean=`,
-          "-c",
-          `filter.${drv}.smudge=`,
-          "-c",
-          `filter.${drv}.process=`,
-          "-c",
-          `filter.${drv}.required=false`,
-        );
-      }
-    }
-  }
-
-  if (validated.needsMergeDriverCheck) {
-    const preflight = await queryPreflightConfig(
-      cwd,
-      env,
-      validated.globalPrefix,
-      String.raw`^merge\..*\.driver$`,
-      { signal: opts.signal, timeoutMs: remainingTimeoutMs(), binary: opts.binary },
-    );
-    if (preflight.status === "error") return preflight.result;
-    if (preflight.status === "ok") {
-      for (const rec of preflight.records) {
-        if (rec.value !== "") {
-          return failResult(1, "Refusing git merge-tree: custom merge driver configured.", "EPERM");
-        }
-      }
+    if (!versionCheck.ok) {
+      return versionCheck.result;
     }
   }
 
@@ -950,9 +987,23 @@ export async function defaultGitExec(
     return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
   }
 
+  if (validated.isolatedMergeTree) {
+    return runIsolatedMergeTree(
+      cwd,
+      validated,
+      env,
+      opts.env,
+      opts,
+      deadline,
+      totalTimeoutMs,
+      remainingTimeoutMs,
+      failResult,
+    );
+  }
+
   return runProcess(
     "git",
-    [...SAFE_GIT_FLAGS, ...extraConfigFlags, ...validated.globalPrefix, ...validated.subcommandAndArgs],
+    [...SAFE_GIT_FLAGS, ...validated.globalPrefix, ...validated.subcommandAndArgs],
     {
       cwd,
       stdin: opts.stdin,
