@@ -117,7 +117,7 @@ function joinRawPath(base: string, part: string): string {
   return base.endsWith(sep) ? `${base}${part}` : `${base}${sep}${part}`;
 }
 
-const PATH_SKIP_ERROR_CODES = new Set(["ENOENT", "EACCES", "ENOTDIR", "EISDIR", "ELOOP", "ENAMETOOLONG"]);
+const PATH_SKIP_ERROR_CODES = new Set(["ENOENT", "EACCES", "ENOTDIR", "EISDIR", "ESTALE"]);
 
 async function raceCancellation<T>(
   work: Promise<T>,
@@ -157,19 +157,34 @@ async function raceCancellation<T>(
   }
 }
 
+type ProbeCandidateResult =
+  | { kind: "found"; binPath: string }
+  | { kind: "skip"; eacces: boolean }
+  | { kind: "error"; message: string; code: string };
+
 async function probeCandidatePath(
-  candidate: string,
+  dir: string,
+  exeName: string,
   state: { cancelled: boolean },
-): Promise<{ kind: "found"; realBin: string } | { kind: "skip"; eacces: boolean }> {
+): Promise<ProbeCandidateResult> {
+  const candidate = joinRawPath(dir, exeName);
   try {
     await access(candidate, constants.X_OK);
     if (state.cancelled) return { kind: "skip", eacces: false };
     const st = await stat(candidate);
     if (state.cancelled) return { kind: "skip", eacces: false };
-    if (!st.isFile()) return { kind: "skip", eacces: st.isDirectory() };
-    return { kind: "found", realBin: await realpath(candidate) };
+    if (!st.isFile()) return { kind: "skip", eacces: true };
+    const realDir = await realpath(dir);
+    if (state.cancelled) return { kind: "skip", eacces: false };
+    // Preserve the invoked executable basename (e.g. `git` symlink -> `git-versioned`) while making the directory absolute.
+    return { kind: "found", binPath: joinRawPath(realDir, exeName) };
   } catch (err) {
-    return { kind: "skip", eacces: (err as NodeJS.ErrnoException).code === "EACCES" };
+    const e = err as NodeJS.ErrnoException;
+    const code = e.code ?? "EIO";
+    if (PATH_SKIP_ERROR_CODES.has(code)) {
+      return { kind: "skip", eacces: code === "EACCES" };
+    }
+    return { kind: "error", message: e.message, code };
   }
 }
 
@@ -417,8 +432,27 @@ export function runProcess(
       },
     );
 
-    child.once("exit", () => {
+    child.once("exit", (code, signal) => {
       childExited = true;
+      if (settled) return;
+      // Immediately tear down lingering same-group descendants so inherited stdout/stderr pipes close.
+      if (isGroupAlive()) {
+        signalTree("SIGKILL");
+      }
+      if (stopReason === undefined && !cleanupTimer) {
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = undefined;
+        }
+        cleanupTimer = setTimeout(() => {
+          if (settled) return;
+          signalTree("SIGKILL");
+          child?.stdout?.destroy();
+          child?.stderr?.destroy();
+          child?.stdin?.destroy();
+          settle(code, signal);
+        }, CLEANUP_DEADLINE_MS);
+      }
     });
 
     child.once("error", (err: NodeJS.ErrnoException) => {
@@ -678,9 +712,8 @@ async function resolveAndVerifyGitBinary(
     if (cancelErr) return { ok: false, result: cancelErr };
 
     const dir = entry === "" ? baseCwd : isAbsolute(entry) ? entry : joinRawPath(baseCwd, entry);
-    const candidate = joinRawPath(dir, exeName);
     const probeState = { cancelled: false };
-    const probed = await raceCancellation(probeCandidatePath(candidate, probeState), opts.signal, deadline);
+    const probed = await raceCancellation(probeCandidatePath(dir, exeName, probeState), opts.signal, deadline);
     if (!probed.ok) {
       probeState.cancelled = true;
       return {
@@ -691,6 +724,9 @@ async function resolveAndVerifyGitBinary(
             : failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT"),
       };
     }
+    if (probed.value.kind === "error") {
+      return { ok: false, result: failResult(1, probed.value.message, probed.value.code) };
+    }
     if (probed.value.kind === "skip") {
       sawEacces ||= probed.value.eacces;
       continue;
@@ -699,7 +735,7 @@ async function resolveAndVerifyGitBinary(
     const preSpawnErr = checkCancel();
     if (preSpawnErr) return { ok: false, result: preSpawnErr };
 
-    const versionRes = await runProcess(probed.value.realBin, ["--version"], {
+    const versionRes = await runProcess(probed.value.binPath, ["--version"], {
       cwd,
       env: cleanVersionProbeEnv(env),
       signal: opts.signal,
@@ -740,7 +776,7 @@ async function resolveAndVerifyGitBinary(
         ),
       };
     }
-    return { ok: true, isVersionResult: false, gitBin: probed.value.realBin };
+    return { ok: true, isVersionResult: false, gitBin: probed.value.binPath };
   }
 
   const endCancelErr = checkCancel();

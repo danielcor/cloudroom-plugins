@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -384,6 +384,44 @@ describe("git-exec and process runner", () => {
     });
     expect(oldBeforeGoodRes.code).not.toBe(0);
     expect(oldBeforeGoodRes.errorCode).toBe("ENOTSUP");
+
+    // S2 (terminal errors): Recursive shebang and symlink loops propagate ELOOP instead of falling through.
+    const recShebDir = await mkdtemp(join(tmpdir(), "ship-ge-s2recsheb-"));
+    const symLoopDir = await mkdtemp(join(tmpdir(), "ship-ge-s2symloop-"));
+    dirs.push(recShebDir, symLoopDir);
+    const recShebGit = join(recShebDir, "git");
+    await writeFile(recShebGit, `#!${recShebGit}\necho no\n`, { mode: 0o755 });
+    const recShebRes = await defaultGitExec(process.cwd(), ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: `${recShebDir}${delimiter}${goodFallbackDir}` },
+    });
+    expect(recShebRes.code).not.toBe(0);
+    expect(recShebRes.errorCode).toBe("ELOOP");
+
+    await symlink(join(symLoopDir, "git"), join(symLoopDir, "git"));
+    const symLoopRes = await defaultGitExec(process.cwd(), ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: `${symLoopDir}${delimiter}${goodFallbackDir}` },
+    });
+    expect(symLoopRes.code).not.toBe(0);
+    expect(symLoopRes.errorCode).toBe("ELOOP");
+
+    // S2 (argv[0] basename): Preserve `git` basename across a symlink pointing to `git-versioned`.
+    const versionedRoot = await mkdtemp(join(tmpdir(), "ship-ge-s2ver-"));
+    dirs.push(versionedRoot);
+    const verTargetDir = join(versionedRoot, "target");
+    const verBinDir = join(versionedRoot, "bin");
+    await mkdir(verTargetDir, { recursive: true });
+    await mkdir(verBinDir, { recursive: true });
+    const { stdout: whichGitOut } = await execFileAsync("which", ["git"]);
+    const verGitBin = join(verTargetDir, "git-versioned");
+    await copyFile(whichGitOut.trim(), verGitBin);
+    await chmod(verGitBin, 0o755);
+    await symlink(verGitBin, join(verBinDir, "git"));
+    const verRepo = await initEmptyRepo();
+    const verRes = await defaultGitExec(verRepo, ["rev-parse", "--is-inside-work-tree"], {
+      env: { ...isolatedGitEnv(verRepo), PATH: verBinDir },
+    });
+    expect(verRes.code).toBe(0);
+    expect(verRes.stdout.trim()).toBe("true");
 
     const mockBinDir = await mkdtemp(join(tmpdir(), "ship-ge-mockgit-"));
     dirs.push(mockBinDir);
@@ -915,6 +953,35 @@ describe("git-exec and process runner", () => {
       expect(orphanPid).toBeGreaterThan(0);
       pidsToCleanup.push(orphanPid);
       expect(isPidAlive(orphanPid)).toBe(false);
+
+      // S3: Inherited stdout held by a same-group descendant tears down on leader exit without ETIMEDOUT.
+      const inheritOrphanFile = join(dir, "inherit-orphan.pid");
+      const inheritLeaderScript = `
+        const { spawn } = require("node:child_process");
+        const fs = require("node:fs");
+        spawn(
+          process.execPath,
+          ["-e", 'process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(0), 10000);', ${JSON.stringify(inheritOrphanFile)}],
+          { stdio: "inherit" },
+        );
+        const timer = setInterval(() => {
+          if (fs.existsSync(${JSON.stringify(inheritOrphanFile)})) {
+            clearInterval(timer);
+            process.stdout.write("leader-stdout\\n", () => process.exit(0));
+          }
+        }, 5);
+      `;
+      const inheritRes = await runProcess(process.execPath, ["-e", inheritLeaderScript], {
+        cwd: dir,
+        timeoutMs: 350,
+      });
+      expect(inheritRes.code).toBe(0);
+      expect(inheritRes.errorCode).toBeUndefined();
+      expect(inheritRes.stdout.trim()).toBe("leader-stdout");
+      const inheritOrphanPid = Number.parseInt((await readFile(inheritOrphanFile, "utf8")).trim(), 10);
+      expect(inheritOrphanPid).toBeGreaterThan(0);
+      pidsToCleanup.push(inheritOrphanPid);
+      expect(isPidAlive(inheritOrphanPid)).toBe(false);
     } finally {
       for (const pid of pidsToCleanup) {
         try {
