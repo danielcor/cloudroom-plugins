@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   defaultGitExec,
@@ -152,6 +152,9 @@ describe("git-exec and process runner", () => {
       ["reflog", "show"],
       ["blame", "file.txt"],
       ["grep", "hello"],
+      ["ls-files"],
+      ["ls-files", "-z"],
+      ["ls-files", "--cached"],
       ["ls-files", "-m"],
       ["ls-files", "--modified"],
       ["config", "user.name", "evil"],
@@ -203,10 +206,11 @@ describe("git-exec and process runner", () => {
     expect(eofRes.stdout).toBe("eof");
   });
 
-  it("enforces Git >= 2.45.0, strips inherited Git env, and makes GIT_NO_LAZY_FETCH authoritative (S5)", async () => {
-    expect(parseGitVersion("git version 2.45.0")).toEqual({ major: 2, minor: 45, patch: 0 });
+  it("enforces Git >= 2.45.1, bypasses PATH=. cache collisions, and blocks lazy fetch in partial clones (S5)", async () => {
+    expect(parseGitVersion("git version 2.45.1")).toEqual({ major: 2, minor: 45, patch: 1 });
     expect(isSupportedGitVersion("git version 2.43.2")).toBe(false);
-    expect(isSupportedGitVersion("git version 2.45.0")).toBe(true);
+    expect(isSupportedGitVersion("git version 2.45.0")).toBe(false);
+    expect(isSupportedGitVersion("git version 2.45.1")).toBe(true);
     expect(isSupportedGitVersion("git version 2.56.1")).toBe(true);
     expect(isSupportedGitVersion("git version 3.0.0")).toBe(true);
 
@@ -214,7 +218,7 @@ describe("git-exec and process runner", () => {
     dirs.push(oldBinDir);
     await writeFile(
       join(oldBinDir, "git"),
-      "#!/bin/sh\necho 'git version 2.43.0'\n",
+      "#!/bin/sh\necho 'git version 2.45.0'\n",
       { mode: 0o755 },
     );
     const oldRes = await defaultGitExec(process.cwd(), ["rev-parse", "HEAD"], {
@@ -222,6 +226,30 @@ describe("git-exec and process runner", () => {
     });
     expect(oldRes.code).not.toBe(0);
     expect(oldRes.errorCode).toBe("ENOTSUP");
+
+    // PATH=. across two different working directories must never reuse cached binary identity.
+    const dotNewDir = await mkdtemp(join(tmpdir(), "ship-ge-dotnew-"));
+    const dotOldDir = await mkdtemp(join(tmpdir(), "ship-ge-dotold-"));
+    dirs.push(dotNewDir, dotOldDir);
+    await writeFile(
+      join(dotNewDir, "git"),
+      '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "git version 2.56.1"; exit 0; fi\necho "true"\n',
+      { mode: 0o755 },
+    );
+    await writeFile(
+      join(dotOldDir, "git"),
+      '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "git version 2.39.5"; exit 0; fi\necho "should-not-run"\n',
+      { mode: 0o755 },
+    );
+    const dotOkRes = await defaultGitExec(dotNewDir, ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: "." },
+    });
+    expect(dotOkRes.code).toBe(0);
+    const dotOldRes = await defaultGitExec(dotOldDir, ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: "." },
+    });
+    expect(dotOldRes.code).not.toBe(0);
+    expect(dotOldRes.errorCode).toBe("ENOTSUP");
 
     const mockBinDir = await mkdtemp(join(tmpdir(), "ship-ge-mockgit-"));
     dirs.push(mockBinDir);
@@ -284,11 +312,11 @@ describe("git-exec and process runner", () => {
       expect(resB.stdout.trim()).toBe(join(repoB, ".git"));
       expect((await defaultGitExec(repoB, ["config", "--get", "ship.indexed"])).code).toBe(1);
       expect((await defaultGitExec(repoB, ["config", "--get", "ship.param"])).code).toBe(1);
-      expect((await defaultGitExec(repoB, ["ls-files"])).code).toBe(0);
+      expect((await defaultGitExec(repoB, ["rev-parse", "--is-inside-work-tree"])).code).toBe(0);
 
       delete process.env.GIT_GLOB_PATHSPECS;
       process.env.GIT_ICASE_PATHSPECS = "1";
-      expect((await defaultGitExec(repoB, ["ls-files"])).code).toBe(0);
+      expect((await defaultGitExec(repoB, ["rev-parse", "--is-inside-work-tree"])).code).toBe(0);
 
       const resExplicitA = await defaultGitExec(repoB, ["rev-parse", "--path-format=absolute", "--git-dir"], {
         env: { GIT_DIR: join(repoA, ".git") },
@@ -301,6 +329,86 @@ describe("git-exec and process runner", () => {
         else process.env[k] = v;
       }
     }
+
+    // Real partial clone (--filter=blob:none): positive control fetches via uploadpack, defaultGitExec does not.
+    const originRepo = await initEmptyRepo();
+    const originEnv = isolatedGitEnv(originRepo);
+    await execFileAsync("git", ["config", "uploadpack.allowFilter", "true"], {
+      cwd: originRepo,
+      env: originEnv,
+    });
+    await execFileAsync("git", ["config", "uploadpack.allowAnySHA1InWant", "true"], {
+      cwd: originRepo,
+      env: originEnv,
+    });
+    await writeFile(join(originRepo, "blob.txt"), "promisor-blob-data\n", "utf8");
+    await gitCommitAll(originRepo, "init", originEnv);
+
+    const partialBase = await mkdtemp(join(tmpdir(), "ship-ge-partial-"));
+    dirs.push(partialBase);
+    const partial1 = join(partialBase, "clone1");
+    const partial2 = join(partialBase, "clone2");
+    const upSentinel = join(partialBase, "uploadpack.ran");
+    const upScript = join(partialBase, "uploadpack.sh");
+    await writeFile(
+      upScript,
+      `#!/bin/sh\nprintf 'fetched\\n' > ${JSON.stringify(upSentinel)}\nexec git-upload-pack "$@"\n`,
+      { mode: 0o755 },
+    );
+
+    await execFileAsync(
+      "git",
+      [
+        "-c",
+        "protocol.file.allow=always",
+        "clone",
+        "--no-local",
+        "--filter=blob:none",
+        "--no-checkout",
+        `file://${originRepo}`,
+        partial1,
+      ],
+      { cwd: partialBase, env: isolatedGitEnv(partialBase) },
+    );
+    await execFileAsync("git", ["config", "remote.origin.uploadpack", upScript], {
+      cwd: partial1,
+      env: isolatedGitEnv(partial1),
+    });
+    await execFileAsync("git", ["cat-file", "-p", "HEAD:blob.txt"], {
+      cwd: partial1,
+      env: { ...isolatedGitEnv(partial1), GIT_ALLOW_PROTOCOL: "file" },
+    });
+    expect(existsSync(upSentinel)).toBe(true);
+    await rm(upSentinel, { force: true });
+
+    await execFileAsync(
+      "git",
+      [
+        "-c",
+        "protocol.file.allow=always",
+        "clone",
+        "--no-local",
+        "--filter=blob:none",
+        "--no-checkout",
+        `file://${originRepo}`,
+        partial2,
+      ],
+      { cwd: partialBase, env: isolatedGitEnv(partialBase) },
+    );
+    await execFileAsync("git", ["config", "remote.origin.uploadpack", upScript], {
+      cwd: partial2,
+      env: isolatedGitEnv(partial2),
+    });
+    const noFetchEnv = { ...isolatedGitEnv(partial2), GIT_ALLOW_PROTOCOL: "file" };
+    const noFetchCat = await defaultGitExec(partial2, ["cat-file", "-p", "HEAD:blob.txt"], {
+      env: noFetchEnv,
+    });
+    expect(noFetchCat.code).not.toBe(0);
+    const noFetchDt = await defaultGitExec(partial2, ["diff-tree", "-p", "--root", "HEAD"], {
+      env: noFetchEnv,
+    });
+    expect(noFetchDt.code).not.toBe(0);
+    expect(existsSync(upSentinel)).toBe(false);
   });
 
   it("blocks ext-diff, textconv, gpg verification, and leaves index unchanged on stat-only edits (S1/S6/S10/S16/S17)", async () => {
@@ -384,28 +492,53 @@ describe("git-exec and process runner", () => {
     await utimes(join(repo, "file.txt"), future, future);
 
     expect((await defaultGitExec(repo, ["diff-tree", "-r", first, second], { env })).code).toBe(0);
-    expect((await defaultGitExec(repo, ["ls-files", "-z"], { env })).code).toBe(0);
+    expect((await defaultGitExec(repo, ["rev-parse", "HEAD"], { env })).code).toBe(0);
     expect((await defaultGitExec(repo, ["ls-tree", "-r", "HEAD"], { env })).code).toBe(0);
     const indexAfter = await readFile(indexPath);
     expect(Buffer.compare(indexBefore, indexAfter)).toBe(0);
+
+    // S4: split-index sharedindex.* mtime and .git/index bytes must remain untouched across plumbing reads.
+    await execFileAsync("git", ["update-index", "--split-index"], { cwd: repo, env });
+    const sharedFile = (await readdir(join(repo, ".git"))).find((f) => f.startsWith("sharedindex."));
+    expect(sharedFile).toBeDefined();
+    const sharedPath = join(repo, ".git", sharedFile!);
+    const oldTime = new Date("2020-01-01T00:00:00Z");
+    await utimes(sharedPath, oldTime, oldTime);
+    const sharedMtimeBefore = (await stat(sharedPath)).mtimeMs;
+    const splitIndexBefore = await readFile(indexPath);
+
+    expect((await defaultGitExec(repo, ["diff-tree", "-r", first, second], { env })).code).toBe(0);
+    expect((await defaultGitExec(repo, ["diff-tree", "-p", second], { env })).code).toBe(0);
+    expect((await defaultGitExec(repo, ["rev-parse", "HEAD"], { env })).code).toBe(0);
+    await defaultGitExec(repo, ["rev-parse", ":file.txt"], { env });
+    expect((await defaultGitExec(repo, ["cat-file", "-p", "HEAD:file.txt"], { env })).code).toBe(0);
+    await defaultGitExec(repo, ["cat-file", "-p", ":file.txt"], { env });
+    expect((await defaultGitExec(repo, ["ls-tree", "-r", "HEAD"], { env })).code).toBe(0);
+
+    expect((await stat(sharedPath)).mtimeMs).toBe(sharedMtimeBefore);
+    expect(Buffer.compare(splitIndexBefore, await readFile(indexPath))).toBe(0);
   });
 
-  it("isolates merge-tree writes to scratch objects and disables merge drivers and renormalize filters (S2/S3/S7/S10)", async () => {
+  it("isolates merge-tree writes, preserves SHA-256 and built-in merge=union, and converts TMPDIR errors to ExecResult (S2/S3/S7/S10/S13/S14/S15)", async () => {
     const repo = await initEmptyRepo();
     const scratchBare = await initEmptyRepo(true);
+    const implicitBare = await initEmptyRepo(true);
+    const nonRepoDir = await mkdtemp(join(tmpdir(), "ship-ge-nonrepo-"));
     const sentinelDir = await mkdtemp(join(tmpdir(), "ship-ge-mt-sentinels-"));
-    dirs.push(sentinelDir);
+    dirs.push(nonRepoDir, sentinelDir);
     const env = isolatedGitEnv(repo);
 
-    await writeFile(join(repo, ".gitattributes"), "*.drv merge=evil\n*.ren filter=evil\n", "utf8");
+    await writeFile(join(repo, ".gitattributes"), "*.drv merge=evil\n*.ren filter=evil\n*.union merge=union\n", "utf8");
     await writeFile(join(repo, "a.drv"), "base line\n", "utf8");
     await writeFile(join(repo, "r.ren"), "line1\nline2\nline3\n", "utf8");
+    await writeFile(join(repo, "u.union"), "top\n", "utf8");
     await writeFile(join(repo, "clean.txt"), "base clean\n", "utf8");
     const baseSha = await gitCommitAll(repo, "base", env);
 
     await execFileAsync("git", ["checkout", "-b", "branch-a"], { cwd: repo, env });
     await writeFile(join(repo, "a.drv"), "from branch a\n", "utf8");
     await writeFile(join(repo, "r.ren"), "line1-a\nline2\nline3\n", "utf8");
+    await writeFile(join(repo, "u.union"), "top\nfrom-a\n", "utf8");
     const shaA = await gitCommitAll(repo, "a", env);
 
     await execFileAsync("git", ["checkout", "-b", "branch-b", baseSha], { cwd: repo, env });
@@ -413,9 +546,18 @@ describe("git-exec and process runner", () => {
     await writeFile(join(repo, "r.ren"), "line1\nline2\nline3-b\n", "utf8");
     const shaConflict = await gitCommitAll(repo, "b conflict", env);
 
+    await execFileAsync("git", ["checkout", "-b", "branch-u", baseSha], { cwd: repo, env });
+    await writeFile(join(repo, "u.union"), "top\nfrom-b\n", "utf8");
+    const shaUnion = await gitCommitAll(repo, "u union", env);
+
     await execFileAsync("git", ["checkout", "-b", "branch-c", baseSha], { cwd: repo, env });
     await writeFile(join(repo, "clean.txt"), "from branch c\n", "utf8");
     const shaClean = await gitCommitAll(repo, "c clean", env);
+
+    await execFileAsync("git", ["push", implicitBare, `${shaA}:refs/heads/a`, `${shaClean}:refs/heads/c`], {
+      cwd: repo,
+      env,
+    });
 
     const mergeSentinel = join(sentinelDir, "merge-driver.ran");
     const cleanSentinel = join(sentinelDir, "renorm-clean.ran");
@@ -447,30 +589,49 @@ describe("git-exec and process runner", () => {
     await rm(mergeSentinel, { force: true });
     await rm(cleanSentinel, { force: true });
 
-    // Missing, repo-internal, or bare-repo GIT_OBJECT_DIRECTORY must be rejected with EINVAL.
-    const noScratch = await defaultGitExec(repo, ["merge-tree", "--write-tree", shaA, shaClean], { env });
-    expect(noScratch.code).not.toBe(0);
-    expect(noScratch.errorCode).toBe("EINVAL");
+    // S7: Reject missing, repo-internal, ..scratch, worktree-internal, bare-repo (explicit & implicit), and non-repo cwd.
+    const dotDotScratch = join(repo, "..scratch");
+    const subScratch = join(repo, "sub-scratch");
+    await mkdir(dotDotScratch, { recursive: true });
+    await mkdir(subScratch, { recursive: true });
 
-    const sameObjDir = await defaultGitExec(repo, ["merge-tree", "--write-tree", shaA, shaClean], {
-      env: { ...env, GIT_OBJECT_DIRECTORY: join(repo, ".git", "objects") },
-    });
-    expect(sameObjDir.code).not.toBe(0);
-    expect(sameObjDir.errorCode).toBe("EINVAL");
+    const externalScratch = await mkdtemp(join(tmpdir(), "ship-ge-ext-scratch-"));
+    dirs.push(externalScratch);
 
-    const bareRepoDirReject = await defaultGitExec(
-      scratchBare,
-      ["--git-dir", scratchBare, "merge-tree", "--write-tree", shaA, shaClean],
+    for (const [labelCwd, extraArgs, scratchPath, extraAlt] of [
+      [repo, [] as string[], "", undefined],
+      [repo, [] as string[], join(repo, ".git", "objects"), undefined],
+      [repo, [] as string[], dotDotScratch, undefined],
+      [repo, [] as string[], subScratch, undefined],
+      [scratchBare, ["--git-dir", scratchBare], join(scratchBare, "objects"), join(repo, ".git", "objects")],
+      [nonRepoDir, [] as string[], externalScratch, join(repo, ".git", "objects")],
+    ] as const) {
+      const rej = await defaultGitExec(labelCwd, [...extraArgs, "merge-tree", "--write-tree", shaA, shaClean], {
+        env: {
+          ...env,
+          ...(scratchPath ? { GIT_OBJECT_DIRECTORY: scratchPath } : {}),
+          ...(extraAlt ? { GIT_ALTERNATE_OBJECT_DIRECTORIES: extraAlt } : {}),
+        },
+      });
+      expect(rej.code).not.toBe(0);
+      expect(rej.errorCode).toBe("EINVAL");
+    }
+
+    const implicitBareBefore = await listObjectEntries(join(implicitBare, "objects"));
+    const implicitBareReject = await defaultGitExec(
+      implicitBare,
+      ["merge-tree", "--write-tree", shaA, shaClean],
       {
         env: {
           ...env,
-          GIT_OBJECT_DIRECTORY: join(scratchBare, "objects"),
+          GIT_OBJECT_DIRECTORY: join(implicitBare, "objects"),
           GIT_ALTERNATE_OBJECT_DIRECTORIES: join(repo, ".git", "objects"),
         },
       },
     );
-    expect(bareRepoDirReject.code).not.toBe(0);
-    expect(bareRepoDirReject.errorCode).toBe("EINVAL");
+    expect(implicitBareReject.code).not.toBe(0);
+    expect(implicitBareReject.errorCode).toBe("EINVAL");
+    expect(await listObjectEntries(join(implicitBare, "objects"))).toEqual(implicitBareBefore);
 
     const repoObjectsBefore = await listObjectEntries(join(repo, ".git", "objects"));
 
@@ -491,14 +652,39 @@ describe("git-exec and process runner", () => {
     const conflictTreeSha = conflictRes.stdout.split("\n")[0]?.trim() ?? "";
     expect(conflictTreeSha).toMatch(/^[0-9a-f]{40,}$/u);
 
+    // S13: Symbolic refs (HEAD and branch names) resolve in the source repository.
+    const symRes = await defaultGitExec(repo, ["merge-tree", "--write-tree", "HEAD", "branch-a"], {
+      env: { ...env, GIT_OBJECT_DIRECTORY: scratchObjDir },
+    });
+    expect(symRes.code).toBe(0);
+    expect(symRes.stdout.split("\n")[0]?.trim() ?? "").toMatch(/^[0-9a-f]{40,}$/u);
+
+    // S14: Built-in merge=union attribute from tracked .gitattributes merges competing additions cleanly.
+    const unionRes = await defaultGitExec(repo, ["merge-tree", "--write-tree", shaA, shaUnion], {
+      env: { ...env, GIT_CONFIG: maliciousGitConfig, GIT_OBJECT_DIRECTORY: scratchObjDir },
+    });
+    expect(unionRes.code).toBe(0);
+    const unionTreeSha = unionRes.stdout.split("\n")[0]?.trim() ?? "";
+    expect(unionTreeSha).toMatch(/^[0-9a-f]{40,}$/u);
+    const unionBlob = await defaultGitExec(repo, ["cat-file", "-p", `${unionTreeSha}:u.union`], {
+      env: {
+        ...env,
+        GIT_OBJECT_DIRECTORY: scratchObjDir,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: join(repo, ".git", "objects"),
+      },
+    });
+    expect(unionBlob.code).toBe(0);
+    expect(unionBlob.stdout).toContain("from-a");
+    expect(unionBlob.stdout).toContain("from-b");
+
     expect(existsSync(mergeSentinel)).toBe(false);
     expect(existsSync(cleanSentinel)).toBe(false);
     expect(await listObjectEntries(join(repo, ".git", "objects"))).toEqual(repoObjectsBefore);
 
-    // Pattern 2: plain scratch object dir (not a git repo) with explicit GIT_ALTERNATE_OBJECT_DIRECTORIES.
+    // Pattern 2: explicit scratch object dir + GIT_ALTERNATE_OBJECT_DIRECTORIES rooted at source repo.
     const scratchObjDir2 = await mkdtemp(join(tmpdir(), "ship-ge-scratch-obj2-"));
     dirs.push(scratchObjDir2);
-    const altRes = await defaultGitExec(scratchObjDir2, ["merge-tree", "--write-tree", shaA, shaClean], {
+    const altRes = await defaultGitExec(repo, ["merge-tree", "--write-tree", shaA, shaClean], {
       env: {
         ...env,
         GIT_OBJECT_DIRECTORY: scratchObjDir2,
@@ -524,6 +710,60 @@ describe("git-exec and process runner", () => {
     expect(existsSync(mergeSentinel)).toBe(false);
     expect(existsSync(cleanSentinel)).toBe(false);
     expect(await listObjectEntries(join(repo, ".git", "objects"))).toEqual(repoObjectsBefore);
+
+    // S13: SHA-256 repository object-format support.
+    const sha256Repo = await mkdtemp(join(tmpdir(), "ship-ge-sha256-"));
+    const sha256Scratch = await mkdtemp(join(tmpdir(), "ship-ge-sha256-obj-"));
+    dirs.push(sha256Repo, sha256Scratch);
+    const sha256Env = isolatedGitEnv(sha256Repo);
+    await execFileAsync("git", ["init", "--object-format=sha256", "-b", "main"], { cwd: sha256Repo, env: sha256Env });
+    await writeFile(join(sha256Repo, "base.txt"), "base\n", "utf8");
+    const s256Base = await gitCommitAll(sha256Repo, "base", sha256Env);
+    await execFileAsync("git", ["checkout", "-b", "s256-a"], { cwd: sha256Repo, env: sha256Env });
+    await writeFile(join(sha256Repo, "a.txt"), "a\n", "utf8");
+    const s256A = await gitCommitAll(sha256Repo, "a", sha256Env);
+    await execFileAsync("git", ["checkout", "-b", "s256-b", s256Base], { cwd: sha256Repo, env: sha256Env });
+    await writeFile(join(sha256Repo, "b.txt"), "b\n", "utf8");
+    const s256B = await gitCommitAll(sha256Repo, "b", sha256Env);
+
+    const sha256Mt = await defaultGitExec(sha256Repo, ["merge-tree", "--write-tree", s256A, s256B], {
+      env: { ...sha256Env, GIT_OBJECT_DIRECTORY: sha256Scratch },
+    });
+    expect(sha256Mt.code).toBe(0);
+    const sha256Tree = sha256Mt.stdout.split("\n")[0]?.trim() ?? "";
+    expect(sha256Tree).toMatch(/^[0-9a-f]{64}$/u);
+    const sha256Dt = await defaultGitExec(
+      sha256Repo,
+      ["diff-tree", "-r", s256A, sha256Tree],
+      {
+        env: {
+          ...sha256Env,
+          GIT_OBJECT_DIRECTORY: sha256Scratch,
+          GIT_ALTERNATE_OBJECT_DIRECTORIES: join(sha256Repo, ".git", "objects"),
+        },
+      },
+    );
+    expect(sha256Dt.code).toBe(0);
+
+    // S15: Unusable TMPDIR returns structured ExecResult values rather than rejecting.
+    const badTmpFile = join(sentinelDir, "not-a-dir");
+    await writeFile(badTmpFile, "file\n", "utf8");
+    const savedTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = badTmpFile;
+    try {
+      const tmpFailPlumbing = await defaultGitExec(repo, ["diff-tree", "-r", shaA, shaClean], { env });
+      expect(tmpFailPlumbing.code).not.toBe(0);
+      expect(tmpFailPlumbing.errorCode).toBe("ENOTDIR");
+
+      const tmpFailMt = await defaultGitExec(repo, ["merge-tree", "--write-tree", shaA, shaClean], {
+        env: { ...env, GIT_OBJECT_DIRECTORY: scratchObjDir },
+      });
+      expect(tmpFailMt.code).not.toBe(0);
+      expect(tmpFailMt.errorCode).toBe("ENOTDIR");
+    } finally {
+      if (savedTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmpdir;
+    }
   });
 
   it("forcibly kills SIGTERM-ignoring children on maxBuffer overflow even with timeout disabled (S20)", async () => {

@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export interface ExecResult {
   code: number;
@@ -96,6 +97,15 @@ const REPO_LOCAL_GIT_ENV_KEYS = new Set([
   "GIT_ASKPASS",
 ]);
 
+const NON_REPO_CLEAR_KEYS = new Set([
+  "GIT_DIR",
+  "GIT_COMMON_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+]);
+
 const GIT_CONFIG_INDEXED_RE = /^GIT_CONFIG_(?:KEY|VALUE)_/u;
 
 function stripRepoLocalGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -133,10 +143,20 @@ function cleanInternalConfigEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
+/** Remove repo-pointing environment variables in addition to internal config overrides. */
+function cleanNoRepoEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out = cleanInternalConfigEnv(env);
+  for (const k of NON_REPO_CLEAR_KEYS) {
+    delete out[k];
+  }
+  return out;
+}
+
 const MIN_GIT_MAJOR = 2;
 const MIN_GIT_MINOR = 45;
+const MIN_GIT_PATCH = 1;
 const GIT_VERSION_RE = /\bgit version (\d+)\.(\d+)(?:\.(\d+))?/u;
-const verifiedGitPathCache = new Set<string>();
+const verifiedGitBinaryCache = new Set<string>();
 
 export function parseGitVersion(output: string): { major: number; minor: number; patch: number } | null {
   const m = GIT_VERSION_RE.exec(output);
@@ -151,7 +171,36 @@ export function parseGitVersion(output: string): { major: number; minor: number;
 export function isSupportedGitVersion(output: string): boolean {
   const parsed = parseGitVersion(output);
   if (!parsed) return false;
-  return parsed.major > MIN_GIT_MAJOR || (parsed.major === MIN_GIT_MAJOR && parsed.minor >= MIN_GIT_MINOR);
+  if (parsed.major !== MIN_GIT_MAJOR) return parsed.major > MIN_GIT_MAJOR;
+  if (parsed.minor !== MIN_GIT_MINOR) return parsed.minor > MIN_GIT_MINOR;
+  return parsed.patch >= MIN_GIT_PATCH;
+}
+
+interface ResolvedGitBinary {
+  path: string;
+  cacheKey: string;
+}
+
+async function resolveGitBinary(cwd: string, pathEnv: string | undefined): Promise<ResolvedGitBinary | null> {
+  if (pathEnv === undefined || pathEnv === "") return null;
+  const exeName = process.platform === "win32" ? "git.exe" : "git";
+  for (const entry of pathEnv.split(delimiter)) {
+    const dir = resolve(cwd, entry || ".");
+    const candidate = join(dir, exeName);
+    try {
+      await access(candidate, constants.X_OK);
+      const st = await stat(candidate);
+      if (!st.isFile()) continue;
+      const realBin = await realpath(candidate);
+      return {
+        path: realBin,
+        cacheKey: `${realBin}\0${st.dev}:${st.ino}:${st.mtimeMs}:${st.size}`,
+      };
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 type StopReason = "timeout" | "abort" | "maxBuffer";
@@ -188,7 +237,7 @@ export function runProcess(
     return Promise.resolve(buildResult(1, Buffer.alloc(0), "Operation aborted.", "ABORT_ERR"));
   }
 
-  return new Promise((resolve) => {
+  return new Promise((resolvePromise) => {
     const timeoutMs = opts.timeoutMs ?? 20_000;
     const maxBuffer = opts.maxBuffer ?? 10 * 1024 * 1024;
     const useProcessGroup = process.platform !== "win32";
@@ -280,17 +329,19 @@ export function runProcess(
         const stderrText = Buffer.concat(stderrChunks).toString("utf8");
 
         if (stopReason === "abort") {
-          resolve(buildResult(1, stdoutBuf, stderrText || "Operation aborted.", "ABORT_ERR"));
+          resolvePromise(buildResult(1, stdoutBuf, stderrText || "Operation aborted.", "ABORT_ERR"));
           return;
         }
         if (stopReason === "timeout") {
           const timeoutMsg = `Process timed out after ${timeoutMs}ms.`;
-          resolve(buildResult(1, stdoutBuf, stderrText ? `${stderrText}\n${timeoutMsg}` : timeoutMsg, "ETIMEDOUT"));
+          resolvePromise(
+            buildResult(1, stdoutBuf, stderrText ? `${stderrText}\n${timeoutMsg}` : timeoutMsg, "ETIMEDOUT"),
+          );
           return;
         }
         if (stopReason === "maxBuffer") {
           const overflowMsg = `maxBuffer length (${maxBuffer}) exceeded.`;
-          resolve(
+          resolvePromise(
             buildResult(
               1,
               stdoutBuf,
@@ -305,14 +356,16 @@ export function runProcess(
         if (code === 0 && signal === null) {
           if (stdinErr || !writeComplete) {
             const msg = stdinErr?.message ?? "stdin closed before write finished";
-            resolve(buildResult(1, stdoutBuf, stderrText ? `${stderrText}\n${msg}` : msg, stdinErr?.code ?? "EPIPE"));
+            resolvePromise(
+              buildResult(1, stdoutBuf, stderrText ? `${stderrText}\n${msg}` : msg, stdinErr?.code ?? "EPIPE"),
+            );
             return;
           }
-          resolve(buildResult(0, stdoutBuf, stderrText));
+          resolvePromise(buildResult(0, stdoutBuf, stderrText));
           return;
         }
 
-        resolve(buildResult(code ?? 1, stdoutBuf, stderrText, stdinErr?.code));
+        resolvePromise(buildResult(code ?? 1, stdoutBuf, stderrText, stdinErr?.code));
       })();
     };
 
@@ -374,7 +427,7 @@ export function runProcess(
       });
     } catch (err) {
       const anyErr = err as NodeJS.ErrnoException;
-      resolve(buildResult(1, Buffer.alloc(0), anyErr.message, anyErr.code));
+      resolvePromise(buildResult(1, Buffer.alloc(0), anyErr.message, anyErr.code));
       return;
     }
 
@@ -403,7 +456,7 @@ export function runProcess(
       if (settled) return;
       settled = true;
       clearTimers();
-      resolve(buildResult(1, Buffer.alloc(0), err.message, err.code));
+      resolvePromise(buildResult(1, Buffer.alloc(0), err.message, err.code));
     });
 
     child.once("close", (code, signal) => {
@@ -619,29 +672,6 @@ const SUBCOMMAND_RULES = new Map<string, SubcommandRule>([
       ]),
     },
   ],
-  [
-    "ls-files",
-    {
-      exact: new Set([
-        "-z",
-        "-c",
-        "--cached",
-        "-o",
-        "--others",
-        "-d",
-        "--deleted",
-        "-s",
-        "--stage",
-        "-u",
-        "--unmerged",
-        "--exclude-standard",
-        "--error-unmatch",
-        "--full-name",
-        "--end-of-options",
-        "--",
-      ]),
-    },
-  ],
 ]);
 
 type ValidatedGitArgs =
@@ -762,7 +792,13 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
 
 function isSameOrDescendant(candidate: string, ancestor: string): boolean {
   const rel = relative(ancestor, candidate);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  if (rel === "") return true;
+  if (isAbsolute(rel)) return false;
+  return rel !== ".." && !rel.startsWith(`..${sep}`);
+}
+
+function pathsOverlap(a: string, b: string): boolean {
+  return isSameOrDescendant(a, b) || isSameOrDescendant(b, a);
 }
 
 async function resolveExistingDir(dirPath: string): Promise<string | null> {
@@ -777,19 +813,19 @@ async function resolveExistingDir(dirPath: string): Promise<string | null> {
 }
 
 async function ensureSupportedGitVersion(
+  gitBin: ResolvedGitBinary,
   cwd: string,
   env: NodeJS.ProcessEnv,
   signal: AbortSignal | undefined,
   timeoutMs: number,
   binary: boolean | undefined,
 ): Promise<{ ok: true } | { ok: false; result: ExecResult }> {
-  const pathKey = env.PATH ?? "";
-  if (verifiedGitPathCache.has(pathKey)) {
+  if (verifiedGitBinaryCache.has(gitBin.cacheKey)) {
     return { ok: true };
   }
-  const versionRes = await runProcess("git", ["--version"], {
+  const versionRes = await runProcess(gitBin.path, ["--version"], {
     cwd,
-    env: cleanInternalConfigEnv(env),
+    env: cleanNoRepoEnv(env),
     signal,
     timeoutMs,
   });
@@ -805,21 +841,52 @@ async function ensureSupportedGitVersion(
       result: {
         code: 1,
         stdout: "",
-        stderr: `Git >= 2.45.0 is required for GIT_NO_LAZY_FETCH support (found: ${versionRes.stdout.trim() || "unknown"}).`,
+        stderr: `Git >= 2.45.1 is required for authoritative GIT_NO_LAZY_FETCH support (found: ${versionRes.stdout.trim() || "unknown"}).`,
         errorCode: "ENOTSUP",
         ...(binary ? { stdoutBuffer: Buffer.alloc(0) } : {}),
       },
     };
   }
-  verifiedGitPathCache.add(pathKey);
+  verifiedGitBinaryCache.add(gitBin.cacheKey);
   return { ok: true };
 }
 
+async function resolveCommitInSource(
+  gitBin: string,
+  cwd: string,
+  globalPrefix: readonly string[],
+  rev: string,
+  sourceEnv: NodeJS.ProcessEnv,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  binary: boolean | undefined,
+): Promise<{ ok: true; sha: string } | { ok: false; result: ExecResult }> {
+  const res = await runProcess(
+    gitBin,
+    [...SAFE_GIT_FLAGS, ...globalPrefix, "rev-parse", "--verify", "--quiet", "--end-of-options", `${rev}^{commit}`],
+    {
+      cwd,
+      env: sourceEnv,
+      signal,
+      timeoutMs,
+    },
+  );
+  if (res.errorCode !== undefined || res.code !== 0) {
+    return {
+      ok: false,
+      result: binary ? { ...res, stdout: "", stdoutBuffer: Buffer.alloc(0) } : res,
+    };
+  }
+  return { ok: true, sha: res.stdout.trim() };
+}
+
 async function runIsolatedMergeTree(
+  gitBin: string,
   cwd: string,
   validated: Extract<ValidatedGitArgs, { ok: true }>,
   env: NodeJS.ProcessEnv,
   callerEnv: NodeJS.ProcessEnv | undefined,
+  emptyIdxPath: string,
   opts: GitExecOptions,
   deadline: number | undefined,
   totalTimeoutMs: number,
@@ -848,7 +915,7 @@ async function runIsolatedMergeTree(
       if (!resolvedAlt) {
         return failResult(1, `Invalid GIT_ALTERNATE_OBJECT_DIRECTORIES entry for merge-tree: ${part}`, "EINVAL");
       }
-      if (isSameOrDescendant(realObjDir, resolvedAlt) || isSameOrDescendant(resolvedAlt, realObjDir)) {
+      if (pathsOverlap(realObjDir, resolvedAlt)) {
         return failResult(1, "merge-tree scratch GIT_OBJECT_DIRECTORY must be distinct from alternate objects.", "EINVAL");
       }
       realAlts.push(resolvedAlt);
@@ -859,12 +926,48 @@ async function runIsolatedMergeTree(
     return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
   }
 
+  const scratchRepoProbe = await runProcess(
+    gitBin,
+    ["-c", "safe.bareRepository=all", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    {
+      cwd: realObjDir,
+      env: cleanNoRepoEnv(env),
+      signal: opts.signal,
+      timeoutMs: remainingTimeoutMs(),
+    },
+  );
+  if (scratchRepoProbe.errorCode !== undefined) {
+    return opts.binary ? { ...scratchRepoProbe, stdout: "", stdoutBuffer: Buffer.alloc(0) } : scratchRepoProbe;
+  }
+  if (scratchRepoProbe.code === 0) {
+    return failResult(1, "merge-tree scratch GIT_OBJECT_DIRECTORY must not be inside any Git repository.", "EINVAL");
+  }
+
+  if (deadline !== undefined && Date.now() >= deadline) {
+    return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+  }
+
+  const sourceEnv = mergeEnv(cleanInternalConfigEnv(env), {
+    GIT_OBJECT_DIRECTORY: undefined,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+    GIT_INDEX_FILE: emptyIdxPath,
+  });
+
   const repoInfoRes = await runProcess(
-    "git",
-    [...SAFE_GIT_FLAGS, ...validated.globalPrefix, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    gitBin,
+    [
+      ...SAFE_GIT_FLAGS,
+      ...validated.globalPrefix,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+      "--git-dir",
+      "--is-inside-work-tree",
+      "--show-object-format",
+    ],
     {
       cwd,
-      env: cleanInternalConfigEnv(env),
+      env: sourceEnv,
       signal: opts.signal,
       timeoutMs: remainingTimeoutMs(),
     },
@@ -872,70 +975,170 @@ async function runIsolatedMergeTree(
   if (repoInfoRes.errorCode !== undefined) {
     return opts.binary ? { ...repoInfoRes, stdout: "", stdoutBuffer: Buffer.alloc(0) } : repoInfoRes;
   }
-  if (repoInfoRes.code === 0) {
-    const commonDir = repoInfoRes.stdout.trim();
-    const realCommonDir = commonDir ? await resolveExistingDir(commonDir) : null;
-    if (realCommonDir) {
-      if (isSameOrDescendant(realObjDir, realCommonDir)) {
-        return failResult(
-          1,
-          "merge-tree scratch GIT_OBJECT_DIRECTORY must be distinct from the repository.",
-          "EINVAL",
-        );
-      }
-      if (realAlts.length === 0) {
-        const sourceObjects = await resolveExistingDir(resolve(realCommonDir, "objects"));
-        if (sourceObjects) {
-          realAlts.push(sourceObjects);
-        }
-      }
+  if (repoInfoRes.code !== 0) {
+    return failResult(
+      1,
+      repoInfoRes.stderr.trim() || "merge-tree requires a valid, unambiguously discovered source repository.",
+      "EINVAL",
+    );
+  }
+
+  const infoLines = repoInfoRes.stdout.trim().split(/\r?\n/u);
+  const realCommonDir = infoLines[0] ? await resolveExistingDir(infoLines[0].trim()) : null;
+  const realGitDir = infoLines[1] ? await resolveExistingDir(infoLines[1].trim()) : null;
+  const insideWorkTree = infoLines[2]?.trim() === "true";
+  const objectFormat = infoLines[3]?.trim() === "sha256" ? "sha256" : "sha1";
+
+  if (!realCommonDir || !realGitDir) {
+    return failResult(1, "merge-tree could not resolve source repository paths.", "EINVAL");
+  }
+  if (pathsOverlap(realObjDir, realCommonDir) || pathsOverlap(realObjDir, realGitDir)) {
+    return failResult(1, "merge-tree scratch GIT_OBJECT_DIRECTORY must be distinct from the repository.", "EINVAL");
+  }
+
+  if (insideWorkTree) {
+    if (deadline !== undefined && Date.now() >= deadline) {
+      return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+    }
+    const topRes = await runProcess(
+      gitBin,
+      [...SAFE_GIT_FLAGS, ...validated.globalPrefix, "rev-parse", "--path-format=absolute", "--show-toplevel"],
+      {
+        cwd,
+        env: sourceEnv,
+        signal: opts.signal,
+        timeoutMs: remainingTimeoutMs(),
+      },
+    );
+    if (topRes.errorCode !== undefined) {
+      return opts.binary ? { ...topRes, stdout: "", stdoutBuffer: Buffer.alloc(0) } : topRes;
+    }
+    const realTopLevel = topRes.code === 0 ? await resolveExistingDir(topRes.stdout.trim()) : null;
+    if (!realTopLevel) {
+      return failResult(1, "merge-tree could not resolve source worktree root.", "EINVAL");
+    }
+    if (pathsOverlap(realObjDir, realTopLevel)) {
+      return failResult(1, "merge-tree scratch GIT_OBJECT_DIRECTORY must be distinct from the worktree.", "EINVAL");
     }
   }
 
   if (realAlts.length === 0) {
-    return failResult(1, "merge-tree could not resolve source object store.", "EINVAL");
+    const sourceObjects = await resolveExistingDir(resolve(realCommonDir, "objects"));
+    if (!sourceObjects || pathsOverlap(realObjDir, sourceObjects)) {
+      return failResult(1, "merge-tree could not resolve source object store.", "EINVAL");
+    }
+    realAlts.push(sourceObjects);
+  }
+
+  const resolvedArgs: string[] = ["merge-tree"];
+  const resolvedPositionals: string[] = [];
+  let literalOnly = false;
+  for (let i = 1; i < validated.subcommandAndArgs.length; i++) {
+    const arg = validated.subcommandAndArgs[i]!;
+    if (!literalOnly && (arg === "--" || arg === "--end-of-options")) {
+      literalOnly = true;
+      resolvedArgs.push(arg);
+      continue;
+    }
+    if (!literalOnly && arg.startsWith("--merge-base=")) {
+      if (deadline !== undefined && Date.now() >= deadline) {
+        return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+      }
+      const baseRev = arg.slice("--merge-base=".length);
+      const baseRes = await resolveCommitInSource(
+        gitBin,
+        cwd,
+        validated.globalPrefix,
+        baseRev,
+        sourceEnv,
+        opts.signal,
+        remainingTimeoutMs(),
+        opts.binary,
+      );
+      if (!baseRes.ok) return baseRes.result;
+      resolvedArgs.push(`--merge-base=${baseRes.sha}`);
+      continue;
+    }
+    if (!literalOnly && arg.startsWith("-") && arg !== "-") {
+      resolvedArgs.push(arg);
+      continue;
+    }
+    if (deadline !== undefined && Date.now() >= deadline) {
+      return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+    }
+    const revRes = await resolveCommitInSource(
+      gitBin,
+      cwd,
+      validated.globalPrefix,
+      arg,
+      sourceEnv,
+      opts.signal,
+      remainingTimeoutMs(),
+      opts.binary,
+    );
+    if (!revRes.ok) return revRes.result;
+    resolvedPositionals.push(revRes.sha);
+    resolvedArgs.push(revRes.sha);
   }
 
   if (deadline !== undefined && Date.now() >= deadline) {
     return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
   }
 
-  const runnerGitDir = await mkdtemp(join(tmpdir(), "ship-ge-mt-"));
+  let runnerGitDir: string;
+  try {
+    runnerGitDir = await mkdtemp(join(tmpdir(), "ship-ge-mt-"));
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    return failResult(1, e.message, e.code ?? "EIO");
+  }
+
+  let res: ExecResult;
   try {
     await mkdir(join(runnerGitDir, "refs"), { recursive: true, mode: 0o700 });
     await writeFile(join(runnerGitDir, "HEAD"), "ref: refs/heads/main\n", "utf8");
-    await writeFile(join(runnerGitDir, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = true\n", "utf8");
+    const bareConfig =
+      objectFormat === "sha256"
+        ? "[core]\n\trepositoryformatversion = 1\n\tbare = true\n[extensions]\n\tobjectformat = sha256\n"
+        : "[core]\n\trepositoryformatversion = 0\n\tbare = true\n";
+    await writeFile(join(runnerGitDir, "config"), bareConfig, "utf8");
 
-    const sealedEnv = mergeEnv(cleanInternalConfigEnv(env), {
+    const sealedEnv = mergeEnv(cleanNoRepoEnv(env), {
       GIT_DIR: runnerGitDir,
       GIT_COMMON_DIR: runnerGitDir,
-      GIT_WORK_TREE: undefined,
-      GIT_INDEX_FILE: undefined,
       GIT_OBJECT_DIRECTORY: realObjDir,
       GIT_ALTERNATE_OBJECT_DIRECTORIES: realAlts.join(delimiter),
+      ...(resolvedPositionals[0] ? { GIT_ATTR_SOURCE: resolvedPositionals[0] } : {}),
     });
 
-    return await runProcess(
-      "git",
-      [...SAFE_GIT_FLAGS, "--git-dir", runnerGitDir, ...validated.subcommandAndArgs],
-      {
-        cwd: runnerGitDir,
-        stdin: opts.stdin,
-        binary: opts.binary,
-        timeoutMs: remainingTimeoutMs(),
-        maxBuffer: opts.maxBuffer,
-        signal: opts.signal,
-        env: sealedEnv,
-      },
-    );
-  } finally {
-    await rm(runnerGitDir, { recursive: true, force: true });
+    res = await runProcess(gitBin, [...SAFE_GIT_FLAGS, "--git-dir", runnerGitDir, ...resolvedArgs], {
+      cwd: runnerGitDir,
+      stdin: opts.stdin,
+      binary: opts.binary,
+      timeoutMs: remainingTimeoutMs(),
+      maxBuffer: opts.maxBuffer,
+      signal: opts.signal,
+      env: sealedEnv,
+    });
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    res = failResult(1, e.message, e.code ?? "EIO");
   }
+
+  try {
+    await rm(runnerGitDir, { recursive: true, force: true });
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (res.code === 0) {
+      res = failResult(1, e.message, e.code ?? "EIO");
+    }
+  }
+  return res;
 }
 
 /**
  * Execute an allowlisted read-only Git plumbing command (or isolated `merge-tree --write-tree`)
- * with Git >= 2.45 enforcement, authoritative `GIT_NO_LAZY_FETCH=1`, and repository callback hardening.
+ * using a single resolved Git >= 2.45.1 executable, isolated index metadata, and callback hardening.
  */
 export async function defaultGitExec(
   cwd: string,
@@ -970,48 +1173,91 @@ export async function defaultGitExec(
     return Math.max(1, deadline - Date.now());
   };
 
-  if (!validated.isVersionQuery) {
-    const versionCheck = await ensureSupportedGitVersion(
-      cwd,
-      env,
-      opts.signal,
-      remainingTimeoutMs(),
-      opts.binary,
-    );
-    if (!versionCheck.ok) {
-      return versionCheck.result;
-    }
+  const resolvedGit = await resolveGitBinary(cwd, env.PATH);
+  if (!resolvedGit) {
+    return failResult(1, "spawn git ENOENT", "ENOENT");
   }
 
-  if (deadline !== undefined && Date.now() >= deadline) {
-    return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
-  }
-
-  if (validated.isolatedMergeTree) {
-    return runIsolatedMergeTree(
-      cwd,
-      validated,
-      env,
-      opts.env,
-      opts,
-      deadline,
-      totalTimeoutMs,
-      remainingTimeoutMs,
-      failResult,
-    );
-  }
-
-  return runProcess(
-    "git",
-    [...SAFE_GIT_FLAGS, ...validated.globalPrefix, ...validated.subcommandAndArgs],
-    {
+  if (validated.isVersionQuery) {
+    return runProcess(resolvedGit.path, ["--version"], {
       cwd,
       stdin: opts.stdin,
       binary: opts.binary,
       timeoutMs: remainingTimeoutMs(),
       maxBuffer: opts.maxBuffer,
       signal: opts.signal,
-      env,
-    },
+      env: cleanNoRepoEnv(env),
+    });
+  }
+
+  const versionCheck = await ensureSupportedGitVersion(
+    resolvedGit,
+    cwd,
+    env,
+    opts.signal,
+    remainingTimeoutMs(),
+    opts.binary,
   );
+  if (!versionCheck.ok) {
+    return versionCheck.result;
+  }
+
+  if (deadline !== undefined && Date.now() >= deadline) {
+    return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+  }
+
+  let idxTmpDir: string;
+  try {
+    idxTmpDir = await mkdtemp(join(tmpdir(), "ship-ge-idx-"));
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    return failResult(1, e.message, e.code ?? "EIO");
+  }
+  const emptyIdxPath = join(idxTmpDir, "index");
+
+  let res: ExecResult;
+  try {
+    if (validated.isolatedMergeTree) {
+      res = await runIsolatedMergeTree(
+        resolvedGit.path,
+        cwd,
+        validated,
+        env,
+        opts.env,
+        emptyIdxPath,
+        opts,
+        deadline,
+        totalTimeoutMs,
+        remainingTimeoutMs,
+        failResult,
+      );
+    } else {
+      res = await runProcess(
+        resolvedGit.path,
+        [...SAFE_GIT_FLAGS, ...validated.globalPrefix, ...validated.subcommandAndArgs],
+        {
+          cwd,
+          stdin: opts.stdin,
+          binary: opts.binary,
+          timeoutMs: remainingTimeoutMs(),
+          maxBuffer: opts.maxBuffer,
+          signal: opts.signal,
+          env: mergeEnv(env, { GIT_INDEX_FILE: emptyIdxPath }),
+        },
+      );
+    }
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    res = failResult(1, e.message, e.code ?? "EIO");
+  }
+
+  try {
+    await rm(idxTmpDir, { recursive: true, force: true });
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (res.code === 0) {
+      res = failResult(1, e.message, e.code ?? "EIO");
+    }
+  }
+  return res;
 }
