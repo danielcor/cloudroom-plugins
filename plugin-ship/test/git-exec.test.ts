@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
@@ -193,6 +193,39 @@ describe("git-exec and process runner", () => {
     );
     expect(eofRes.code).toBe(0);
     expect(eofRes.stdout).toBe("eof");
+
+    // S2: addAbortListener must still trigger process termination when an earlier listener calls stopImmediatePropagation().
+    const s2Dir = await mkdtemp(join(tmpdir(), "ship-ge-s2-"));
+    dirs.push(s2Dir);
+    const s2PidFile = join(s2Dir, "child.pid");
+    const s2Ac = new AbortController();
+    s2Ac.signal.addEventListener("abort", (e) => e.stopImmediatePropagation());
+    let s2Pid = 0;
+    try {
+      const s2Promise = runProcess(
+        process.execPath,
+        [
+          "-e",
+          'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 10000);',
+          s2PidFile,
+        ],
+        { cwd: s2Dir, signal: s2Ac.signal, timeoutMs: 10_000 },
+      );
+      s2Pid = await waitForPidFile(s2PidFile);
+      s2Ac.abort();
+      const s2Res = await s2Promise;
+      expect(s2Res.code).not.toBe(0);
+      expect(s2Res.errorCode).toBe("ABORT_ERR");
+      expect(isPidAlive(s2Pid)).toBe(false);
+    } finally {
+      if (s2Pid > 0) {
+        try {
+          process.kill(s2Pid, "SIGKILL");
+        } catch {
+          // Already exited.
+        }
+      }
+    }
   });
 
   it("enforces Git >= 2.45.1, bypasses PATH=. cache collisions, and blocks lazy fetch in partial clones (S5)", async () => {
@@ -266,6 +299,47 @@ describe("git-exec and process runner", () => {
     });
     expect(downgradedInPlace.code).not.toBe(0);
     expect(downgradedInPlace.errorCode).toBe("ENOTSUP");
+
+    // S3: Long PATH lookup honors abort and timeout deadlines instead of falling through to ENOENT.
+    const longPath = Array.from({ length: 20_000 }, (_, i) => join(inPlaceDir, `missing-${i}`)).join(delimiter);
+    const s3TimeoutRes = await defaultGitExec(inPlaceDir, ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: longPath },
+      timeoutMs: 1,
+    });
+    expect(s3TimeoutRes.code).not.toBe(0);
+    expect(s3TimeoutRes.errorCode).toBe("ETIMEDOUT");
+
+    const s3Ac = new AbortController();
+    const abortTimer = setTimeout(() => s3Ac.abort(), 5);
+    const s3AbortRes = await defaultGitExec(inPlaceDir, ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: longPath },
+      signal: s3Ac.signal,
+      timeoutMs: 10_000,
+    });
+    clearTimeout(abortTimer);
+    expect(s3AbortRes.code).not.toBe(0);
+    expect(s3AbortRes.errorCode).toBe("ABORT_ERR");
+
+    // S4 (PATH traversal): Relative PATH=../bin through a symlinked working directory follows filesystem '..'.
+    const symRoot = await mkdtemp(join(tmpdir(), "ship-ge-s4sym-"));
+    dirs.push(symRoot);
+    const realParent = join(symRoot, "real", "parent");
+    const realWork = join(realParent, "work");
+    const realBin = join(realParent, "bin");
+    const linkWork = join(symRoot, "link-work");
+    await mkdir(realWork, { recursive: true });
+    await mkdir(realBin, { recursive: true });
+    await writeFile(
+      join(realBin, "git"),
+      '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "git version 2.56.1"; exit 0; fi\necho "symlink-ok"\n',
+      { mode: 0o755 },
+    );
+    await symlink(realWork, linkWork);
+    const symPathRes = await defaultGitExec(linkWork, ["rev-parse", "--is-inside-work-tree"], {
+      env: { PATH: "../bin" },
+    });
+    expect(symPathRes.code).toBe(0);
+    expect(symPathRes.stdout.trim()).toBe("symlink-ok");
 
     const mockBinDir = await mkdtemp(join(tmpdir(), "ship-ge-mockgit-"));
     dirs.push(mockBinDir);
@@ -541,13 +615,83 @@ describe("git-exec and process runner", () => {
     expect(Buffer.compare(splitIndexBefore, await readFile(indexPath))).toBe(0);
   });
 
-  it("converts temporary directory setup and cleanup failures into ExecResult diagnostics (S15)", async () => {
+  it("snapshots index state for staged .gitattributes, staged objects, and SHA-256 split-index without mutating repo files (S1/S4)", async () => {
+    const repo = await initEmptyRepo();
+    const env = isolatedGitEnv(repo);
+    await writeFile(join(repo, "file.txt"), "hello\n", "utf8");
+    const first = await gitCommitAll(repo, "init", env);
+    await writeFile(join(repo, "file.txt"), "world\n", "utf8");
+    const second = await gitCommitAll(repo, "second", env);
+
+    // Stage .gitattributes absent from the worktree and a staged-only blob absent from commits.
+    await writeFile(join(repo, ".gitattributes"), "*.txt -diff\n", "utf8");
+    await writeFile(join(repo, "staged.txt"), "staged-only\n", "utf8");
+    await execFileAsync("git", ["add", ".gitattributes", "staged.txt"], { cwd: repo, env });
+    await rm(join(repo, ".gitattributes"));
+
+    await execFileAsync("git", ["update-index", "--split-index"], { cwd: repo, env });
+    const sharedFile = (await readdir(join(repo, ".git"))).find((f) => f.startsWith("sharedindex."));
+    expect(sharedFile).toBeDefined();
+    const sharedPath = join(repo, ".git", sharedFile!);
+    const oldTime = new Date("2020-01-01T00:00:00Z");
+    await utimes(sharedPath, oldTime, oldTime);
+    const sharedMtimeBefore = (await stat(sharedPath)).mtimeMs;
+    const indexPath = join(repo, ".git", "index");
+    const splitIndexBefore = await readFile(indexPath);
+
+    const execDiff = await defaultGitExec(repo, ["diff-tree", "-p", first, second], { env });
+    expect(execDiff.code).toBe(0);
+    expect(execDiff.stdout).toContain("Binary files");
+
+    const batchStaged = await defaultGitExec(repo, ["cat-file", "--batch"], { env, stdin: ":staged.txt\n" });
+    expect(batchStaged.code).toBe(0);
+    expect(batchStaged.stdout).toContain("staged-only\n");
+    expect(batchStaged.stdout).not.toContain("missing");
+
+    const catStaged = await defaultGitExec(repo, ["cat-file", "-p", ":staged.txt"], { env });
+    expect(catStaged.code).toBe(0);
+    expect(catStaged.stdout).toBe("staged-only\n");
+
+    const revStaged = await defaultGitExec(repo, ["rev-parse", ":staged.txt"], { env });
+    expect(revStaged.code).toBe(0);
+    expect(revStaged.stdout.trim()).toMatch(/^[0-9a-f]{40}$/u);
+
+    await defaultGitExec(repo, ["for-each-ref", "--merged", ":staged.txt"], { env });
+
+    expect((await stat(sharedPath)).mtimeMs).toBe(sharedMtimeBefore);
+    expect(Buffer.compare(splitIndexBefore, await readFile(indexPath))).toBe(0);
+
+    const nativeDiff = await execFileAsync("git", ["diff-tree", "-p", first, second], { cwd: repo, env });
+    expect(execDiff.stdout).toBe(nativeDiff.stdout);
+
+    // SHA-256 split-index repository support.
+    const s256Repo = await mkdtemp(join(tmpdir(), "ship-ge-s256-split-"));
+    dirs.push(s256Repo);
+    const s256Env = isolatedGitEnv(s256Repo);
+    await execFileAsync("git", ["init", "--object-format=sha256", "-b", "main"], { cwd: s256Repo, env: s256Env });
+    await writeFile(join(s256Repo, "x.txt"), "s256\n", "utf8");
+    await gitCommitAll(s256Repo, "init", s256Env);
+    await execFileAsync("git", ["update-index", "--split-index"], { cwd: s256Repo, env: s256Env });
+    const s256Shared = (await readdir(join(s256Repo, ".git"))).find((f) => f.startsWith("sharedindex."));
+    expect(s256Shared).toBeDefined();
+    const s256SharedPath = join(s256Repo, ".git", s256Shared!);
+    await utimes(s256SharedPath, oldTime, oldTime);
+    const s256MtimeBefore = (await stat(s256SharedPath)).mtimeMs;
+
+    const s256Cat = await defaultGitExec(s256Repo, ["cat-file", "-p", ":x.txt"], { env: s256Env });
+    expect(s256Cat.code).toBe(0);
+    expect(s256Cat.stdout).toBe("s256\n");
+    expect((await stat(s256SharedPath)).mtimeMs).toBe(s256MtimeBefore);
+  });
+
+  it("converts temporary directory setup and cleanup failures into ExecResult diagnostics (S5/S15)", async () => {
     const repo = await initEmptyRepo();
     const env = isolatedGitEnv(repo);
     await writeFile(join(repo, "file.txt"), "one\n", "utf8");
     const first = await gitCommitAll(repo, "init", env);
     await writeFile(join(repo, "file.txt"), "two\n", "utf8");
     const second = await gitCommitAll(repo, "second", env);
+    await execFileAsync("git", ["config", "--global", "ship.globalKey", "global-ok"], { cwd: repo, env });
 
     const tmpFixtureDir = await mkdtemp(join(tmpdir(), "ship-ge-s15-"));
     dirs.push(tmpFixtureDir);
@@ -563,6 +707,12 @@ describe("git-exec and process runner", () => {
 
       const metadataStillOk = await defaultGitExec(repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], { env });
       expect(metadataStillOk.code).toBe(0);
+
+      const configGlobalOk = await defaultGitExec(repo, ["config", "--global", "--list"], { env });
+      expect(configGlobalOk.code).toBe(0);
+
+      const configListOk = await defaultGitExec(repo, ["config", "--list"], { env });
+      expect(configListOk.code).toBe(0);
     } finally {
       if (savedTmpdir === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = savedTmpdir;
@@ -579,6 +729,9 @@ describe("git-exec and process runner", () => {
         'if [ "$1" = "--version" ]; then',
         '  echo "git version 2.56.1"',
         "  exit 0",
+        "fi",
+        'if [ -z "$GIT_INDEX_FILE" ]; then',
+        "  exit 1",
         "fi",
         'chmod 0500 "$(dirname "$(dirname "$GIT_INDEX_FILE")")"',
         'if [ "$SHIP_TEST_FAIL" = "1" ]; then',

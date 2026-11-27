@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { addAbortListener } from "node:events";
 import { constants } from "node:fs";
-import { access, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, sep } from "node:path";
 
 export interface ExecResult {
   code: number;
@@ -110,21 +111,54 @@ export function isSupportedGitVersion(output: string): boolean {
   return parsed.patch >= MIN_GIT_PATCH;
 }
 
-async function resolveGitBinary(cwd: string, pathEnv: string | undefined): Promise<string | null> {
-  if (pathEnv === undefined || pathEnv === "") return null;
+function joinRawPath(base: string, part: string): string {
+  if (!base) return part;
+  return base.endsWith(sep) ? `${base}${part}` : `${base}${sep}${part}`;
+}
+
+type ResolveGitBinaryResult =
+  | { ok: true; path: string }
+  | { ok: false; reason: "enoent" | "abort" | "timeout" };
+
+async function resolveGitBinary(
+  cwd: string,
+  pathEnv: string | undefined,
+  signal: AbortSignal | undefined,
+  deadline: number | undefined,
+): Promise<ResolveGitBinaryResult> {
+  const checkCancelled = (): { ok: false; reason: "abort" | "timeout" } | null => {
+    if (signal?.aborted) return { ok: false, reason: "abort" };
+    if (deadline !== undefined && Date.now() >= deadline) return { ok: false, reason: "timeout" };
+    return null;
+  };
+
+  const initialCancelled = checkCancelled();
+  if (initialCancelled) return initialCancelled;
+  if (pathEnv === undefined || pathEnv === "") return { ok: false, reason: "enoent" };
+
   const exeName = process.platform === "win32" ? "git.exe" : "git";
+  const baseCwd = cwd || ".";
   for (const entry of pathEnv.split(delimiter)) {
-    const candidate = join(resolve(cwd, entry || "."), exeName);
+    const iterCancelled = checkCancelled();
+    if (iterCancelled) return iterCancelled;
+
+    const dir = entry === "" ? baseCwd : isAbsolute(entry) ? entry : joinRawPath(baseCwd, entry);
+    const candidate = joinRawPath(dir, exeName);
     try {
       await access(candidate, constants.X_OK);
       const st = await stat(candidate);
       if (!st.isFile()) continue;
-      return await realpath(candidate);
+      const realBin = await realpath(candidate);
+      const postCancelled = checkCancelled();
+      if (postCancelled) return postCancelled;
+      return { ok: true, path: realBin };
     } catch {
+      const postCancelled = checkCancelled();
+      if (postCancelled) return postCancelled;
       continue;
     }
   }
-  return null;
+  return checkCancelled() ?? { ok: false, reason: "enoent" };
 }
 
 type StopReason = "timeout" | "abort" | "maxBuffer";
@@ -175,7 +209,7 @@ export function runProcess(
     let timeoutTimer: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
     let cleanupTimer: NodeJS.Timeout | undefined;
-    let onAbort: (() => void) | undefined;
+    let abortDisposable: Disposable | undefined;
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -186,8 +220,9 @@ export function runProcess(
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (killTimer) clearTimeout(killTimer);
       if (cleanupTimer) clearTimeout(cleanupTimer);
-      if (opts.signal && onAbort) {
-        opts.signal.removeEventListener("abort", onAbort);
+      if (abortDisposable) {
+        abortDisposable[Symbol.dispose]();
+        abortDisposable = undefined;
       }
     };
 
@@ -395,8 +430,7 @@ export function runProcess(
       timeoutTimer.unref?.();
     }
     if (opts.signal) {
-      onAbort = () => startTermination("abort", 150);
-      opts.signal.addEventListener("abort", onAbort, { once: true });
+      abortDisposable = addAbortListener(opts.signal, () => startTermination("abort", 150));
     }
     if (child.stdin) {
       child.stdin.on("error", (e: NodeJS.ErrnoException) => {
@@ -592,8 +626,8 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
     isVersionQuery: false,
     globalPrefix,
     subcommandAndArgs: subArgs,
-    // Metadata-only rev-parse queries must observe real repo paths without touching split-index files.
-    needsIndexIsolation: !(sub === "rev-parse" && positionals.length === 0),
+    // Config and metadata-only rev-parse queries never touch index or split-index files.
+    needsIndexIsolation: sub !== "config" && !(sub === "rev-parse" && positionals.length === 0),
   };
 }
 
@@ -636,9 +670,197 @@ async function ensureSupportedGitVersion(
   return { ok: true };
 }
 
+const SHARED_INDEX_RE = /^sharedindex\.([0-9a-f]{40}|[0-9a-f]{64})$/u;
+
+function findReferencedSharedIndex(indexBuf: Buffer, sharedFiles: readonly string[]): string | null {
+  for (const file of sharedFiles) {
+    const m = SHARED_INDEX_RE.exec(file);
+    if (!m) continue;
+    const oid = Buffer.from(m[1]!, "hex");
+    let pos = indexBuf.indexOf(oid);
+    while (pos !== -1) {
+      if (pos >= 8 && indexBuf.toString("ascii", pos - 8, pos - 4) === "link") {
+        return file;
+      }
+      pos = indexBuf.indexOf(oid, pos + 1);
+    }
+  }
+  return null;
+}
+
+function stripTrailingEol(line: string): string {
+  return line.endsWith("\r") ? line.slice(0, -1) : line;
+}
+
+async function prepareIsolatedIndexSnapshot(
+  gitBin: string,
+  cwd: string,
+  globalPrefix: readonly string[],
+  env: NodeJS.ProcessEnv,
+  idxTmpDir: string,
+  opts: GitExecOptions,
+  deadline: number | undefined,
+  totalTimeoutMs: number,
+  remainingTimeoutMs: () => number,
+  failResult: (code: number, stderr: string, errorCode?: string) => ExecResult,
+): Promise<{ ok: true; indexPath: string } | { ok: false; result: ExecResult }> {
+  const checkCancelled = (): { ok: false; result: ExecResult } | null => {
+    if (opts.signal?.aborted) {
+      return { ok: false, result: failResult(1, "Operation aborted.", "ABORT_ERR") };
+    }
+    if (deadline !== undefined && Date.now() >= deadline) {
+      return { ok: false, result: failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT") };
+    }
+    return null;
+  };
+
+  const defaultSnapPath = join(idxTmpDir, "index");
+  const preCheck = checkCancelled();
+  if (preCheck) return preCheck;
+
+  const metaRes = await runProcess(
+    gitBin,
+    [
+      ...SAFE_GIT_FLAGS,
+      ...globalPrefix,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-dir",
+      "--git-path",
+      "index",
+      "--show-object-format",
+    ],
+    {
+      cwd,
+      env,
+      signal: opts.signal,
+      timeoutMs: remainingTimeoutMs(),
+    },
+  );
+  if (metaRes.errorCode !== undefined) {
+    return {
+      ok: false,
+      result: {
+        ...metaRes,
+        stdout: "",
+        ...(opts.binary ? { stdoutBuffer: Buffer.alloc(0) } : {}),
+      },
+    };
+  }
+  if (metaRes.code !== 0) {
+    // Non-repo or undiscoverable repo: fall back to empty temp index so the command emits native Git error.
+    return { ok: true, indexPath: defaultSnapPath };
+  }
+
+  const rawOut = metaRes.stdout.endsWith("\n") ? metaRes.stdout.slice(0, -1) : metaRes.stdout;
+  const lines = rawOut.split("\n").map(stripTrailingEol);
+  if (lines.length !== 3) {
+    return { ok: false, result: failResult(1, "Unable to parse repository index metadata.", "EINVAL") };
+  }
+  const [gitDir, sourceIndexPath, rawFormat] = lines as [string, string, string];
+  const objectFormat = rawFormat === "sha256" ? "sha256" : "sha1";
+
+  try {
+    const st = await stat(sourceIndexPath);
+    if (!st.isFile()) {
+      return { ok: false, result: failResult(1, "Repository index path is not a regular file.", "EINVAL") };
+    }
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === "ENOENT") {
+      return { ok: true, indexPath: defaultSnapPath };
+    }
+    return { ok: false, result: failResult(1, e.message, e.code ?? "EIO") };
+  }
+
+  let gitDirEntries: string[];
+  try {
+    gitDirEntries = await readdir(gitDir);
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    return { ok: false, result: failResult(1, e.message, e.code ?? "EIO") };
+  }
+
+  const sharedFiles = gitDirEntries.filter((name) => SHARED_INDEX_RE.test(name));
+  if (sharedFiles.length === 0) {
+    try {
+      await copyFile(sourceIndexPath, defaultSnapPath);
+      return { ok: true, indexPath: defaultSnapPath };
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      return { ok: false, result: failResult(1, e.message, e.code ?? "EIO") };
+    }
+  }
+
+  let indexBuf: Buffer;
+  try {
+    indexBuf = await readFile(sourceIndexPath);
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    return { ok: false, result: failResult(1, e.message, e.code ?? "EIO") };
+  }
+
+  const sharedFile = findReferencedSharedIndex(indexBuf, sharedFiles);
+  if (!sharedFile) {
+    try {
+      await writeFile(defaultSnapPath, indexBuf);
+      return { ok: true, indexPath: defaultSnapPath };
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      return { ok: false, result: failResult(1, e.message, e.code ?? "EIO") };
+    }
+  }
+
+  const postReadCheck = checkCancelled();
+  if (postReadCheck) return postReadCheck;
+
+  const snapGitDir = join(idxTmpDir, "gitdir");
+  const snapIndexPath = join(snapGitDir, "index");
+  try {
+    await mkdir(join(snapGitDir, "refs"), { recursive: true, mode: 0o700 });
+    await mkdir(join(snapGitDir, "objects"), { recursive: true, mode: 0o700 });
+    await writeFile(join(snapGitDir, "HEAD"), "ref: refs/heads/main\n", "utf8");
+    const snapConfig =
+      objectFormat === "sha256"
+        ? "[core]\n\trepositoryformatversion = 1\n\tbare = true\n[extensions]\n\tobjectformat = sha256\n"
+        : "[core]\n\trepositoryformatversion = 0\n\tbare = true\n";
+    await writeFile(join(snapGitDir, "config"), snapConfig, "utf8");
+    await writeFile(snapIndexPath, indexBuf);
+    await copyFile(join(gitDir, sharedFile), join(snapGitDir, sharedFile));
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    return { ok: false, result: failResult(1, e.message, e.code ?? "EIO") };
+  }
+
+  const preFlattenCheck = checkCancelled();
+  if (preFlattenCheck) return preFlattenCheck;
+
+  const flattenRes = await runProcess(
+    gitBin,
+    ["--no-pager", "-c", "core.fsmonitor=false", "-c", "core.splitIndex=false", "--git-dir", snapGitDir, "update-index", "--no-split-index"],
+    {
+      cwd: snapGitDir,
+      env: mergeEnv(cleanVersionProbeEnv(env), { GIT_DIR: snapGitDir, GIT_INDEX_FILE: snapIndexPath }),
+      signal: opts.signal,
+      timeoutMs: remainingTimeoutMs(),
+    },
+  );
+  if (flattenRes.errorCode !== undefined || flattenRes.code !== 0) {
+    return {
+      ok: false,
+      result: {
+        ...flattenRes,
+        stdout: "",
+        ...(opts.binary ? { stdoutBuffer: Buffer.alloc(0) } : {}),
+      },
+    };
+  }
+  return { ok: true, indexPath: snapIndexPath };
+}
+
 /**
  * Execute an allowlisted read-only Git plumbing command using an uncached Git >= 2.45.1
- * executable, isolated index metadata, and callback hardening.
+ * executable, isolated index snapshots, and callback hardening.
  */
 export async function defaultGitExec(
   cwd: string,
@@ -657,9 +879,20 @@ export async function defaultGitExec(
   if (!validated.ok) {
     return failResult(1, `Disallowed git option or subcommand: ${validated.disallowed}`, "EINVAL");
   }
-  if (opts.signal?.aborted) {
-    return failResult(1, "Operation aborted.", "ABORT_ERR");
-  }
+
+  const totalTimeoutMs = opts.timeoutMs ?? 20_000;
+  const deadline = totalTimeoutMs > 0 ? Date.now() + totalTimeoutMs : undefined;
+  const remainingTimeoutMs = (): number => (deadline === undefined ? 0 : Math.max(1, deadline - Date.now()));
+  const checkAbortOrTimeout = (): ExecResult | null => {
+    if (opts.signal?.aborted) return failResult(1, "Operation aborted.", "ABORT_ERR");
+    if (deadline !== undefined && Date.now() >= deadline) {
+      return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+    }
+    return null;
+  };
+
+  const initialErr = checkAbortOrTimeout();
+  if (initialErr) return initialErr;
 
   const env = mergeEnv(stripRepoLocalGitEnv(process.env), {
     ...opts.env,
@@ -669,12 +902,16 @@ export async function defaultGitExec(
     GIT_PAGER: "cat",
   });
 
-  const totalTimeoutMs = opts.timeoutMs ?? 20_000;
-  const deadline = totalTimeoutMs > 0 ? Date.now() + totalTimeoutMs : undefined;
-  const remainingTimeoutMs = (): number => (deadline === undefined ? 0 : Math.max(1, deadline - Date.now()));
+  const resolved = await resolveGitBinary(cwd, env.PATH, opts.signal, deadline);
+  if (!resolved.ok) {
+    if (resolved.reason === "abort") return failResult(1, "Operation aborted.", "ABORT_ERR");
+    if (resolved.reason === "timeout") return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
+    return failResult(1, "spawn git ENOENT", "ENOENT");
+  }
+  const gitBin = resolved.path;
 
-  const gitBin = await resolveGitBinary(cwd, env.PATH);
-  if (!gitBin) return failResult(1, "spawn git ENOENT", "ENOENT");
+  const preVersionErr = checkAbortOrTimeout();
+  if (preVersionErr) return preVersionErr;
 
   if (validated.isVersionQuery) {
     return runProcess(gitBin, ["--version"], {
@@ -697,10 +934,9 @@ export async function defaultGitExec(
     opts.binary,
   );
   if (!versionCheck.ok) return versionCheck.result;
-  if (opts.signal?.aborted) return failResult(1, "Operation aborted.", "ABORT_ERR");
-  if (deadline !== undefined && Date.now() >= deadline) {
-    return failResult(1, `Process timed out after ${totalTimeoutMs}ms.`, "ETIMEDOUT");
-  }
+
+  const postVersionErr = checkAbortOrTimeout();
+  if (postVersionErr) return postVersionErr;
 
   const fullArgs = [...SAFE_GIT_FLAGS, ...validated.globalPrefix, ...validated.subcommandAndArgs];
   if (!validated.needsIndexIsolation) {
@@ -723,15 +959,37 @@ export async function defaultGitExec(
     return failResult(1, e.message, e.code ?? "EIO");
   }
 
-  let res = await runProcess(gitBin, fullArgs, {
+  let res: ExecResult;
+  const snap = await prepareIsolatedIndexSnapshot(
+    gitBin,
     cwd,
-    stdin: opts.stdin,
-    binary: opts.binary,
-    timeoutMs: remainingTimeoutMs(),
-    maxBuffer: opts.maxBuffer,
-    signal: opts.signal,
-    env: mergeEnv(env, { GIT_INDEX_FILE: join(idxTmpDir, "index") }),
-  });
+    validated.globalPrefix,
+    env,
+    idxTmpDir,
+    opts,
+    deadline,
+    totalTimeoutMs,
+    remainingTimeoutMs,
+    failResult,
+  );
+  if (!snap.ok) {
+    res = snap.result;
+  } else {
+    const preExecErr = checkAbortOrTimeout();
+    if (preExecErr) {
+      res = preExecErr;
+    } else {
+      res = await runProcess(gitBin, fullArgs, {
+        cwd,
+        stdin: opts.stdin,
+        binary: opts.binary,
+        timeoutMs: remainingTimeoutMs(),
+        maxBuffer: opts.maxBuffer,
+        signal: opts.signal,
+        env: mergeEnv(env, { GIT_INDEX_FILE: snap.indexPath }),
+      });
+    }
+  }
 
   try {
     await rm(idxTmpDir, { recursive: true, force: true });
