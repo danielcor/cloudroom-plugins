@@ -916,8 +916,10 @@ describe("git-exec and process runner", () => {
       }
     `;
 
+    const killSpy = vi.spyOn(process, "kill");
     try {
-      // S21: abort & timeout kill parent, open-stdio grandchild, and closed-stdio grandchild.
+      // S21 & S1: abort & timeout kill parent, open-stdio grandchild, and closed-stdio grandchild with at most one SIGKILL to -pid.
+      const abortKillIdx = killSpy.mock.calls.length;
       const abortPids = await (async () => {
         const ac = new AbortController();
         const pf = join(dir, "ap.pid");
@@ -936,7 +938,11 @@ describe("git-exec and process runner", () => {
         return pids;
       })();
       for (const pid of abortPids) expect(isPidAlive(pid)).toBe(false);
+      const abortGroupCalls = killSpy.mock.calls.slice(abortKillIdx).filter((call) => call[0] === -abortPids[0]);
+      expect(abortGroupCalls.filter((call) => call[1] === "SIGTERM")).toHaveLength(1);
+      expect(abortGroupCalls.filter((call) => call[1] === "SIGKILL")).toHaveLength(1);
 
+      const toKillIdx = killSpy.mock.calls.length;
       const toPids = await (async () => {
         const pf = join(dir, "tp.pid");
         const of = join(dir, "to.pid");
@@ -952,9 +958,14 @@ describe("git-exec and process runner", () => {
         return pids;
       })();
       for (const pid of toPids) expect(isPidAlive(pid)).toBe(false);
+      const toGroupCalls = killSpy.mock.calls.slice(toKillIdx).filter((call) => call[0] === -toPids[0]);
+      expect(toGroupCalls.filter((call) => call[1] === "SIGTERM")).toHaveLength(1);
+      expect(toGroupCalls.filter((call) => call[1] === "SIGKILL")).toHaveLength(1);
 
-      // S8: detached pipe-holding grandchild must not hang abort, timeout, or maxBuffer settlement.
+      // S8 & S1: detached pipe-holding grandchild must not hang abort, timeout, or maxBuffer settlement,
+      // and each mode sends at most one SIGKILL to -ppid.
       for (const mode of ["abort", "timeout", "flood"] as const) {
+        const detKillIdx = killSpy.mock.calls.length;
         const pf = join(dir, `det-${mode}-p.pid`);
         const df = join(dir, `det-${mode}-d.pid`);
         const ac = new AbortController();
@@ -978,6 +989,10 @@ describe("git-exec and process runner", () => {
               ? "ETIMEDOUT"
               : "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
         );
+        expect(isPidAlive(ppid)).toBe(false);
+        const detGroupCalls = killSpy.mock.calls.slice(detKillIdx).filter((call) => call[0] === -ppid);
+        expect(detGroupCalls.filter((call) => call[1] === "SIGTERM")).toHaveLength(mode === "flood" ? 0 : 1);
+        expect(detGroupCalls.filter((call) => call[1] === "SIGKILL")).toHaveLength(1);
       }
 
       // S3: Normal leader exit (code 0) still tears down lingering same-group descendants with closed stdio.
@@ -1099,150 +1114,73 @@ describe("git-exec and process runner", () => {
         await new Promise((r) => setTimeout(r, 15));
       };
 
-      const killSpy = vi.spyOn(process, "kill");
-      try {
-        const hungP = runProcess(process.execPath, ["-e", detachedHungScript], {
-          cwd: dir,
-          timeoutMs: 250,
-        });
-        const hungLeaderPid = await waitForPidFile(detachedHungLeaderFile);
-        pidsToCleanup.push(await waitForPidFile(detachedHungFile));
-        await waitLeaderExited(hungLeaderPid);
-        const spyIndexAfterExit = killSpy.mock.calls.length;
-        const hungRes = await hungP;
-        expect(hungRes.code).not.toBe(0);
-        expect(hungRes.errorCode).toBe("ETIMEDOUT");
-        const postExitKillsTimeout = killSpy.mock.calls
-          .slice(spyIndexAfterExit)
-          .filter((call) => call[0] === -hungLeaderPid);
-        expect(postExitKillsTimeout).toEqual([]);
+      const hungP = runProcess(process.execPath, ["-e", detachedHungScript], {
+        cwd: dir,
+        timeoutMs: 250,
+      });
+      const hungLeaderPid = await waitForPidFile(detachedHungLeaderFile);
+      pidsToCleanup.push(await waitForPidFile(detachedHungFile));
+      await waitLeaderExited(hungLeaderPid);
+      const spyIndexAfterExit = killSpy.mock.calls.length;
+      const hungRes = await hungP;
+      expect(hungRes.code).not.toBe(0);
+      expect(hungRes.errorCode).toBe("ETIMEDOUT");
+      const postExitKillsTimeout = killSpy.mock.calls
+        .slice(spyIndexAfterExit)
+        .filter((call) => call[0] === -hungLeaderPid);
+      expect(postExitKillsTimeout).toEqual([]);
 
-        const detAbortFile = join(dir, "detached-abort.pid");
-        const detAbortLeaderFile = join(dir, "detached-abort-leader.pid");
-        const detAbortScript = `
-          const { spawn } = require("node:child_process");
-          const fs = require("node:fs");
-          fs.writeFileSync(${JSON.stringify(detAbortLeaderFile)}, String(process.pid));
-          const child = spawn(
-            process.execPath,
-            [
-              "-e",
-              'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(0), 2000);',
-              ${JSON.stringify(detAbortFile)},
-            ],
-            { detached: true, stdio: ["ignore", 1, 2] },
-          );
-          child.unref();
-          const timer = setInterval(() => {
-            if (fs.existsSync(${JSON.stringify(detAbortFile)})) {
-              clearInterval(timer);
-              process.exit(0);
-            }
-          }, 5);
-        `;
-        const detAc = new AbortController();
-        const detAbortP = runProcess(process.execPath, ["-e", detAbortScript], {
-          cwd: dir,
-          signal: detAc.signal,
-          timeoutMs: 10_000,
-        });
-        const detLeaderPid = await waitForPidFile(detAbortLeaderFile);
-        pidsToCleanup.push(await waitForPidFile(detAbortFile));
-        await waitLeaderExited(detLeaderPid);
-        const spyIndexBeforeAbort = killSpy.mock.calls.length;
-        detAc.abort();
-        const detAbortRes = await detAbortP;
-        expect(detAbortRes.code).not.toBe(0);
-        expect(detAbortRes.errorCode).toBe("ABORT_ERR");
-        const postExitKillsAbort = killSpy.mock.calls
-          .slice(spyIndexBeforeAbort)
-          .filter((call) => call[0] === -detLeaderPid);
-        expect(postExitKillsAbort).toEqual([]);
-
-        // S1: Abort escalation, timeout escalation, and maxBuffer+detached cleanup each send at most one SIGKILL to -pid.
-        const s1AbortIdx = killSpy.mock.calls.length;
-        const s1Ac = new AbortController();
-        const s1Apf = join(dir, "s1-ap.pid");
-        const s1Aof = join(dir, "s1-ao.pid");
-        const s1Acf = join(dir, "s1-ac.pid");
-        const s1AbortP = runProcess(process.execPath, ["-e", spawnTreeScript, s1Apf, s1Aof, s1Acf], {
-          cwd: dir,
-          signal: s1Ac.signal,
-          timeoutMs: 10_000,
-        });
-        const [s1AbortLeaderPid, s1AbortOpenPid, s1AbortClosedPid] = await Promise.all([
-          waitForPidFile(s1Apf),
-          waitForPidFile(s1Aof),
-          waitForPidFile(s1Acf),
-        ]);
-        pidsToCleanup.push(s1AbortLeaderPid, s1AbortOpenPid, s1AbortClosedPid);
-        s1Ac.abort();
-        const s1AbortRes = await s1AbortP;
-        expect(s1AbortRes.errorCode).toBe("ABORT_ERR");
-        expect(isPidAlive(s1AbortLeaderPid)).toBe(false);
-        expect(isPidAlive(s1AbortOpenPid)).toBe(false);
-        expect(isPidAlive(s1AbortClosedPid)).toBe(false);
-        const s1AbortGroupCalls = killSpy.mock.calls
-          .slice(s1AbortIdx)
-          .filter((call) => call[0] === -s1AbortLeaderPid);
-        expect(s1AbortGroupCalls.filter((call) => call[1] === "SIGTERM")).toHaveLength(1);
-        expect(s1AbortGroupCalls.filter((call) => call[1] === "SIGKILL")).toHaveLength(1);
-
-        const s1ToIdx = killSpy.mock.calls.length;
-        const s1Tpf = join(dir, "s1-tp.pid");
-        const s1Tof = join(dir, "s1-to.pid");
-        const s1Tcf = join(dir, "s1-tc.pid");
-        const s1ToP = runProcess(process.execPath, ["-e", spawnTreeScript, s1Tpf, s1Tof, s1Tcf], {
-          cwd: dir,
-          timeoutMs: 350,
-        });
-        const [s1ToLeaderPid, s1ToOpenPid, s1ToClosedPid] = await Promise.all([
-          waitForPidFile(s1Tpf),
-          waitForPidFile(s1Tof),
-          waitForPidFile(s1Tcf),
-        ]);
-        pidsToCleanup.push(s1ToLeaderPid, s1ToOpenPid, s1ToClosedPid);
-        const s1ToRes = await s1ToP;
-        expect(s1ToRes.errorCode).toBe("ETIMEDOUT");
-        expect(isPidAlive(s1ToLeaderPid)).toBe(false);
-        expect(isPidAlive(s1ToOpenPid)).toBe(false);
-        expect(isPidAlive(s1ToClosedPid)).toBe(false);
-        const s1ToGroupCalls = killSpy.mock.calls
-          .slice(s1ToIdx)
-          .filter((call) => call[0] === -s1ToLeaderPid);
-        expect(s1ToGroupCalls.filter((call) => call[1] === "SIGTERM")).toHaveLength(1);
-        expect(s1ToGroupCalls.filter((call) => call[1] === "SIGKILL")).toHaveLength(1);
-
-        const s1FloodIdx = killSpy.mock.calls.length;
-        const s1Fpf = join(dir, "s1-flood-p.pid");
-        const s1Fdf = join(dir, "s1-flood-d.pid");
-        const s1FloodP = runProcess(process.execPath, ["-e", detachedHolderScript, s1Fpf, s1Fdf, "flood"], {
-          cwd: dir,
-          maxBuffer: 64 * 1024,
-          timeoutMs: 0,
-        });
-        const [s1FloodLeaderPid, s1FloodDetachedPid] = await Promise.all([
-          waitForPidFile(s1Fpf),
-          waitForPidFile(s1Fdf),
-        ]);
-        pidsToCleanup.push(s1FloodLeaderPid, s1FloodDetachedPid);
-        const s1FloodRes = await s1FloodP;
-        expect(s1FloodRes.errorCode).toBe("ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
-        expect(isPidAlive(s1FloodLeaderPid)).toBe(false);
-        const s1FloodGroupCalls = killSpy.mock.calls
-          .slice(s1FloodIdx)
-          .filter((call) => call[0] === -s1FloodLeaderPid);
-        expect(s1FloodGroupCalls.filter((call) => call[1] === "SIGTERM")).toHaveLength(0);
-        expect(s1FloodGroupCalls.filter((call) => call[1] === "SIGKILL")).toHaveLength(1);
-      } finally {
-        killSpy.mockRestore();
-      }
+      const detAbortFile = join(dir, "detached-abort.pid");
+      const detAbortLeaderFile = join(dir, "detached-abort-leader.pid");
+      const detAbortScript = `
+        const { spawn } = require("node:child_process");
+        const fs = require("node:fs");
+        fs.writeFileSync(${JSON.stringify(detAbortLeaderFile)}, String(process.pid));
+        const child = spawn(
+          process.execPath,
+          [
+            "-e",
+            'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(0), 2000);',
+            ${JSON.stringify(detAbortFile)},
+          ],
+          { detached: true, stdio: ["ignore", 1, 2] },
+        );
+        child.unref();
+        const timer = setInterval(() => {
+          if (fs.existsSync(${JSON.stringify(detAbortFile)})) {
+            clearInterval(timer);
+            process.exit(0);
+          }
+        }, 5);
+      `;
+      const detAc = new AbortController();
+      const detAbortP = runProcess(process.execPath, ["-e", detAbortScript], {
+        cwd: dir,
+        signal: detAc.signal,
+        timeoutMs: 10_000,
+      });
+      const detLeaderPid = await waitForPidFile(detAbortLeaderFile);
+      pidsToCleanup.push(await waitForPidFile(detAbortFile));
+      await waitLeaderExited(detLeaderPid);
+      const spyIndexBeforeAbort = killSpy.mock.calls.length;
+      detAc.abort();
+      const detAbortRes = await detAbortP;
+      expect(detAbortRes.code).not.toBe(0);
+      expect(detAbortRes.errorCode).toBe("ABORT_ERR");
+      const postExitKillsAbort = killSpy.mock.calls
+        .slice(spyIndexBeforeAbort)
+        .filter((call) => call[0] === -detLeaderPid);
+      expect(postExitKillsAbort).toEqual([]);
     } finally {
-      for (const pid of pidsToCleanup) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          // Already exited.
+      try {
+        killSpy.mockRestore();
+      } finally {
+        for (const pid of pidsToCleanup) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // Already exited.
+          }
         }
       }
     }
