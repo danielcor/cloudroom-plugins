@@ -65,11 +65,30 @@ function stripRepoLocalGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
+function disableGitTracing(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined || k.startsWith("GIT_TRACE")) continue;
+    out[k] = v;
+  }
+  // Explicitly disable Trace2 targets so global/system/repo trace2.*Target config cannot write files.
+  out.GIT_TRACE2 = "0";
+  out.GIT_TRACE2_EVENT = "0";
+  out.GIT_TRACE2_PERF = "0";
+  return out;
+}
+
 /** Clear repo-pointing and config-overriding variables for uncached `git --version` probes. */
 function cleanVersionProbeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(env)) {
-    if (v === undefined || k === "GIT_ATTR_SOURCE" || k.startsWith("GIT_CONFIG") || NON_REPO_CLEAR_KEYS.has(k)) {
+    if (
+      v === undefined ||
+      k === "GIT_ATTR_SOURCE" ||
+      k.startsWith("GIT_CONFIG") ||
+      k.startsWith("GIT_TRACE") ||
+      NON_REPO_CLEAR_KEYS.has(k)
+    ) {
       continue;
     }
     out[k] = v;
@@ -79,6 +98,9 @@ function cleanVersionProbeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   out.GIT_CONFIG_SYSTEM = "/dev/null";
   out.GIT_CONFIG_COUNT = "0";
   out.GIT_ATTR_NOSYSTEM = "1";
+  out.GIT_TRACE2 = "0";
+  out.GIT_TRACE2_EVENT = "0";
+  out.GIT_TRACE2_PERF = "0";
   out.GIT_PAGER = "cat";
   out.GIT_TERMINAL_PROMPT = "0";
   out.GIT_TEST_COMMIT_GRAPH = "0";
@@ -153,6 +175,9 @@ export function runProcess(
     let stdinFinished = opts.stdin === undefined || opts.stdin.length === 0;
     let settled = false;
     let childExited = false;
+    let finalGroupSignalSent = false;
+    let groupRetired = false;
+    let groupTeardownPromise: Promise<void> | undefined;
     let stopReason: StopReason | undefined;
     let timeoutTimer: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
@@ -175,6 +200,7 @@ export function runProcess(
     };
 
     const signalTree = (sig: NodeJS.Signals) => {
+      if (groupRetired || finalGroupSignalSent) return;
       const pid = child?.pid;
       if (pid === undefined) return;
       if (useProcessGroup) {
@@ -196,7 +222,7 @@ export function runProcess(
 
     const isGroupAlive = (): boolean => {
       const pid = child?.pid;
-      if (!useProcessGroup || pid === undefined) return false;
+      if (groupRetired || !useProcessGroup || pid === undefined) return false;
       try {
         process.kill(-pid, 0);
         return true;
@@ -205,17 +231,41 @@ export function runProcess(
       }
     };
 
-    const waitForGroupExit = async (maxWaitMs = 200): Promise<void> => {
-      if (!useProcessGroup || child?.pid === undefined || !isGroupAlive()) return;
-      // Escalate immediately to tear down any remaining same-group descendant after leader exit or stdio close.
-      signalTree("SIGKILL");
-      const deadline = Date.now() + maxWaitMs;
-      while (isGroupAlive() && Date.now() < deadline) {
-        await new Promise<void>((r) => {
-          // Keep timer referenced so standalone callers do not exit before group cleanup finishes.
-          setTimeout(r, 5);
-        });
+    const retireGroup = (maxWaitMs = 200): Promise<void> => {
+      if (groupTeardownPromise) return groupTeardownPromise;
+      const pid = child?.pid;
+      if (groupRetired || !useProcessGroup || pid === undefined || !isGroupAlive()) {
+        finalGroupSignalSent = true;
+        groupRetired = true;
+        groupTeardownPromise = Promise.resolve();
+        return groupTeardownPromise;
       }
+      // Send the final group signal once while the PGID still has a live member (preventing PGID reuse),
+      // then block further group signals and wait for the group to drain.
+      let signaled = false;
+      try {
+        process.kill(-pid, "SIGKILL");
+        signaled = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ESRCH") signaled = true;
+      }
+      finalGroupSignalSent = true;
+      if (!signaled) {
+        groupRetired = true;
+        groupTeardownPromise = Promise.resolve();
+        return groupTeardownPromise;
+      }
+      groupTeardownPromise = (async () => {
+        const deadline = Date.now() + maxWaitMs;
+        while (isGroupAlive() && Date.now() < deadline) {
+          await new Promise<void>((r) => {
+            // Keep timer referenced so standalone callers do not exit before group cleanup finishes.
+            setTimeout(r, 5);
+          });
+        }
+        groupRetired = true;
+      })();
+      return groupTeardownPromise;
     };
 
     const settle = (code: number | null, signal: NodeJS.Signals | null) => {
@@ -228,7 +278,7 @@ export function runProcess(
       }
 
       void (async () => {
-        await waitForGroupExit(200);
+        await retireGroup(200);
 
         const stdoutBuf = Buffer.concat(stdoutChunks);
         const stderrText = Buffer.concat(stderrChunks).toString("utf8");
@@ -290,6 +340,14 @@ export function runProcess(
     const startTermination = (reason: StopReason, graceMs: number) => {
       if (settled || stopReason !== undefined) return;
       stopReason = reason;
+      if (childExited || finalGroupSignalSent || groupRetired) {
+        // Leader has already exited and its PGID has been retired; close inherited pipes without signaling PGID again.
+        child?.stdout?.destroy();
+        child?.stderr?.destroy();
+        child?.stdin?.destroy();
+        settle(null, null);
+        return;
+      }
       if (reason === "maxBuffer" || graceMs <= 0) {
         signalTree("SIGKILL");
         scheduleForcedCleanup();
@@ -355,11 +413,9 @@ export function runProcess(
 
     child.once("exit", () => {
       childExited = true;
-      if (settled) return;
-      // Immediately tear down lingering same-group descendants so inherited stdout/stderr pipes close.
-      if (isGroupAlive()) {
-        signalTree("SIGKILL");
-      }
+      // Send the final group signal (if any same-group descendant remains) and retire this PGID so later
+      // timeout/abort cleanup for a detached pipe-holder can never signal a reused PGID.
+      void retireGroup(200);
     });
 
     child.once("error", (err: NodeJS.ErrnoException) => {
@@ -556,8 +612,8 @@ function validateAndHardenGitArgs(args: readonly string[]): ValidatedGitArgs {
     }
     if (rule.valueFlags?.has(arg)) {
       const val = args[i + 1];
-      if (val === undefined || val === "") {
-        return { ok: false, disallowed: val === undefined ? arg : `${arg} ${val}` };
+      if (val === undefined) {
+        return { ok: false, disallowed: arg };
       }
       seenFlags.push(arg);
       subArgs.push(arg, val);
@@ -625,13 +681,15 @@ export async function defaultGitExec(
   const initialErr = checkAbortOrTimeout();
   if (initialErr) return initialErr;
 
-  const env = mergeEnv(stripRepoLocalGitEnv(process.env), {
-    ...opts.env,
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_TEST_COMMIT_GRAPH: "0",
-    GIT_NO_LAZY_FETCH: "1",
-    GIT_PAGER: "cat",
-  });
+  const env = disableGitTracing(
+    mergeEnv(stripRepoLocalGitEnv(process.env), {
+      ...opts.env,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_TEST_COMMIT_GRAPH: "0",
+      GIT_NO_LAZY_FETCH: "1",
+      GIT_PAGER: "cat",
+    }),
+  );
 
   if (validated.isVersionQuery) {
     return runProcess("git", ["--version"], {

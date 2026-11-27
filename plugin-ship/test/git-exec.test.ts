@@ -6,7 +6,7 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import ts from "typescript";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   defaultGitExec,
   isSupportedGitVersion,
@@ -156,7 +156,9 @@ describe("git-exec and process runner", () => {
       ["ls-files", "--modified"],
       ["config", "user.name", "evil"],
       ["config", "--edit"],
+      ["config", "--get", "--default"],
       ["config", "--list", "extra-pos"],
+      ["rev-parse", "--git-path"],
       ["for-each-ref", "-z"],
       ["for-each-ref", "--format=%(signature)"],
       ["for-each-ref", "--sort=signature"],
@@ -178,6 +180,15 @@ describe("git-exec and process runner", () => {
 
     const literalDt = await defaultGitExec(repo, ["diff-tree", "-r", first, second, "--", "--ext-diff"], { env });
     expect(literalDt.code).toBe(0);
+
+    // S3: Explicit empty value operands are accepted cleanly by config --default and rev-parse --git-path.
+    const emptyDefaultCfg = await defaultGitExec(repo, ["config", "--get", "--default", "", "ship.missingKey"], { env });
+    expect(emptyDefaultCfg.code).toBe(0);
+    expect(emptyDefaultCfg.stdout).toBe("\n");
+
+    const emptyGitPath = await defaultGitExec(repo, ["rev-parse", "--path-format=absolute", "--git-path", ""], { env });
+    expect(emptyGitPath.code).toBe(0);
+    expect(emptyGitPath.stdout.trim()).toBe(join(repo, ".git"));
   });
 
   it("handles EPIPE, AbortSignal, ENOENT, and closes stdin promptly when omitted", async () => {
@@ -742,20 +753,21 @@ describe("git-exec and process runner", () => {
     await writeFile(badTmpFile, "file\n", "utf8");
 
     const savedTmpdir = process.env.TMPDIR;
+    const badTmpEnv = { ...env, TMPDIR: badTmpFile };
     process.env.TMPDIR = badTmpFile;
     try {
-      const diffOk = await defaultGitExec(repo, ["diff-tree", "-r", first, second], { env });
+      const diffOk = await defaultGitExec(repo, ["diff-tree", "-r", first, second], { env: badTmpEnv });
       expect(diffOk.code).toBe(0);
 
       const metadataOk = await defaultGitExec(repo, ["rev-parse", "--path-format=absolute", "--git-path", "index"], {
-        env,
+        env: badTmpEnv,
       });
       expect(metadataOk.code).toBe(0);
 
-      const configGlobalOk = await defaultGitExec(repo, ["config", "--global", "--list"], { env });
+      const configGlobalOk = await defaultGitExec(repo, ["config", "--global", "--list"], { env: badTmpEnv });
       expect(configGlobalOk.code).toBe(0);
 
-      const configListOk = await defaultGitExec(repo, ["config", "--list"], { env });
+      const configListOk = await defaultGitExec(repo, ["config", "--list"], { env: badTmpEnv });
       expect(configListOk.code).toBe(0);
     } finally {
       if (savedTmpdir === undefined) delete process.env.TMPDIR;
@@ -787,6 +799,67 @@ describe("git-exec and process runner", () => {
     expect(list.stdout).not.toContain("command\tcore.fsmonitor=false");
     expect(list.stdout).not.toContain("command\tdiff.external=");
     expect(existsSync(extSentinel)).toBe(false);
+  });
+
+  it("disables file-backed Git trace and Trace2 destinations across env and global config (S2)", async () => {
+    const repo = await initEmptyRepo();
+    const traceDir = await mkdtemp(join(tmpdir(), "ship-ge-trace-"));
+    dirs.push(traceDir);
+    const env = isolatedGitEnv(repo);
+
+    const cfgNormal = join(traceDir, "cfg-normal.log");
+    const cfgEvent = join(traceDir, "cfg-event.log");
+    const cfgPerf = join(traceDir, "cfg-perf.log");
+    const envTrace = join(traceDir, "env-trace.log");
+    const envSetup = join(traceDir, "env-setup.log");
+    const envT2 = join(traceDir, "env-t2.log");
+
+    await execFileAsync("git", ["config", "--global", "trace2.normalTarget", cfgNormal], { cwd: repo, env });
+    await execFileAsync("git", ["config", "--global", "trace2.eventTarget", cfgEvent], { cwd: repo, env });
+    await execFileAsync("git", ["config", "--global", "trace2.perfTarget", cfgPerf], { cwd: repo, env });
+
+    // Positive controls: unhardened Git writes both env trace and global trace2.*Target files.
+    await execFileAsync("git", ["rev-parse", "--git-dir"], {
+      cwd: repo,
+      env: { ...env, GIT_TRACE: envTrace, GIT_TRACE_SETUP: envSetup, GIT_TRACE2: envT2 },
+    });
+    expect(existsSync(envTrace)).toBe(true);
+    expect(existsSync(envT2)).toBe(true);
+    expect(existsSync(cfgNormal)).toBe(true);
+    expect(existsSync(cfgEvent)).toBe(true);
+    expect(existsSync(cfgPerf)).toBe(true);
+    for (const f of [cfgNormal, cfgEvent, cfgPerf, envTrace, envSetup, envT2]) {
+      await rm(f, { force: true });
+    }
+
+    const savedTrace = process.env.GIT_TRACE;
+    const savedT2 = process.env.GIT_TRACE2;
+    process.env.GIT_TRACE = envTrace;
+    process.env.GIT_TRACE2 = envT2;
+    try {
+      const traceEnv = {
+        ...env,
+        GIT_TRACE: envTrace,
+        GIT_TRACE_SETUP: envSetup,
+        GIT_TRACE2: envT2,
+        GIT_TRACE2_EVENT: cfgEvent,
+        GIT_TRACE2_PERF: cfgPerf,
+      };
+      expect((await defaultGitExec(repo, ["--version"], { env: traceEnv })).code).toBe(0);
+      expect((await defaultGitExec(repo, ["rev-parse", "--git-dir"], { env: traceEnv })).code).toBe(0);
+      const cfgGet = await defaultGitExec(repo, ["config", "--get", "trace2.normalTarget"], { env: traceEnv });
+      expect(cfgGet.code).toBe(0);
+      expect(cfgGet.stdout.trim()).toBe(cfgNormal);
+
+      for (const f of [cfgNormal, cfgEvent, cfgPerf, envTrace, envSetup, envT2]) {
+        expect(existsSync(f)).toBe(false);
+      }
+    } finally {
+      if (savedTrace === undefined) delete process.env.GIT_TRACE;
+      else process.env.GIT_TRACE = savedTrace;
+      if (savedT2 === undefined) delete process.env.GIT_TRACE2;
+      else process.env.GIT_TRACE2 = savedT2;
+    }
   });
 
   it("forcibly kills SIGTERM-ignoring children on maxBuffer overflow even with timeout disabled (S20)", async () => {
@@ -996,9 +1069,11 @@ describe("git-exec and process runner", () => {
       expect(delayedRes.stdout).toContain("detached-final\n");
 
       const detachedHungFile = join(dir, "detached-hung.pid");
+      const detachedHungLeaderFile = join(dir, "detached-hung-leader.pid");
       const detachedHungScript = `
         const { spawn } = require("node:child_process");
         const fs = require("node:fs");
+        fs.writeFileSync(${JSON.stringify(detachedHungLeaderFile)}, String(process.pid));
         const child = spawn(
           process.execPath,
           [
@@ -1016,13 +1091,76 @@ describe("git-exec and process runner", () => {
           }
         }, 5);
       `;
-      const hungRes = await runProcess(process.execPath, ["-e", detachedHungScript], {
-        cwd: dir,
-        timeoutMs: 120,
-      });
-      pidsToCleanup.push(Number.parseInt((await readFile(detachedHungFile, "utf8")).trim(), 10));
-      expect(hungRes.code).not.toBe(0);
-      expect(hungRes.errorCode).toBe("ETIMEDOUT");
+      const waitLeaderExited = async (leaderPid: number) => {
+        const deadline = Date.now() + 500;
+        while (isPidAlive(leaderPid) && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        await new Promise((r) => setTimeout(r, 15));
+      };
+
+      const killSpy = vi.spyOn(process, "kill");
+      try {
+        const hungP = runProcess(process.execPath, ["-e", detachedHungScript], {
+          cwd: dir,
+          timeoutMs: 250,
+        });
+        const hungLeaderPid = await waitForPidFile(detachedHungLeaderFile);
+        pidsToCleanup.push(await waitForPidFile(detachedHungFile));
+        await waitLeaderExited(hungLeaderPid);
+        const spyIndexAfterExit = killSpy.mock.calls.length;
+        const hungRes = await hungP;
+        expect(hungRes.code).not.toBe(0);
+        expect(hungRes.errorCode).toBe("ETIMEDOUT");
+        const postExitKillsTimeout = killSpy.mock.calls
+          .slice(spyIndexAfterExit)
+          .filter((call) => call[0] === -hungLeaderPid);
+        expect(postExitKillsTimeout).toEqual([]);
+
+        const detAbortFile = join(dir, "detached-abort.pid");
+        const detAbortLeaderFile = join(dir, "detached-abort-leader.pid");
+        const detAbortScript = `
+          const { spawn } = require("node:child_process");
+          const fs = require("node:fs");
+          fs.writeFileSync(${JSON.stringify(detAbortLeaderFile)}, String(process.pid));
+          const child = spawn(
+            process.execPath,
+            [
+              "-e",
+              'require("node:fs").writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => process.exit(0), 2000);',
+              ${JSON.stringify(detAbortFile)},
+            ],
+            { detached: true, stdio: ["ignore", 1, 2] },
+          );
+          child.unref();
+          const timer = setInterval(() => {
+            if (fs.existsSync(${JSON.stringify(detAbortFile)})) {
+              clearInterval(timer);
+              process.exit(0);
+            }
+          }, 5);
+        `;
+        const detAc = new AbortController();
+        const detAbortP = runProcess(process.execPath, ["-e", detAbortScript], {
+          cwd: dir,
+          signal: detAc.signal,
+          timeoutMs: 10_000,
+        });
+        const detLeaderPid = await waitForPidFile(detAbortLeaderFile);
+        pidsToCleanup.push(await waitForPidFile(detAbortFile));
+        await waitLeaderExited(detLeaderPid);
+        const spyIndexBeforeAbort = killSpy.mock.calls.length;
+        detAc.abort();
+        const detAbortRes = await detAbortP;
+        expect(detAbortRes.code).not.toBe(0);
+        expect(detAbortRes.errorCode).toBe("ABORT_ERR");
+        const postExitKillsAbort = killSpy.mock.calls
+          .slice(spyIndexBeforeAbort)
+          .filter((call) => call[0] === -detLeaderPid);
+        expect(postExitKillsAbort).toEqual([]);
+      } finally {
+        killSpy.mockRestore();
+      }
     } finally {
       for (const pid of pidsToCleanup) {
         try {
